@@ -33,6 +33,7 @@ from portal.net import (
     MAX_CRAWL_DELAY_SECONDS,
     Fetcher,
     Response,
+    RobotsExempt,
 )
 from portal.urls import (
     authority_of,
@@ -265,7 +266,9 @@ class FetchStage:
             """
             authority = authority_of(to_url)
             if authority not in policies:
-                probe = self.fetcher.get(f"{origin_of(to_url)}/robots.txt")
+                probe = self.fetcher.get(
+                    f"{origin_of(to_url)}/robots.txt", hop_allowed=RobotsExempt
+                )
                 result.artifacts.append(
                     self._record(company_id, domain, "robots", probe)
                 )

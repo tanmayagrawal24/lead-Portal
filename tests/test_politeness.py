@@ -118,7 +118,9 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
         with FixtureServer(site) as server:
             fetcher = Fetcher(limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS))
             self.addCleanup(fetcher.close)
-            response = fetcher.get(f"{server.base}/produkt/alpha")
+            response = fetcher.get(
+                f"{server.base}/produkt/alpha", hop_allowed=net.RobotsExempt
+            )
 
         self.assertEqual(response.status, 200)
         self.assertEqual(response.url, f"{server.base}/de/produkt/alpha/")
@@ -180,7 +182,7 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
         with FixtureServer(site) as server:
             fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
             self.addCleanup(fetcher.close)
-            response = fetcher.get(f"{server.base}/hop0")
+            response = fetcher.get(f"{server.base}/hop0", hop_allowed=net.RobotsExempt)
 
         self.assertIsNone(response.body)
         assert response.error is not None
@@ -191,11 +193,11 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
             "the cap counts hops followed, not requests refused",
         )
 
-    def test_a_host_change_is_refused_when_the_caller_vouches_for_nothing(
-        self,
-    ) -> None:
-        """The transport's default. It cannot know who has read whose
-        robots.txt, so with no policy supplied the answer is no."""
+    def test_a_host_change_is_refused_under_robots_exempt(self) -> None:
+        """`RobotsExempt` is the robots.txt fetch's licence to run before any
+        rules exist. It is not a licence to leave the origin: the transport
+        cannot know who has read whose robots.txt, so an authority change is
+        still refused."""
         elsewhere = Site()
         elsewhere.add("/", "<html><body>somewhere else</body></html>")
         site = Site()
@@ -205,13 +207,25 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
             with FixtureServer(site) as server:
                 fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
                 self.addCleanup(fetcher.close)
-                response = fetcher.get(f"{server.base}/")
+                response = fetcher.get(f"{server.base}/", hop_allowed=net.RobotsExempt)
 
             self.assertEqual(
                 other.site.paths(), [], "the other host must never be contacted"
             )
         assert response.error is not None
         self.assertIn("redirect_refused", response.error)
+
+    def test_omitting_the_hop_policy_is_a_type_error(self) -> None:
+        """The hardening behind M1.12. This subsystem has twice shipped correct
+        enforcement that was never invoked, so the policy is a required
+        argument: forgetting it fails loudly at the call site instead of
+        quietly permitting a hop at runtime. Exempting a fetch has to be
+        written down as `RobotsExempt`, where a reviewer can see it.
+        """
+        fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+        self.addCleanup(fetcher.close)
+        with self.assertRaises(TypeError):
+            fetcher.get("http://127.0.0.1:1/")  # type: ignore[call-arg]
 
 
 class PolitenessTestCase(unittest.TestCase):
