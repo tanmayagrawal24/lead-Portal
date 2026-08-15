@@ -370,6 +370,93 @@ class TestCrossHostRedirects(FetchTestCase):
         )
 
 
+class TestSameHostRedirectsAreRobotsChecked(FetchTestCase):
+    """M1.12: robots permission does not survive a redirect.
+
+    Both shapes here are copied from `run 1` (see `docs/first-crawl-findings.md`
+    §1.1), where an *allowed* Impressum probe was redirected onto a *disallowed*
+    URL on the same host and fetched — two 200s on pages robots.txt forbids.
+    The host never changes, so the cross-host check these tests sit beside never
+    ran. The assertion that matters is made at the fixture server: the forbidden
+    path must never be requested at all.
+    """
+
+    def _shop_whose_impressum_probe_redirects(
+        self, *, disallow: str, target: str
+    ) -> tuple:
+        def build(base: str) -> Site:
+            site = shopfixtures.flat_shop(base, with_impressum=False)
+            site.add(
+                "/robots.txt",
+                f"User-agent: *\nDisallow: {disallow}\n",
+                content_type="text/plain",
+            )
+            site.add(
+                "/",
+                shopfixtures.homepage(
+                    footer_impressum=False,
+                    extra_links=f'<footer><a href="{target}">Impressum</a></footer>',
+                ),
+            )
+            # The probe path robots allows, bouncing to the one it does not.
+            site.add_redirect("/impressum", f"{base}{target}")
+            site.add(target, shopfixtures.IMPRESSUM_HTML)
+            return site
+
+        return build
+
+    def _assert_never_fetched(self, disallow: str, target: str) -> None:
+        server = self.serve(
+            self._shop_whose_impressum_probe_redirects(disallow=disallow, target=target)
+        )
+        result = self.run_fetch(server)
+
+        self.assertNotIn(
+            target,
+            server.site.paths(),
+            f"robots.txt disallows {disallow}; the redirect target {target} "
+            "must never be requested, however we arrived at it",
+        )
+        refused = [
+            row
+            for row in self.artifact_rows(result.company_id)
+            if row["error"] and "redirect_refused" in row["error"]
+        ]
+        self.assertTrue(refused, "a hop refused by robots must be recorded, not silent")
+        self.assertTrue(
+            any(target in (row["error"] or "") for row in refused),
+            f"the recorded refusal must name {target}: {[r['error'] for r in refused]}",
+        )
+
+    def test_a_hop_to_a_disallowed_path_on_the_same_host_is_refused(self) -> None:
+        """snocks.com: `Disallow: /policies/`, and `/impressum` 301s into it."""
+        self._assert_never_fetched("/policies/", "/policies/legal-notice")
+
+    def test_a_hop_differing_from_the_rule_only_in_case_is_refused(self) -> None:
+        """smoke2u.de: `Disallow: /Impressum` does not match the lowercase probe
+        — correctly, robots paths are case-sensitive — so the probe is genuinely
+        allowed and its target genuinely is not."""
+        self._assert_never_fetched("/Impressum", "/Impressum")
+
+    def test_an_allowed_same_host_hop_is_still_followed(self) -> None:
+        """The anti-vacuity case. If the new check refused same-host hops
+        wholesale the two tests above would pass for the wrong reason, and every
+        shop with a trailing-slash redirect would break."""
+        server = self.serve(
+            self._shop_whose_impressum_probe_redirects(
+                disallow="/nichts-hiervon/", target="/rechtliches"
+            )
+        )
+        result = self.run_fetch(server)
+
+        self.assertIn(
+            "/rechtliches",
+            server.site.paths(),
+            "a hop robots permits must still be followed",
+        )
+        self.assertEqual([], self.review_flags(result.company_id))
+
+
 class TestApexToWwwWithinTheSeededSite(FetchTestCase):
     """The redirect nearly every German shop has, end to end.
 
