@@ -16,7 +16,15 @@ from pathlib import Path
 
 from portal.net import Response
 
-KINDS = ("robots", "homepage", "sitemap", "impressum", "blog_index", "product_page")
+KINDS = (
+    "robots",
+    "homepage",
+    "sitemap",
+    "impressum",
+    "blog_index",
+    "blog_article",  # A6 — the index carries no dates and no Article markup
+    "product_page",
+)
 
 _UNSAFE = re.compile(r"[^a-z0-9._-]+")
 

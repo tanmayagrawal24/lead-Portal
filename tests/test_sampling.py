@@ -189,6 +189,88 @@ class TestSecondaryLocales(unittest.TestCase):
             self.assertFalse(sampling.is_secondary_locale(url), url)
 
 
+class TestBlogArticleSelection(unittest.TestCase):
+    """A6, and the one detail that decides whether it is correct at all."""
+
+    def test_the_index_path_is_the_anchor_not_the_blog_path(self) -> None:
+        """On Shopify the hierarchy is `/blogs/<handle>/<article>`, so a URL one
+        level under `/blogs` is *another index*. "Shallowest under the blog
+        path" selects `/blogs/karriere` on bio-fleischer-laden.de and hands a
+        listing page to an Article parser — M1.16's error in a new place."""
+        urls = [
+            "https://muster.de/blogs/karriere",  # another blog index
+            "https://muster.de/blogs/rezepte",  # the index we fetched
+            "https://muster.de/blogs/rezepte/bbq-schweinenacken",
+        ]
+        chosen, tier = sampling.choose_blog_article(
+            blog_sitemap_urls=urls,
+            sitemap_urls=[],
+            index_links=[],
+            index_path="/blogs/rezepte",
+            domain="muster.de",
+        )
+        self.assertEqual(chosen, "https://muster.de/blogs/rezepte/bbq-schweinenacken")
+        self.assertEqual(tier, "blog_sitemap")
+
+    def test_the_index_itself_is_never_the_sample(self) -> None:
+        chosen, _tier = sampling.choose_blog_article(
+            ["https://muster.de/blogs/rezepte", "https://muster.de/blogs/rezepte/"],
+            [],
+            [],
+            "/blogs/rezepte",
+            "muster.de",
+        )
+        self.assertIsNone(chosen)
+
+    def test_tiers_fall_through_in_order(self) -> None:
+        chosen, tier = sampling.choose_blog_article(
+            blog_sitemap_urls=[],
+            sitemap_urls=["https://muster.de/blogs/news/zweiter"],
+            index_links=["https://muster.de/blogs/news/erster"],
+            index_path="/blogs/news",
+            domain="muster.de",
+        )
+        self.assertEqual(
+            (chosen, tier),
+            ("https://muster.de/blogs/news/zweiter", "sitemap_under_index"),
+        )
+
+    def test_shallowest_wins_then_code_point(self) -> None:
+        chosen, _tier = sampling.choose_blog_article(
+            [
+                "https://muster.de/blogs/news/tag/x/tief",
+                "https://muster.de/blogs/news/zebra",
+                "https://muster.de/blogs/news/Mango",
+            ],
+            [],
+            [],
+            "/blogs/news",
+            "muster.de",
+        )
+        self.assertEqual(chosen, "https://muster.de/blogs/news/Mango")
+
+    def test_no_candidates_returns_none_so_nothing_is_written(self) -> None:
+        """A6.1: `content.blog_last_post` and `schema.article_present` then stay
+        unwritten. Not a zero, not today's date."""
+        chosen, tier = sampling.choose_blog_article(
+            [], [], [], "/blogs/news", "muster.de"
+        )
+        self.assertEqual((chosen, tier), (None, "none"))
+
+    def test_off_site_and_query_urls_are_rejected(self) -> None:
+        chosen, _tier = sampling.choose_blog_article(
+            [
+                "https://fremd.de/blogs/news/x",
+                "https://muster.de/blogs/news/x?page=2",
+            ],
+            [],
+            [],
+            "/blogs/news",
+            "muster.de",
+        )
+        self.assertIsNone(chosen)
+
+
 class TestOrdering(unittest.TestCase):
     def test_picks_the_code_point_minimum(self) -> None:
         candidates = [

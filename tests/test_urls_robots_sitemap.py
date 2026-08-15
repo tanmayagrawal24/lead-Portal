@@ -389,6 +389,70 @@ class TestShardSemantics(unittest.TestCase):
         )
 
 
+class TestShardClassificationByContent(unittest.TestCase):
+    """M1.27. `article` is a product in German commerce and a post in English
+    CMS usage, so the word is not asked to decide — the index is."""
+
+    ARTICLES = "https://muster.de/area/articles-0-sitemap.xml"
+    BLOGS = "https://muster.de/area/blogs-0-sitemap.xml"
+
+    def test_an_index_naming_both_says_articles_are_products(self) -> None:
+        """The smile-store.de shape: a shop listing `articles-*` and `blogs-*`
+        has told us which one holds its posts."""
+        kinds = sitemap.classify(
+            [
+                (self.ARTICLES, ["https://muster.de/stoebern/marke/produkt"]),
+                (self.BLOGS, ["https://muster.de/magazin/ein-beitrag"]),
+            ]
+        )
+        self.assertEqual(kinds[self.ARTICLES], "product")
+        self.assertEqual(kinds[self.BLOGS], "blog")
+
+    def test_a_lone_articles_shard_under_the_blog_path_is_content(self) -> None:
+        kinds = sitemap.classify(
+            [
+                (
+                    self.ARTICLES,
+                    ["https://muster.de/blog/erster", "https://muster.de/blog/zweiter"],
+                )
+            ],
+            blog_path="/blog",
+        )
+        self.assertEqual(kinds[self.ARTICLES], "blog")
+
+    def test_a_shard_republishing_the_blogs_urls_is_content(self) -> None:
+        """Strongest of the three, and it overrides the sibling reading: whatever
+        it is called, a shard holding the blog's own URLs is the blog."""
+        posts = ["https://muster.de/magazin/a", "https://muster.de/magazin/b"]
+        kinds = sitemap.classify([(self.ARTICLES, posts), (self.BLOGS, posts)])
+        self.assertEqual(kinds[self.ARTICLES], "blog")
+
+    def test_a_lone_articles_shard_elsewhere_is_catalogue(self) -> None:
+        """Nothing resolves it toward content, so it means what it meant on the
+        one shop observed serving it."""
+        kinds = sitemap.classify(
+            [(self.ARTICLES, ["https://muster.de/kosmetik/produkt"])], blog_path="/blog"
+        )
+        self.assertEqual(kinds[self.ARTICLES], "product")
+
+    def test_misreading_costs_a_count_and_never_invents_one(self) -> None:
+        """The failure direction, pinned. A product shard read as content leaves
+        no product sitemap, and §10.3's three-state rule then reports *not
+        measurable* — recoverable. The reverse writes a confident wrong count."""
+        kinds = sitemap.classify(
+            [(self.ARTICLES, ["https://muster.de/blog/a"])], blog_path="/blog"
+        )
+        self.assertNotEqual(kinds[self.ARTICLES], "product")
+
+    def test_an_unambiguous_name_is_taken_at_its_word(self) -> None:
+        products = "https://muster.de/sitemap_products_1.xml"
+        kinds = sitemap.classify(
+            [(products, ["https://muster.de/blogs/news/a"]), (self.BLOGS, [])],
+            blog_path="/blogs",
+        )
+        self.assertEqual(kinds[products], "product")
+
+
 class TestImageLocationsAreNotPages(unittest.TestCase):
     """`<image:loc>` is metadata about a page, not another page.
 

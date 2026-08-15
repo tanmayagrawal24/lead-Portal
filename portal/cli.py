@@ -10,7 +10,17 @@ import argparse
 import sys
 from pathlib import Path
 
-from portal import __version__, audit, config, db, extract, fetch, migrate, seeds
+from portal import (
+    __version__,
+    audit,
+    config,
+    db,
+    diff,
+    extract,
+    fetch,
+    migrate,
+    seeds,
+)
 from portal.net import MAX_CONCURRENT_HOSTS, Fetcher, HostRateLimiter, RequestLog
 
 
@@ -155,6 +165,58 @@ def cmd_extract_p1(path: Path) -> int:
     return 0
 
 
+def cmd_diff_signals(
+    path: Path,
+    from_run: int | None,
+    to_run: int | None,
+    stage: str,
+    list_runs: bool,
+) -> int:
+    """M1.28 — what changed, per domain, between two runs.
+
+    Costs nothing and touches no third party. The reason it is a command rather
+    than a habit is in `portal/diff.py`: three defects in two milestones passed
+    the suite and were caught only by comparing a run against the previous one,
+    two of them hidden behind a plausible-looking state.
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    conn = db.connect(path)
+    try:
+        candidates = diff.runs(conn, None if stage == "any" else stage)
+        if list_runs:
+            if not candidates:
+                print("no runs have written signals yet")
+                return 0
+            for row in candidates:
+                print(
+                    f"  run {row['id']:>4}  {row['stage']:<12} {row['started_at']}"
+                    f"  {row['signals']} signal(s)"
+                )
+            return 0
+
+        if from_run is None or to_run is None:
+            if len(candidates) < 2:
+                print(
+                    "need two runs that wrote signals to diff; "
+                    f"found {len(candidates)} for stage {stage!r}",
+                    file=sys.stderr,
+                )
+                return 2
+            # Newest first, so the *later* run is the head of the list.
+            to_run = to_run if to_run is not None else int(candidates[0]["id"])
+            from_run = from_run if from_run is not None else int(candidates[1]["id"])
+
+        changes = diff.compare(
+            diff.snapshot(conn, from_run), diff.snapshot(conn, to_run)
+        )
+        print(diff.report(changes, from_run, to_run))
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_audit_politeness(log_path: Path) -> int:
     """Report measured spacing and host concurrency. Non-zero if §5.2 was broken.
 
@@ -209,6 +271,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="deterministic §5.3 signals from artifacts already on disk; no requests",
     )
 
+    diff_parser = sub.add_parser(
+        "diff-signals",
+        help="per-domain signal diff between two runs; defaults to the last two",
+    )
+    diff_parser.add_argument(
+        "--from", dest="from_run", type=int, default=None, help="earlier run id"
+    )
+    diff_parser.add_argument(
+        "--to", dest="to_run", type=int, default=None, help="later run id"
+    )
+    diff_parser.add_argument(
+        "--stage",
+        default="extract-p1",
+        help="restrict the default run pair to one stage (default: extract-p1); "
+        "'any' compares across stages",
+    )
+    diff_parser.add_argument(
+        "--list", action="store_true", help="list runs that wrote signals and exit"
+    )
+
     audit_parser = sub.add_parser(
         "audit-politeness",
         help="measure §5.2 spacing and host concurrency from the request log",
@@ -260,6 +342,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "extract-p1":
         return cmd_extract_p1(path)
+
+    if args.command == "diff-signals":
+        return cmd_diff_signals(path, args.from_run, args.to_run, args.stage, args.list)
 
     if args.command == "audit-politeness":
         return cmd_audit_politeness(

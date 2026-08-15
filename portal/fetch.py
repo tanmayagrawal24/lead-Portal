@@ -60,6 +60,8 @@ class CompanyResult:
     review_flags: list[str] = field(default_factory=list)
     product_sample: str | None = None
     product_sample_tier: str = "none"
+    blog_sample: str | None = None
+    blog_sample_tier: str = "none"
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -206,8 +208,14 @@ class FetchStage:
         return moved_to
 
     def _write_sample_signal(
-        self, company_id: int, url: str, evidence_url: str
+        self, company_id: int, url: str, evidence_url: str, key: str
     ) -> None:
+        """A sample URL, recorded because it is a *fetch-time decision*.
+
+        Two keys use this: `catalog.product_sample_url` (A5) and
+        `content.blog_sample_url` (A6). Both are unscored and both exist so the
+        evidence behind a scored signal is auditable rather than inferred.
+        """
         with self._db_lock:
             self.conn.execute(
                 """
@@ -219,7 +227,7 @@ class FetchStage:
                 (
                     company_id,
                     self.run_id,
-                    "catalog.product_sample_url",
+                    key,
                     url,
                     "deterministic",
                     evidence_url,
@@ -426,15 +434,26 @@ class FetchStage:
             base = origin_of(homepage.url)
 
         # 3. sitemaps, expanding indexes.
-        page_urls, product_sitemap_urls = self._walk_sitemaps(site, base, policy, get)
+        shards = self._walk_sitemaps(site, base, policy, get)
+        page_urls = [url for _shard, pages in shards for url in pages]
 
         # 4. Impressum, two-step.
         self._discover_impressum(company_id, site, base, homepage_html, result, get)
 
-        # 5. blog index, if a blog path is found.
+        # 5. blog index, if a blog path is found — then one article under it (A6).
         blog_path = impressum_mod.find_blog_path(
             page_urls, homepage_html, homepage_url(base), site
         )
+        # M1.27: classification needs the blog path, so it happens here rather
+        # than during the walk.
+        kinds = sitemap.classify(shards, blog_path)
+        product_sitemap_urls = [
+            url for shard, pages in shards if kinds[shard] == "product" for url in pages
+        ]
+        blog_sitemap_urls = [
+            url for shard, pages in shards if kinds[shard] == "blog" for url in pages
+        ]
+
         if blog_path:
             # An observed URL, not a synthesised one (M1.15): the bare path
             # prefix 404'd on all seven shops that have a blog.
@@ -443,9 +462,12 @@ class FetchStage:
             )
             if observed is None:
                 result.notes.append(f"blog path {blog_path} found but no URL under it")
-            get(
+            index = get(
                 "blog_index",
                 observed or impressum_mod.blog_index_url(base, blog_path),
+            )
+            self._sample_blog_article(
+                company_id, site, index, blog_sitemap_urls, page_urls, result, get
             )
         else:
             result.notes.append("no blog path found")
@@ -466,12 +488,17 @@ class FetchStage:
 
     def _walk_sitemaps(
         self, domain: str, base: str, policy: robots_mod.RobotsPolicy, get
-    ) -> tuple[list[str], list[str]]:
-        """Fetch sitemaps breadth-first, returning `(all_page_urls, product_sitemap_page_urls)`."""
+    ) -> list[tuple[str, list[str]]]:
+        """Fetch sitemaps breadth-first, returning `(shard_url, page_urls)` pairs.
+
+        Shards are returned unclassified, in the order they were read. M1.27
+        decides what a shard holds from its **contents and its siblings**, and
+        neither is known until the whole index has been walked — classifying a
+        shard as it arrives is what forces the decision back onto its name.
+        """
         queue = _sitemap_candidates(domain, base, policy)
         seen: set[str] = set()
-        page_urls: list[str] = []
-        product_urls: list[str] = []
+        walked: list[tuple[str, list[str]]] = []
         shards = 0
 
         while queue and shards < sitemap.MAX_SHARDS:
@@ -486,11 +513,65 @@ class FetchStage:
                 continue
             children, pages = sitemap.parse(response.body or b"", url)
             queue.extend(child for child in children if child not in seen)
-            page_urls.extend(pages)
-            if sitemap.is_product_sitemap(url):
-                product_urls.extend(pages)
+            walked.append((url, pages))
 
-        return page_urls, product_urls
+        return walked
+
+    def _sample_blog_article(
+        self,
+        company_id: int,
+        domain: str,
+        index: Response | None,
+        blog_sitemap_urls: list[str],
+        page_urls: list[str],
+        result: CompanyResult,
+        get,
+    ) -> None:
+        """A6: one article under the fetched blog index.
+
+        §5.3 named the blog *index* as the evidence for `content.blog_last_post`
+        and `schema.article_present`, and on Shopify the index carries neither —
+        no `<time>`, no `datePublished`, no `Article` markup. All three live on
+        the article page. Measured: 5 of 7 detected blogs yielded no date and
+        `schema.article_present` was `0` on every index in the corpus. That is
+        not a parser weakness; the evidence was never on the page we fetched.
+
+        Anchored on the index's **final** URL, because that is the page whose
+        children are articles — see `sampling.is_blog_article_candidate` for why
+        the blog *path* is the wrong anchor.
+        """
+        if index is None or not index.ok:
+            result.notes.append("no blog index fetched; no article sampled (A6.1)")
+            return
+
+        index_path = path_of(index.url)
+        index_links = [
+            url for url, _text in impressum_mod.links(index.text(), index.url)
+        ]
+        chosen, tier = sampling.choose_blog_article(
+            blog_sitemap_urls, page_urls, index_links, index_path, domain
+        )
+        if chosen is None:
+            # A6.1: no candidate means no article, and downstream neither
+            # `content.blog_last_post` nor `schema.article_present` is written.
+            # Not a zero, not today's date.
+            result.notes.append(
+                f"no article candidates under {index_path}; blog date stays unwritten"
+            )
+            return
+
+        response = get("blog_article", chosen)
+        if response is None or not response.ok:
+            result.notes.append(
+                f"blog article fetch failed, no signal written: {chosen}"
+            )
+            return
+
+        result.blog_sample = chosen
+        result.blog_sample_tier = tier
+        self._write_sample_signal(
+            company_id, chosen, index.url, "content.blog_sample_url"
+        )
 
     def _discover_impressum(
         self,
@@ -571,7 +652,9 @@ class FetchStage:
             if response is not None and response.ok:
                 result.product_sample = previous
                 result.product_sample_tier = "reuse"
-                self._write_sample_signal(company_id, previous, previous)
+                self._write_sample_signal(
+                    company_id, previous, previous, "catalog.product_sample_url"
+                )
                 return
             # Discarded, per A5.1 — and excluded, or it is still the code-point
             # minimum and would simply be chosen again.
@@ -605,7 +688,12 @@ class FetchStage:
 
         result.product_sample = chosen
         result.product_sample_tier = tier
-        self._write_sample_signal(company_id, chosen, _sample_evidence(base, tier))
+        self._write_sample_signal(
+            company_id,
+            chosen,
+            _sample_evidence(base, tier),
+            "catalog.product_sample_url",
+        )
 
 
 def _sample_evidence(base: str, tier: str) -> str:

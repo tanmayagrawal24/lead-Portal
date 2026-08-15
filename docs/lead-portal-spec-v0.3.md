@@ -126,6 +126,16 @@ Remaining findings (A1–A4, B1, B3.2–B3.3, B5–B7, C1–C4) are still open a
 
 **The blog-shard reading is not a blog detector.** `is_blog_sitemap` exists to keep content out of the catalogue count, and it reaches **neither** of M1.14's two unreachable shapes: `zecplus.de` serves no blog shard at all (its blog is a different host) and `lampenflut.de` serves no sitemap at all. See §10.1.
 
+| # | Finding | Resolution | Sections |
+|---|---|---|---|
+| M1.27 | **M1.24's `articles` ambiguity was mitigated by word order, which is not evidence.** `article` means a saleable product in German commerce and a blog post in English CMS usage. Testing the content vocabulary first catches `blog-articles-…` and does nothing at all for a bare `articles` shard that holds posts — which would write a confident, wrong product count that nothing downstream has reason to doubt. | Disambiguate by **content**, not by name, using what a sitemap index already contains — in order of strength: (1) a shard whose URLs are also in a content shard is content, whatever it is called; (2) an index naming both `articles-*` and `blogs-*` has said which one holds its posts, so the other is catalogue (the `smile-store.de` shape); (3) a lone ambiguous shard whose URLs all sit under the detected blog path is content. Nothing resolving it toward content leaves it catalogue. **No vocabulary is added** — `artikel` and `produkte` stay recorded as unobserved. | §5.2, §5.3 |
+| M1.28 | **Three defects in two milestones passed the suite and were caught by reading a run against the previous one** — the gzip `str` round-trip, `<image:loc>` as a page, and blog-shard URLs dropped from blog *path* detection. Two of the three were **hidden behind a plausible state**: the gzip defect surfaced as a correct-looking "not measurable", and halved counts looked like counts. Reading line by line works at 13 domains and cannot work at 500, which is the target. | `portal diff-signals` — every key whose value changed, appeared or disappeared between two runs, grouped by domain. Reads only; costs nothing; touches no third party. Defaults to the last two runs of a stage, and refuses rather than guesses when there is only one. A run that wrote no signals is not a comparison point. | §5.3, §9 |
+| M1.29 | **§5.3 named the blog index as the evidence for `content.blog_last_post` and `schema.article_present`, and the index carries neither.** Shopify blog indexes emit no `<time>`, no `datePublished` and no `Article` markup — all three live on the post. Measured: 5 of 7 detected blogs yielded no date, and `schema.article_present` was `0` on **every** blog index in the corpus. Not a parser weakness: the evidence was never on the page that was fetched. | **A6** — sample one article under the fetched index, symmetric with A5, anchored on the **index path** rather than the blog path. New artifact kind `blog_article`, new unscored signal `content.blog_sample_url`, one extra request per company with a blog. A6.1 writes nothing where no article is obtained. | §5.2, §5.3 |
+
+**M1.27's failure direction is chosen, not incidental.** Reading a product shard as content costs its count, and §10.3's three-state rule then reports *not measurable* — visible, flagged, recoverable. Reading a content shard as products writes a number. The rule resolves toward the recoverable error every time, which is the same asymmetry argument that dropped `/p/` in M1.4.
+
+**M1.29's cheaper alternative was assessed and rejected as the primary instrument.** Blog sitemap shards carry a `<lastmod>` per article, on both platforms that serve one, and it is already on disk. It measures modification, not publication — and the corpus contains a measured instance of it lying by three years. The numbers are in §5.3; the consequence is that a freshness proxy erring only *fresh* suppresses `opp.blog_stale` on exactly the stale blogs the rule exists to find. It is admissible as a hint for a human, never as the value.
+
 ## Changelog v0.1 → v0.2 (retained for the record)
 
 1. **ScrapeGraphAI removed.** Both extractions use the Anthropic SDK directly with tool-use structured output. (§5.5)
@@ -563,7 +573,7 @@ Above **10 s**, do not obey — **skip the domain** and record `excluded_reason 
 
 **Third-party XML (M1.3).** Sitemaps are attacker-controlled input parsed by stdlib `ElementTree`. A sitemap whose bytes contain `<!DOCTYPE` or `<!ENTITY` is **refused before parsing** — no real sitemap needs either, and refusing removes the entity-expansion class without adding a dependency. Bodies are capped at 8 MB before parsing and shards at 50 per company; a parse failure yields "no URLs" rather than aborting a run.
 
-Fetch order: `robots.txt` → homepage → `sitemap.xml` (and any nested sitemaps) → Impressum → blog index if a blog path is found → one sample product page if a product path is found.
+Fetch order: `robots.txt` → homepage → `sitemap.xml` (and any nested sitemaps) → Impressum → blog index if a blog path is found → one sample blog article under it (A6) → one sample product page if a product path is found.
 
 **Product sample selection (A5).** `opp.no_product_schema` (+10) reads a single sampled product page, so which page is sampled has to be a stated rule. "Deterministic" here cannot mean "the same URL forever" — a catalog changes, and any rule keyed to the catalog picks differently once it does. The guarantee is **same inputs → same choice**, with the chosen URL recorded so the score traces to a specific stored artifact.
 
@@ -594,6 +604,18 @@ No new review reason is needed: zero product candidates on a detected shop platf
 
 *Auditability.* The chosen URL is recorded as `catalog.product_sample_url` (text, unscored), with `evidence_url` set to the sitemap or homepage it was read from. Without it, `schema.product_present` points at a product page with no record of *why that page*, and the selection rule is unauditable from the database.
 
+**Blog article sampling (A6, M1.29).** `content.blog_last_post` and `schema.article_present` are read from **one sampled article**, not from the blog index — the index carries neither on the platform that is most of the corpus. Same shape as A5, same guarantee (*same inputs → same choice*), one additional request per company that has a blog.
+
+*The anchor is the **index path**, not the blog path.* On Shopify the hierarchy is `/blogs/<blog-handle>/<article-handle>`, so a URL one level under `/blogs` is *another blog index*. "The shallowest URL under the blog path" — the obvious phrasing — selects `/blogs/karriere` on `bio-fleischer-laden.de` and hands a listing page to an `Article` parser, which is M1.16's error in a new place. Anchoring on the index M1.15 actually fetched makes the level unambiguous.
+
+*Candidates* are same-site URLs, without a query string, strictly under the fetched index's path. *Tiers:* (1) a blog sitemap shard (M1.24 — membership is the evidence, no path shape required); (2) sitemap URLs under the index path; (3) links on the index page itself. *Ordering:* shallowest first, code-point minimum breaking ties.
+
+No secondary-locale filter is needed here: `/de-ch/blogs/lifestyle/x` does not start with `/blogs/lifestyle/`, and M1.15 already prefers the shallowest index, which is the primary storefront's. The anchoring subsumes M1.25.
+
+**A6.1 — zero candidates, or a failed article fetch, writes neither `content.blog_last_post` nor `schema.article_present`.** Not a `0`, not today's date. This is A5.5 applied to the same shape of absence, and it is why `schema.article_present = 0` no longer appears for shops whose article pages were never retrieved.
+
+*Auditability.* The chosen URL is recorded as `content.blog_sample_url` (text, unscored), `evidence_url` being the blog index that fixed the anchor. `blog_article` joins the artifact kinds.
+
 **Impressum discovery** is two-step: (1) footer links matching `impressum|imprint|legal notice|rechtliches`; (2) if none, probe direct paths `/impressum`, `/impressum/`, `/imprint`, `/legal`, `/rechtliches` before concluding absence. Only after both steps fail is `no_impressum` recorded — and for CH companies it sets `needs_review`, not `excluded` (§6.4).
 
 Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, path recorded in `artifact.body_path`. Skip re-extraction when `content_hash` is unchanged from the previous run.
@@ -604,10 +626,10 @@ Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, pa
 |---|---|---|
 | `platform.detected` | HTML signature match on **anchored strings only** — Shopware: `/bundles/storefront/`; Shopify: `cdn.shopify.com`; WooCommerce: `wp-content` **and** `woocommerce`; JTL: any of `jtl-nav-wrapper`, `jtl-validate`, `jtl_token`, `jtlPackFormTranslations` | Signatures **observed**, not assumed — see M1.9/M1.10. The bare string `shopware` and bare `sw-` attributes are **not** signatures; `jtl-shop` is **not** a signature and never was one in the wild. |
 | `content.blog_exists` | Blog/magazin/ratgeber/news path found in sitemap **or** homepage nav links | Good |
-| `content.blog_last_post` | **Authoritative:** newest date parsed from the blog index HTML — JSON-LD `datePublished`, `<time datetime>`, or German visible-date patterns (`12. März 2023`). Sitemap `<lastmod>` is a hint only and is never used alone. | Sitemap lastmod is regenerated on deploys by Shopware/WP and systematically lies fresh; this rule exists because of that. |
+| `content.blog_last_post` | **Authoritative:** newest date parsed from the **sampled blog article** (A6, M1.29) — JSON-LD `datePublished`, `<time datetime>`, or German visible-date patterns (`12. März 2023`). Falls back to the blog index where the index itself carries dates. Sitemap `<lastmod>` is a hint only and is **never** used alone. | The index was the wrong page: Shopify blog indexes carry no `<time>` and no `datePublished` at all, and 5 of 7 detected blogs yielded no date from one. **The lastmod warning is now measured, not asserted — see below.** |
 | `content.blog_post_count` | Count of post links on the blog index (paginated: first page count × page count if pagination is visible), cross-checked against sitemap URL count under the blog path | Sitemap counts include tag/category noise; index count wins on conflict |
 | `catalog.product_url_count` | **A5's tier hierarchy, in A5's order (M1.24):** Tier 1 the product sitemap — recognised either by a platform filename convention *or* by the shard's own name (M1.24); Tier 2 product-typical paths (`/detail/`, `/products/`, `/produkt/`); otherwise not measurable (§10.3). Translations are excluded (M1.25). The tier is written to `value_text` alongside the count. | Path patterns are the **fallback**, not the default: reading them first counted `smile-store.de` at 6 against a catalogue of 194. A count of 6 from a path pattern and a count of 6 from a product sitemap are different claims, so the tier travels with the number. |
-| `schema.article_present`, `schema.product_present` | Parse all `application/ld+json` blocks on homepage **and** blog index / a sample product page, collect `@type` | Checking only the homepage under-detects; check the page type where the schema would live |
+| `schema.article_present`, `schema.product_present` | Parse all `application/ld+json` blocks and collect `@type`. `article_present` is read from the **sampled blog article** (A6), `product_present` from the sampled product page (A5) plus the homepage. **Neither is ever written without its sample** (A5.5, A6.1). | Checking only the homepage under-detects; checking the *index* under-detects to zero. `Article`/`BlogPosting` lives on the post, and `schema.article_present` was `0` on **every** blog index in the corpus — a wrong "checked and absent" for shops whose posts all carry it. |
 | `meta.description_length` | Homepage `<meta name="description">` length | **Informational only, not scored** — platforms auto-generate adequate-length templates |
 | `i18n.hreflang_count` | Count of distinct `hreflang` values | `de-DE`/`de-AT`/`de-CH` variants are not real i18n; count distinct language codes, not locale codes |
 | `perf.lighthouse_performance` | PageSpeed Insights API — **Phase 2 only** (slow: 15–30 s/site) | Cache by `artifact.last_checked_at` age; do not re-run within 30 days |
@@ -615,6 +637,18 @@ Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, pa
 | `agency.footer_credit` | Regex for `realisiert von\|umgesetzt von\|powered by\|Webdesign:` in footer, plus outbound footer links whose anchor/title contains `agentur\|design\|media\|digital` | Under-detects (logo-only credits). Treated as bonus negative signal, never as a gate |
 | `reviews.trusted_shops`, `reviews.count` | Trusted Shops badge script detection; visible aggregate review count in `AggregateRating` JSON-LD | Free product-strength proxy |
 | `catalog.product_sample_url` | The product URL selected by the A5 rule in §5.2. Written by `fetch`, not by an extractor — it records a fetch-time decision. | **Unscored.** Exists so the sample behind `schema.product_present` is auditable |
+
+**The `lastmod` warning, measured (M1.29).** This spec has said since v0.1 that sitemap `<lastmod>` "is regenerated on deploys and systematically lies fresh". That was an assertion. It is now a measurement, taken on the exact signal the rule protects — `bio-fleischer-laden.de`, whose blog sitemap shard is on disk:
+
+| what was read | date |
+|---|---|
+| newest post date parsed from the blog **index** | **2022-12-01** |
+| newest `<lastmod>` on an **article** URL in the blog shard | 2025-01-23 |
+| newest `<lastmod>` on a **listing** URL in the blog shard | 2026-02-25 |
+
+**The error is directional, which is what makes it expensive.** `opp.blog_stale` is an award for *not publishing*. A shop whose newest post is from 2022 presents, via lastmod, as active in 2026 — so the instrument suppresses the award on precisely the stale blogs the rule exists to find, and does it silently. A freshness proxy that only ever errs fresh is not a weak instrument; it is an instrument pointed the wrong way.
+
+`lastmod` may still be recorded as a separate hint (`content.blog_lastmod_hint`) for a human resolving `blog_date_unparseable` — "has this blog been touched at all" is a real question. **No §6 rule may read it.**
 
 **Why `legal_form` is extracted here rather than in §5.5b (A1).** It makes `qual.owner_operated`'s first disjunct decidable in Phase 1, which is worth having on its own: a company whose Impressum says `e.K.` banks the +15 before any LLM is called, and its `remaining_upside` under §5.4's gate drops from 50 to 35 accordingly.
 
@@ -982,9 +1016,9 @@ The export function asserts the presence of `ai.query_text`, `ai.checked_at` and
 | A1 / M1.21–M1.22 | The Phase-2 advance gate. A global `PHASE2_MAX_POINTS` cannot be derived correctly, so §5.4 is rewritten as a per-company gate. | M3 scores, and the gate decides what Phase 2 costs. **Awaiting ratification** — it is a scoring-model change (§5.4). |
 | M1.14 | **`content.blog_exists` under-detects, and a `false` reading is not strong enough to carry `opp.no_blog`'s +25 on its own.** Two shapes in a 13-shop corpus are unreachable by any path vocabulary: a blog on a subdomain (`blog.zecplus.de`) and a blog served as root-level slugs (`lampenflut.de`). | M3 scores, and `opp.no_blog` is the **largest single award in ruleset v3**. Firing it on a shop that publishes weekly is the worst error the model can make: it manufactures the exact opportunity the outreach letter is about. The right instrument is anchor text or `Article` JSON-LD, both of which are M2 territory — so this is recorded here, not fixed in M1. |
 
-| §5.3 names the wrong page for `content.blog_last_post` and `schema.article_present` | Shopify blog **indexes** carry no `<time>`, no `datePublished` and no `Article` markup — all three live on the article pages, which are never fetched. Measured: 5 of 7 detected blogs yield no date, and `schema.article_present` is `0` on **every** blog index in the corpus. | M3 scores. `blog_date_unparseable` would fill the review queue with the majority platform for a parser error that is not a parser error, and a `0` for `schema.article_present` is a wrong "checked and absent". The fix needs a sampled article, which adds a fetch target to §5.2 — an **M1 amendment M2 depends on**, not an M2 fix. Proposal: `docs/blog-article-sample-proposal.md`. **Awaiting ratification.** |
+*(§5.3 naming the wrong page for `content.blog_last_post` and `schema.article_present` was the third blocker here. **Closed by M1.29 / A6**, ratified and implemented: the signals now read from a sampled article and A6.1 writes nothing where none is obtained. It stays visible in the amendment log rather than here.)*
 
-Neither of the first two is a coding task. Both are decisions about what a signal is allowed to assert when it did not find something, which is the same question `A5.5` and the `blog_last_post is NULL` branch already answer with "write nothing rather than write zero".
+Neither of the two above is a coding task. Both are decisions about what a signal is allowed to assert when it did not find something, which is the same question `A5.5` and the `blog_last_post is NULL` branch already answer with "write nothing rather than write zero".
 
 **A third instrument for M1.14, assessed and reported negative.** A semantically named sitemap shard (`blogs-0-sitemap.xml`, `sitemap_blogs_1.xml`) is cheaper than both anchor text and `Article` JSON-LD, and is not a path-vocabulary entry, so it does not fall under M1.4's rule. It was measured against both unreachable shapes and **reaches neither**:
 

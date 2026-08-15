@@ -111,6 +111,7 @@ class TestFullPipeline(FetchTestCase):
                 "sitemap",
                 "impressum",
                 "blog_index",
+                "blog_article",  # A6
                 "product_page",
             },
         )

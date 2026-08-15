@@ -381,8 +381,15 @@ class TestProductSchemaGuard(ExtractTestCase):
         self.assertEqual(self.extract(company_id).signals["schema.product_present"], 1)
 
 
+BLOG_ARTICLE = """<html><body><h1>Ein Beitrag</h1>
+  <script type="application/ld+json">
+  {"@type":"BlogPosting","datePublished":"2025-06-30"}
+  </script>
+</body></html>"""
+
+
 class TestBlogSignals(ExtractTestCase):
-    def test_reads_count_date_and_schema_from_the_index(self) -> None:
+    def test_reads_existence_and_count_from_the_index(self) -> None:
         company_id = self.company()
         self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
         self.artifact(company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP)
@@ -393,8 +400,89 @@ class TestBlogSignals(ExtractTestCase):
 
         self.assertEqual(result.signals["content.blog_exists"], 1)
         self.assertEqual(result.signals["content.blog_post_count"], 2)
+
+
+class TestBlogArticleSample(ExtractTestCase):
+    """A6. §5.3 named the index; on Shopify the index carries neither the date
+    nor the markup, and both live on the post."""
+
+    def stocked(self, index_html: str = BLOG_INDEX) -> int:
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP)
+        self.artifact(
+            company_id, "blog_index", "https://muster.de/blogs/news", index_html
+        )
+        return company_id
+
+    def test_the_articles_date_wins_over_the_indexs(self) -> None:
+        company_id = self.stocked()
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/erster",
+            BLOG_ARTICLE,
+        )
+        result = self.extract(company_id)
+        self.assertEqual(str(result.signals["content.blog_last_post"]), "2025-06-30")
+
+    def test_article_markup_is_read_from_the_article(self) -> None:
+        company_id = self.stocked()
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/erster",
+            BLOG_ARTICLE,
+        )
+        self.assertEqual(self.extract(company_id).signals["schema.article_present"], 1)
+
+    def test_no_article_leaves_article_markup_unwritten(self) -> None:
+        """A6.1. `0` from the index is a fact about the wrong page — it was `0`
+        on every blog index in the corpus, for shops whose posts all carry
+        `BlogPosting`."""
+        result = self.extract(self.stocked())
+        self.assertNotIn("schema.article_present", result.signals)
+        self.assertIn("stays unwritten (A6.1)", " ".join(result.notes))
+
+    def test_a_fetched_article_without_markup_writes_zero(self) -> None:
+        """Here `0` is correct: we looked at the post itself."""
+        company_id = self.stocked()
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/erster",
+            "<html><body><h1>Ein Beitrag</h1></body></html>",
+        )
+        self.assertEqual(self.extract(company_id).signals["schema.article_present"], 0)
+
+    def test_an_undated_article_falls_back_to_the_index(self) -> None:
+        """An index that does carry dates is already an answer, and is not worth
+        discarding for one undated post."""
+        company_id = self.stocked()
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/erster",
+            "<html><body><h1>Ein Beitrag</h1></body></html>",
+        )
+        result = self.extract(company_id)
         self.assertEqual(str(result.signals["content.blog_last_post"]), "2024-02-01")
-        self.assertEqual(result.signals["schema.article_present"], 1)
+
+    def test_neither_dated_writes_no_date(self) -> None:
+        company_id = self.stocked(
+            index_html='<html><body><a href="/blogs/news/x">Ein Beitrag</a></body></html>'
+        )
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/x",
+            "<html></html>",
+        )
+        result = self.extract(company_id)
+        self.assertNotIn("content.blog_last_post", result.signals)
+        self.assertIn(
+            "neither the sampled article nor the index", " ".join(result.notes)
+        )
 
     def test_no_blog_index_writes_zero_and_says_why(self) -> None:
         """§10.1: this instrument under-detects — a blog on a subdomain or on

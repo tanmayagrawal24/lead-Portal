@@ -134,6 +134,69 @@ def select(candidates: list[str]) -> str | None:
     return min(candidates) if candidates else None
 
 
+def _depth(path: str) -> int:
+    return _TRAILING_SLASHES.sub("", path).count("/")
+
+
+def is_blog_article_candidate(url: str, index_path: str, domain: str) -> bool:
+    """A6 filter. **Anchored on the index path, not on the blog path.**
+
+    This is the whole subtlety. On Shopify the hierarchy is
+    `/blogs/<blog-handle>/<article-handle>`, so a URL one level under `/blogs`
+    is *another blog index*, not a post: "the shallowest URL under the blog
+    path" selects `/blogs/karriere` on `bio-fleischer-laden.de` and hands a
+    listing page to an Article parser — M1.16's error in a new place. Anchoring
+    on the index M1.15 actually fetched makes the level unambiguous.
+
+    A secondary-locale filter is deliberately absent: `/de-ch/blogs/lifestyle/x`
+    does not start with `/blogs/lifestyle/`, and M1.15 already prefers the
+    shallowest index, which is the primary storefront's. The anchoring subsumes
+    it (M1.25).
+    """
+    if not same_site(url, domain) or has_query(url):
+        return False
+    path = _TRAILING_SLASHES.sub("", path_of(url))
+    anchor = _TRAILING_SLASHES.sub("", index_path)
+    return bool(anchor) and path.lower().startswith(f"{anchor.lower()}/")
+
+
+def choose_blog_article(
+    blog_sitemap_urls: list[str],
+    sitemap_urls: list[str],
+    index_links: list[str],
+    index_path: str,
+    domain: str,
+) -> tuple[str | None, str]:
+    """A6: pick one article under the fetched blog index. Tiers 1→2→3.
+
+    Mirrors `choose_product_sample` exactly — same tier shape, same ordering,
+    same "returns `(None, "none")` and the caller then writes **nothing**"
+    contract (A6.1). `content.blog_last_post` and `schema.article_present` are
+    what ride on it, and a wrong sample is a wrong date and a wrong `0`.
+
+    Ordering is **shallowest first, code-point minimum breaking ties**: an
+    article is shallower than its own paginated or tagged variants, and the
+    code-point minimum is what keeps the choice off the machine's locale.
+    """
+
+    def usable(urls: list[str]) -> list[str]:
+        return [
+            url for url in urls if is_blog_article_candidate(url, index_path, domain)
+        ]
+
+    def shallowest(urls: list[str]) -> str:
+        return min(urls, key=lambda url: (_depth(path_of(url)), url))
+
+    for candidates, tier in (
+        (usable(blog_sitemap_urls), "blog_sitemap"),
+        (usable(sitemap_urls), "sitemap_under_index"),
+        (usable(index_links), "index_links"),
+    ):
+        if candidates:
+            return shallowest(candidates), tier
+    return None, "none"
+
+
 def choose_product_sample(
     product_sitemap_urls: list[str],
     sitemap_urls: list[str],

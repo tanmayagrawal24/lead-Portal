@@ -255,28 +255,34 @@ class ExtractStage:
         every product is a root-level slug indistinguishable from a category
         (findings §4) — so the count is left unwritten and the reason recorded.
         """
-        page_urls: list[str] = []
-        catalogue_urls: list[str] = []
-        product_sitemap_urls: list[str] = []
         sitemaps = [a for a in artifacts if a.kind == "sitemap" and a.body_path]
-        for artifact in sitemaps:
-            body = self._body_bytes(artifact)
-            _children, pages = sitemap.parse(
-                sitemap.decompress(body, artifact.url), artifact.url
+        shards = [
+            (
+                artifact.url,
+                sitemap.parse(self._body_bytes(artifact), artifact.url)[1],
             )
-            page_urls.extend(pages)
-            if sitemap.is_product_sitemap(artifact.url):
-                product_sitemap_urls.extend(pages)
-            if not sitemap.is_blog_sitemap(artifact.url):
-                # A shard the shop itself labels as content is not catalogue,
-                # whatever its URLs look like (M1.24). Kept in `page_urls`
-                # regardless: dropping it there took `/blogs/…` away from blog
-                # *path* detection and silently turned `snocks.com` — 107 blog
-                # URLs, a post from July — into `blog_exists = 0`, which is
-                # `opp.no_blog`'s +25 against a shop that publishes weekly.
-                catalogue_urls.extend(pages)
+            for artifact in sitemaps
+        ]
+        page_urls = [url for _shard, pages in shards for url in pages]
 
         blog_path = self._blog_path(page_urls, homepage_html, domain)
+        # M1.27: a shard named `articles` is decided on its contents and its
+        # siblings, so classification waits until every shard has been read and
+        # the blog path is known.
+        kinds = sitemap.classify(shards, blog_path)
+        product_sitemap_urls = [
+            url for shard, pages in shards if kinds[shard] == "product" for url in pages
+        ]
+        # A shard the shop itself labels as content is not catalogue, whatever
+        # its URLs look like. It stays in `page_urls` regardless: dropping it
+        # there took `/blogs/…` away from blog *path* detection and silently
+        # turned `snocks.com` — 107 blog URLs, a post from July — into
+        # `blog_exists = 0`, which is `opp.no_blog`'s +25 against a shop that
+        # publishes weekly.
+        catalogue_urls = [
+            url for shard, pages in shards if kinds[shard] != "blog" for url in pages
+        ]
+
         evidence = sitemaps[0].url if sitemaps else ""
         locales = parsers.hreflang_prefixes(homepage_html, domain)
 
@@ -403,25 +409,64 @@ class ExtractStage:
         read = parsers.read_blog_index(
             html, blog_path, index_path=path_of(index.url), today=self.today
         )
+        article = next(
+            (
+                a
+                for a in artifacts
+                if a.kind == "blog_article" and a.body_path and a.http_status == 200
+            ),
+            None,
+        )
 
-        if read.newest_post is not None:
+        # A6: the date lives on the article. `content.blog_last_post` reads the
+        # sample first and falls back to the index, because an index that does
+        # carry dates — the German visible-date shops do — is already an answer
+        # and is not worth preferring a single post over.
+        if article is not None:
+            article_html = self._body(article)
+            if (
+                published := parsers.newest_post_date(article_html, self.today)
+            ) is not None:
+                self._write(
+                    result, "content.blog_last_post", article.url, day=published
+                )
+            elif read.newest_post is not None:
+                self._write(
+                    result, "content.blog_last_post", index.url, day=read.newest_post
+                )
+            else:
+                result.notes.append(
+                    "neither the sampled article nor the index is dated"
+                )
+            # A6: and so does the markup. `Article`/`BlogPosting` is on the post,
+            # never on the listing — `schema.article_present` was `0` on every
+            # blog index in the corpus, which was a wrong "checked and absent".
             self._write(
-                result, "content.blog_last_post", index.url, day=read.newest_post
+                result,
+                "schema.article_present",
+                article.url,
+                num=1 if parsers.has_article_schema(article_html) else 0,
             )
         else:
-            # §6.2's NULL branch: a blog whose dates cannot be parsed is an
-            # unknown, not a stale blog. The flag is raised by `score`, not
-            # here; this stage only declines to invent a date.
-            result.notes.append("blog index has no parseable post date")
+            if read.newest_post is not None:
+                self._write(
+                    result, "content.blog_last_post", index.url, day=read.newest_post
+                )
+            else:
+                # §6.2's NULL branch: a blog whose dates cannot be parsed is an
+                # unknown, not a stale blog. The flag is raised by `score`, not
+                # here; this stage only declines to invent a date.
+                result.notes.append("blog index has no parseable post date")
+            # A6.1: no article, no claim about article markup. A `0` from the
+            # index is a fact about the wrong page.
+            result.notes.append(
+                "no blog article on disk — schema.article_present stays unwritten (A6.1)"
+            )
 
         if read.post_count is not None:
             self._write(
                 result, "content.blog_post_count", index.url, num=read.post_count
             )
-        if read.article_schema:
-            self._write(result, "schema.article_present", index.url, num=1)
-        else:
-            self._write(result, "schema.article_present", index.url, num=0)
 
     # ── product schema (A5.5/A5.6) ──────────────────────────────────────
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gzip
 import re
+from collections.abc import Sequence
 from xml.etree import ElementTree
 
 from portal.urls import path_of
@@ -65,15 +66,19 @@ _PRODUCT_SITEMAP_PATTERNS = (
 #:                            German is the same shop that would label them
 #:                            `articles`, but nothing here has been seen.
 #:
-#: **Known ambiguity, unresolved by evidence:** in English-language CMS usage
-#: `article` means a *blog post*, not a product. Nothing in the corpus exercises
-#: that reading — Yoast names its post shard `post-sitemap.xml`, not
-#: `article-sitemap.xml` — so it is recorded as a risk rather than mitigated by
-#: a guess. `_BLOG_SHARD_WORDS` is tested first, which catches the compound
-#: cases (`blog-articles-…`) but not a bare `articles` shard that means posts.
+#: **The ambiguity, and how it is resolved (M1.27).** In English-language CMS
+#: usage `article` means a *blog post*; in German commerce `Artikel` means a
+#: product. The word alone cannot decide, so it is not asked to: `classify` reads
+#: the shard's **contents and its siblings** instead, and only the ambiguous word
+#: goes through that path. See `classify`.
 _PRODUCT_SHARD_WORDS = frozenset(
     {"product", "products", "article", "articles", "artikel", "produkte"}
 )
+
+#: The words in `_PRODUCT_SHARD_WORDS` that also read as content in English.
+#: A shard named with one of these is *proposed* as catalogue and confirmed by
+#: `classify` against the index it lives in.
+_AMBIGUOUS_SHARD_WORDS = frozenset({"article", "articles"})
 
 #: The same reading, for content. Used to answer M1.14's third-instrument
 #: question and to locate blog article URLs without a path vocabulary.
@@ -116,6 +121,10 @@ def shard_kind(url: str) -> str | None:
 
     Blog is tested first: a shard named `blog-articles-…` is posts, and the
     product vocabulary contains `articles` for the German commerce sense.
+
+    **A name is not a classification.** Where the name is ambiguous this returns
+    the proposal, not the answer — `classify` is what decides, and it is what
+    callers should use when they have the whole index in hand.
     """
     words = shard_words(url)
     if words & _BLOG_SHARD_WORDS:
@@ -123,6 +132,80 @@ def shard_kind(url: str) -> str | None:
     if words & _PRODUCT_SHARD_WORDS:
         return "product"
     return None
+
+
+def _is_ambiguous(url: str) -> bool:
+    """Named as catalogue, but only by a word that also reads as content."""
+    words = shard_words(url)
+    if words & _BLOG_SHARD_WORDS or not words & _AMBIGUOUS_SHARD_WORDS:
+        return False
+    # A name that *also* carries an unambiguous catalogue word is not ambiguous,
+    # and neither is one the platform conventions already recognise.
+    if words & (_PRODUCT_SHARD_WORDS - _AMBIGUOUS_SHARD_WORDS):
+        return False
+    return not _matches_convention(url)
+
+
+def classify(
+    shards: Sequence[tuple[str, Sequence[str]]], blog_path: str | None = None
+) -> dict[str, str | None]:
+    """Classify every shard in one index by **content**, not by name (M1.27).
+
+    `shards` is `(shard_url, page_urls)` in the order they were read. Returns
+    `{shard_url: "product" | "blog" | None}`.
+
+    Unambiguous names are taken at their word. The ambiguous ones — `article`,
+    `articles` — are decided by three readings of evidence the index already
+    contains, in order of strength:
+
+    1. **Its URLs are also in a content shard.** Whatever it is called, a shard
+       that republishes the blog's URLs is the blog.
+    2. **The index also names a content shard.** A shop that lists both
+       `articles-*` and `blogs-*` has told us which one holds its posts, so the
+       other holds its catalogue. This is the `smile-store.de` shape.
+    3. **Its URLs sit under the detected blog path.** The remaining case: one
+       ambiguous shard, no content shard to compare it with, and a blog path
+       found from the site's own URLs.
+
+    Where none of the three resolves it *toward content*, it is catalogue —
+    which is what the word means on the one shop that was observed serving it.
+
+    **The failure direction is deliberate.** Reading a product shard as content
+    costs its count, and §10.3's three-state rule then reports *not measurable*
+    rather than a number. Reading a content shard as products writes a
+    confident, wrong count that no one has reason to doubt. This resolves toward
+    the recoverable error, and adds no vocabulary to do it: `artikel` and
+    `produkte` stay recorded as unobserved.
+    """
+    pages = {url: frozenset(page_urls) for url, page_urls in shards}
+    named = {url: shard_kind(url) for url, _pages in shards}
+    content = frozenset().union(
+        *[pages[url] for url, kind in named.items() if kind == "blog"] or [frozenset()]
+    )
+    any_content_shard = any(kind == "blog" for kind in named.values())
+    prefix = f"{blog_path.rstrip('/').lower()}/" if blog_path else None
+
+    resolved: dict[str, str | None] = {}
+    for url, kind in named.items():
+        if not _is_ambiguous(url):
+            resolved[url] = kind
+            continue
+        own = pages[url]
+        if own and len(own & content) * 2 > len(own):  # (1) republishes the blog
+            resolved[url] = "blog"
+        elif any_content_shard:  # (2) the index names a content shard
+            resolved[url] = "product"
+        elif (
+            prefix
+            and own
+            and all(  # (3) it sits under the blog path
+                path_of(page).lower().startswith(prefix) for page in own
+            )
+        ):
+            resolved[url] = "blog"
+        else:
+            resolved[url] = "product"
+    return resolved
 
 
 def _strip_ns(tag: str) -> str:
@@ -156,6 +239,10 @@ def decompress(body: bytes, url: str) -> bytes:
         return body
 
 
+def _matches_convention(url: str) -> bool:
+    return any(pattern.search(path_of(url)) for pattern in _PRODUCT_SITEMAP_PATTERNS)
+
+
 def is_product_sitemap(url: str) -> bool:
     """Tier 1 detection, matched against the **path** (M1.13).
 
@@ -171,8 +258,11 @@ def is_product_sitemap(url: str) -> bool:
     the shop chose. `smile-store.de` publishes its whole catalogue as
     `area/articles-0-sitemap.xml`, which no convention list would have
     anticipated and which the shop labelled perfectly clearly.
+
+    **Name only.** Where the whole index is available, `classify` is the better
+    question — it decides the `articles` case on contents rather than on a word.
     """
-    if any(pattern.search(path_of(url)) for pattern in _PRODUCT_SITEMAP_PATTERNS):
+    if _matches_convention(url):
         return True
     return shard_kind(url) == "product"
 
