@@ -25,6 +25,18 @@ def db_path() -> Path:
     return Path(override).expanduser() if override else DEFAULT_DB_PATH
 
 
+def request_log_path(database: Path | None = None) -> Path:
+    """Where every issued request is logged (§5.2, M1.19), beside the database.
+
+    Appended across runs rather than truncated: each line carries its own
+    timestamp, and "how did we behave last month" is a question worth being
+    able to answer. It lives under `data/`, which is gitignored — request logs
+    name third-party hosts and are local evidence, not repository content.
+    """
+    base = (database or db_path()).parent
+    return base / "requests.jsonl"
+
+
 def artifacts_root(database: Path | None = None) -> Path:
     """Where fetched bodies live: `data/artifacts/` beside the database (§5.2)."""
     base = (database or db_path()).parent

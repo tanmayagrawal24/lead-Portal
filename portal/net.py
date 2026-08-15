@@ -34,10 +34,13 @@ the request rate, the other skips a robots.txt.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Self
 
 import httpx
@@ -95,6 +98,37 @@ class _RobotsExempt:
 
 #: See `_RobotsExempt`. Import and pass explicitly; never default to it.
 RobotsExempt = _RobotsExempt()
+
+
+class RequestLog:
+    """One line of JSON per HTTP request issued, for auditing §5.2 (M1.19).
+
+    M1's done-when is "1 req/s **observed**", and until this existed nothing in
+    the output could show it. `artifact` rows record what was *stored*, written
+    when a response lands, so the gaps between them measure the server's
+    latency variance rather than our spacing — a measurement that appeared to
+    show ten violations in the first crawl and showed nothing of the kind.
+
+    What makes this the right place: every hop passes through `Fetcher.get`,
+    below which no request can be issued, so the log cannot miss one the way a
+    caller-side log would. `issued_at` is taken *after* the limiter returns and
+    immediately before the request goes out, which is the moment §5.2 governs.
+
+    Both clocks are recorded. `monotonic` is what gaps are computed from, since
+    a wall-clock adjustment mid-run could otherwise manufacture or hide a
+    violation; the ISO timestamp is there so a line can be tied to a run.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def record(self, **fields: object) -> None:
+        line = json.dumps(fields, ensure_ascii=False, sort_keys=True)
+        # One line per write, so concurrent workers cannot interleave.
+        with self._lock, self.path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
 
 class HostRateLimiter:
@@ -206,6 +240,9 @@ class Fetcher:
     limiter: HostRateLimiter = field(default_factory=HostRateLimiter)
     timeout: float = DEFAULT_TIMEOUT_SECONDS
     max_bytes: int = MAX_BODY_BYTES
+    #: Where every issued request is logged (M1.19). None disables logging;
+    #: the tests that measure politeness at the fixture server do not need it.
+    log: RequestLog | None = None
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -242,10 +279,21 @@ class Fetcher:
 
         for _hop in range(MAX_REDIRECT_HOPS + 1):
             self.limiter.wait(host_of(current))
+            issued = time.monotonic()
+            issued_at = datetime.now(UTC).isoformat(timespec="milliseconds")
             try:
                 response = self._client.get(current)
             except httpx.HTTPError as exc:
+                self._log(current, issued, issued_at, None, f"{type(exc).__name__}")
                 return Response(url=current, error=f"{type(exc).__name__}: {exc}")
+            self._log(
+                current,
+                issued,
+                issued_at,
+                response.status_code,
+                None,
+                str(response.url),
+            )
 
             if not response.has_redirect_location:
                 return Response(
@@ -283,6 +331,29 @@ class Fetcher:
         return Response(
             url=current,
             error=f"too_many_redirects: over {MAX_REDIRECT_HOPS} from {url}",
+        )
+
+    def _log(
+        self,
+        url: str,
+        issued: float,
+        issued_at: str,
+        status: int | None,
+        error: str | None,
+        final_url: str | None = None,
+    ) -> None:
+        if self.log is None:
+            return
+        self.log.record(
+            issued_at=issued_at,
+            issued_monotonic=round(issued, 6),
+            elapsed=round(time.monotonic() - issued, 6),
+            host=host_of(url),  # the politeness key: apex and www share it
+            authority=authority_of(url),  # the robots key: they do not
+            url=url,
+            final_url=final_url if final_url != url else None,
+            status=status,
+            error=error,
         )
 
     def close(self) -> None:

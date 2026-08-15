@@ -18,7 +18,7 @@ import time
 import unittest
 from pathlib import Path
 
-from portal import db, fetch, migrate, net
+from portal import audit, db, fetch, migrate, net
 from portal.net import Fetcher, HostRateLimiter
 from tests import shopfixtures
 from tests.fixture_server import ConcurrencyTracker, FixtureServer, Site
@@ -340,3 +340,97 @@ class TestConcurrencyCeiling(PolitenessTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRequestLogAndAudit(unittest.TestCase):
+    """M1.19. The log exists so §5.2's floor is *observed* rather than argued
+    about; these pin that it observes the right thing."""
+
+    def _log_path(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name) / "requests.jsonl"
+
+    def test_every_hop_of_a_chain_is_logged_with_its_issue_time(self) -> None:
+        """A caller-side log would miss redirect hops. They are requests."""
+        site = Site()
+        site.add_redirect("/a", "/b")
+        site.add_redirect("/b", "/c")
+        site.add("/c", "<html><body>ok</body></html>")
+        path = self._log_path()
+
+        with FixtureServer(site) as server:
+            fetcher = Fetcher(
+                limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
+                log=net.RequestLog(path),
+            )
+            self.addCleanup(fetcher.close)
+            fetcher.get(f"{server.base}/a", hop_allowed=net.RobotsExempt)
+
+        entries = audit.load(path)
+        self.assertEqual([e["url"].rsplit("/", 1)[1] for e in entries], ["a", "b", "c"])
+        report = audit.spacing(entries)
+        self.assertEqual(len(report), 1)
+        assert report[0].min_gap is not None
+        self.assertGreaterEqual(report[0].min_gap, net.MIN_INTERVAL_SECONDS - TOLERANCE)
+        self.assertTrue(report[0].ok)
+
+    def test_the_audit_reports_held_for_a_real_run(self) -> None:
+        site = Site()
+        site.add("/", "<html><body>ok</body></html>")
+        path = self._log_path()
+
+        with FixtureServer(site) as server:
+            fetcher = Fetcher(
+                limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
+                log=net.RequestLog(path),
+            )
+            self.addCleanup(fetcher.close)
+            for _ in range(3):
+                fetcher.get(f"{server.base}/", hop_allowed=net.RobotsExempt)
+
+        text, ok = audit.report(path)
+        self.assertTrue(ok, text)
+        self.assertIn("§5.2: HELD", text)
+
+    def test_the_audit_would_actually_catch_a_breach(self) -> None:
+        """The anti-vacuity test. A report that only ever says HELD proves
+        nothing, so this feeds it a log that breaches both rules."""
+        path = self._log_path()
+        log = net.RequestLog(path)
+        # Two requests 0.2s apart on one host, and three hosts overlapping.
+        log.record(
+            issued_at="x", issued_monotonic=100.0, elapsed=1.0, host="a.de", url="u"
+        )
+        log.record(
+            issued_at="x", issued_monotonic=100.2, elapsed=1.0, host="a.de", url="u"
+        )
+        log.record(
+            issued_at="x", issued_monotonic=100.1, elapsed=1.0, host="b.de", url="u"
+        )
+        log.record(
+            issued_at="x", issued_monotonic=100.1, elapsed=1.0, host="c.de", url="u"
+        )
+
+        entries = audit.load(path)
+        self.assertEqual(audit.max_hosts_in_flight(entries), 3)
+        text, ok = audit.report(path)
+        self.assertFalse(ok)
+        self.assertIn("BREACHED", text)
+        self.assertIn("*** UNDER ***", text)
+        self.assertIn("*** OVER ***", text)
+
+    def test_crawl_delay_hosts_are_judged_against_their_own_interval(self) -> None:
+        """1.0s is fine for most hosts and a breach for one that asked for 5s."""
+        path = self._log_path()
+        log = net.RequestLog(path)
+        log.record(
+            issued_at="x", issued_monotonic=10.0, elapsed=0.1, host="slow.de", url="u"
+        )
+        log.record(
+            issued_at="x", issued_monotonic=11.0, elapsed=0.1, host="slow.de", url="u"
+        )
+
+        entries = audit.load(path)
+        self.assertTrue(audit.spacing(entries)[0].ok)
+        self.assertFalse(audit.spacing(entries, {"slow.de": 5.0})[0].ok)
