@@ -979,11 +979,28 @@ On the verified corpus the predicate (`legal_form ∈ {e.K., Einzelunternehmen, 
 
 It stays out of §10.1 because it does not block correctness, and it is not settled here because a personal name standing where a company name would be is a judgement rather than a regex, and twelve shops is not the sample to decide it on. **Settle it on a larger corpus, and re-derive §7.1 when it is settled.**
 
-### 10.3 Tracked so it stops disappearing
+### 10.3 §6.5's bands must not be calibrated on the current corpus
+
+**A JTL shop cannot earn up to 25 points, on URL structure alone.** Every rule downstream of `catalog.product_url_count` is affected by the root-slug shape (findings §4), not only B7:
+
+| rule | predicate | why it is unavailable |
+|---|---|---|
+| `qual.product_depth` | ≥ 20 product URLs | +10 — no URL is identifiable as a product |
+| `qual.own_domain_shop` | ≥ 5 product URLs (B7) | +5 — same count, unwritten |
+| `opp.no_product_schema` | needs a sampled product page (A5.5, A5.6) | +10 — no sample can be selected |
+
+§6.5's bands are **20 points wide**, so this moves a shop a full band — silently, and in a model whose stated purpose is to measure *opportunity* rather than *platform*. It affects **4 of 13** shops in the verified corpus.
+
+Two consequences:
+
+1. **Do not calibrate or re-tune §6.5 on this corpus.** Roughly a third of it is systematically ~25 points light for reasons that have nothing to do with the businesses. Calibrating here would bake the instrument's blind spot into the band thresholds, and thereafter the blind spot would look like a property of German SME shops. This compounds with B7's own warning (§6.1) about not re-tuning on data gathered before B7 could fire — the two must be satisfied together, which in practice means calibration waits for a corpus gathered after both are settled.
+2. **The under-measurement must be visible per company**, not inferred from an absent signal. What `extract-p1` writes when no URL matches a product pattern on a site that plainly sells products is settled in M2 — see the M2 handoff for the recommendation.
+
+### 10.4 Tracked so it stops disappearing
 
 - **B7 — `qual.own_domain_shop` (+5).** Raised at Task 0, then untracked through three reviews: it appeared only as a row in §6.1 with a prose gloss and no predicate anywhere, so it was invisible to every subsequent pass. **Now defined** as `catalog.product_url_count >= 5` (§6.1). Recorded here rather than closed silently, because "a rule that cannot fire" is a defect class that hides in exactly this way — a table row reads as implemented. The remaining question is whether the threshold should be 5 or higher; 5 is chosen only because §6.4's `possible_marketplace_only` already uses it and two thresholds for one distinction is worse than a debatable one.
 
-### 10.4 Undecided, not blocking
+### 10.5 Undecided, not blocking
 
 - Ollama for local extraction instead of Haiku — saves ~$10/month at Phase-2 volumes, costs German-language extraction quality and the substring-verification simplicity. Currently: use Haiku.
 - Whether to store artifact bodies compressed (gzip) — likely yes above a few hundred companies.
