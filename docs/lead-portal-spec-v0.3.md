@@ -20,6 +20,18 @@
 
 Also in v0.3: the ruleset version bumps to **v3** (predicate changes in §6.2; no weight changes). v0.2's `§10 Resolved review questions` is deleted, superseded by this changelog. v0.2's `§11 Open decisions` becomes `§10`.
 
+### Amendments after third-pass review — 2026-08-15
+
+Resolutions to findings raised in `v0.3-review-findings.md`. Applied before M0.
+
+| # | Finding | Resolution | Section |
+|---|---|---|---|
+| B2 | `needs_review_reason` is one column; three soft flags can co-occur | Reasons move to a `review_flag` table, one row per (company, reason). `company.needs_review` survives as a boolean maintained by trigger, so §9's filter and `idx_company_review` still work; `company.needs_review_reason` is dropped. | §4, §6.2, §6.4, §9 |
+| B4 | `run_id` for signals written by `reconcile` was undefined | Reconciled signals carry the **submitting** run's id (`llm_batch.run_id`), not the reconciling run's. | §5.6 |
+| B3.1 | Cost-ledger ownership across the batch boundary | `actual_cost_usd` reconciles against the submitting run's `est_cost_usd`, where the reservation was made. | §5.6 |
+
+Remaining findings (A1–A5, B1, B3.2–B3.3, B5–B7, C1–C4) are still open and are not required by M0.
+
 ## Changelog v0.1 → v0.2 (retained for the record)
 
 1. **ScrapeGraphAI removed.** Both extractions use the Anthropic SDK directly with tool-use structured output. (§5.5)
@@ -123,11 +135,72 @@ CREATE TABLE company (
     discovered_at   TEXT NOT NULL,             -- ISO8601 UTC
     excluded        INTEGER NOT NULL DEFAULT 0,
     excluded_reason TEXT,                      -- never exclude silently; always record why
-    needs_review    INTEGER NOT NULL DEFAULT 0,-- soft flag: human decides, machine does not exclude
-    needs_review_reason TEXT
+    needs_review    INTEGER NOT NULL DEFAULT 0 -- derived: 1 iff an unresolved review_flag exists.
+                                               -- Maintained by trigger, never written directly.
 );
 CREATE INDEX idx_company_excluded ON company(excluded);
 CREATE INDEX idx_company_review ON company(needs_review);
+
+-- ─────────────────────────────────────────────────────────────
+-- B2: soft review flags. §6.4's three reasons are independent and
+-- can co-occur, so one row per (company, reason) rather than one
+-- TEXT column shared by three writers in three different stages.
+--
+-- Raising a flag is idempotent, so `score --phase 1` stays a zero-cost
+-- repeatable recompute (§5.4). The idiom is a targeted DO NOTHING:
+--
+--   INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at)
+--   VALUES (?,?,?,?) ON CONFLICT (company_id, reason) DO NOTHING;
+--
+-- NOT `INSERT OR IGNORE`, which suppresses CHECK violations as well as
+-- uniqueness conflicts — a renamed or misspelled reason would then be
+-- dropped silently rather than raising, which is the opposite of the
+-- fail-loudly rule the CHECK is there to enforce.
+--
+-- A resolution is sticky: once resolved, a later run that re-detects
+-- the same condition does not re-raise it. This is deliberate — the
+-- alternative re-adjudicates the same CH shop every month.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE review_flag (
+    id            INTEGER PRIMARY KEY,
+    company_id    INTEGER NOT NULL REFERENCES company(id) ON DELETE CASCADE,
+    reason        TEXT NOT NULL CHECK (reason IN (
+                      'no_impressum','possible_marketplace_only','blog_date_unparseable')),
+    raised_run_id INTEGER NOT NULL REFERENCES run(id),
+    raised_at     TEXT NOT NULL,
+    resolved_at   TEXT,                        -- NULL = not yet reviewed
+    resolved_by_human INTEGER,                 -- 1 = a human dismissed it; 0 = the pipeline cleared it
+    resolved_note TEXT,
+    CHECK ((resolved_at IS NULL     AND resolved_by_human IS NULL)
+        OR (resolved_at IS NOT NULL AND resolved_by_human IS NOT NULL))
+);
+CREATE UNIQUE INDEX uq_review_flag ON review_flag(company_id, reason);
+CREATE INDEX idx_review_flag_open ON review_flag(company_id) WHERE resolved_at IS NULL;
+
+-- `company.needs_review` is a cache of "has an unresolved flag", kept
+-- correct by trigger so there is exactly one write path: write the flag,
+-- the boolean follows. §9's filter stays an indexed column lookup rather
+-- than an EXISTS subquery on every page load.
+CREATE TRIGGER trg_review_flag_after_insert AFTER INSERT ON review_flag
+BEGIN
+    UPDATE company SET needs_review = EXISTS (
+        SELECT 1 FROM review_flag WHERE company_id = NEW.company_id AND resolved_at IS NULL
+    ) WHERE id = NEW.company_id;
+END;
+
+CREATE TRIGGER trg_review_flag_after_update AFTER UPDATE ON review_flag
+BEGIN
+    UPDATE company SET needs_review = EXISTS (
+        SELECT 1 FROM review_flag WHERE company_id = NEW.company_id AND resolved_at IS NULL
+    ) WHERE id = NEW.company_id;
+END;
+
+CREATE TRIGGER trg_review_flag_after_delete AFTER DELETE ON review_flag
+BEGIN
+    UPDATE company SET needs_review = EXISTS (
+        SELECT 1 FROM review_flag WHERE company_id = OLD.company_id AND resolved_at IS NULL
+    ) WHERE id = OLD.company_id;
+END;
 
 -- ─────────────────────────────────────────────────────────────
 -- Raw fetched pages. Kept so re-scoring never costs a refetch.
@@ -469,6 +542,18 @@ The last three exist solely so the research brief can state its basis (§8). The
 
 `python -m portal reconcile` — polls every `llm_batch` row with status `submitted`, writes returned extractions as signals, sets `actual_cost_usd`, moves status to `reconciled`. Safe to run repeatedly. Must be run before `score --phase 2` produces trustworthy output; `score --phase 2` warns loudly if unreconciled batches exist for the companies being scored.
 
+**B4 — reconciled signals carry the submitting run's `run_id`**, i.e. `llm_batch.run_id`, not the id of the run doing the reconciling.
+
+`uq_signal_identity` is `(run_id, company_id, key, evidence_url)`. Writing under a fresh `run_id` on each invocation would mean the unique index cannot dedupe, so a `reconcile` that writes 40 of 60 companies and then dies would have the next invocation re-insert all 60. Under the submitting run's id, `INSERT OR IGNORE` behaves as it does everywhere else and "safe to run repeatedly" actually holds. It also keeps the reserved spend (§7 control 4) and the resulting evidence on the same `run` row.
+
+Consequences to expect rather than treat as bugs:
+
+- `observed_at` is reconcile wall-clock time, not the submitting run's. So `signal.observed_at > run.finished_at` is normal, and `company_profile`'s latest-wins resolution is unaffected — the batch result genuinely is the newest thing known.
+- A run's signal set can therefore grow after its `finished_at`. A finished run is not a closed one until its batches have reconciled.
+- The reconciling run still gets its own `run` row with `stage='reconcile'`, for started/finished timestamps and batches polled. It just does not own the signals.
+
+**B3.1 — the cost ledger reconciles against the submitting run.** `llm_batch.actual_cost_usd` is written at reconciliation, and the estimate-to-actual correction is applied to the *submitting* run's `run.est_cost_usd`, because that is where §7 control 4 made the reservation. The reconciling run does not absorb the delta.
+
 ### 5.7 score --phase 2
 
 Recomputes the full score including Phase-2 signals. Writes a `phase=2` score row; the UI shows the latest phase available per company.
@@ -499,7 +584,7 @@ post_count        = content.blog_post_count
 if not blog_exists:
     → opp.no_blog          +25
 elif blog_last_post is NULL:
-    → no rung fires; set needs_review = 'blog_date_unparseable'
+    → no rung fires; raise review_flag 'blog_date_unparseable' (§4, §6.4)
 elif days_since_newest > 365:
     → opp.blog_stale       +20
 elif post_count < 10:
@@ -544,7 +629,9 @@ Never delete, never silently drop. Two tiers:
 - `too_large` — requires **two** independent indicators from: Konzern structure, > 250 employees stated, > 5 named Geschäftsführer, "Vorstand" **together with** register type AG and multi-location footprint. A lone "Vorstand" mention never excludes (small AGs and Vereine have one).
 - `unreachable` — after 2 attempts on different days
 
-**Soft (`needs_review = 1`, surfaced in a dedicated UI filter, human decides):**
+**Soft (one `review_flag` row per reason, surfaced in a dedicated UI filter, human decides):**
+
+These three are independent and can all apply to one company, which is why they are rows rather than a shared column. Raising one sets `company.needs_review` by trigger; resolving the last open one clears it.
 
 - `no_impressum` — after the two-step discovery in §5.2 fails. For DE/AT this usually means not a real trading business, but it can be a footer-parsing miss, so a human glances before it dies. For **CH** companies this is always soft: the Swiss disclosure duty (UWG) is structured differently from §5 DDG and legitimate Swiss shops may present the information under "Kontakt".
 - `possible_marketplace_only` — shop platform detected but < 5 product URLs on own domain
@@ -617,6 +704,7 @@ Single page, server-rendered, HTMX for interactions. No SPA.
 - Row expands to show every `score_component` with its reason and a link to the evidence artifact.
 - LLM-derived fields visually marked (e.g. a dotted underline) and hoverable to show `confidence` and `evidence_url`. Fields with `confidence=0` (failed substring verification, §5.5b) rendered in red — never trust these in a letter without checking the source.
 - Actions per row: mark excluded (with reason), clear/confirm needs_review, log an outreach attempt, export the research brief.
+- An expanded row lists its open `review_flag` reasons individually, each independently clearable — clearing writes `resolved_at`, `resolved_by_human = 1` and an optional note, so "not yet reviewed" and "reviewed and dismissed" stay distinguishable. The row-level `needs_review` marker clears when the last open flag does.
 
 **Research brief export** (per company, German, Markdown). Findings section built from `score_component.reason` sentences. KI-Sichtbarkeit section built from the `ai.*` signals, in the format proven in live pitches, with a mandatory basis line:
 

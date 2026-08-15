@@ -1,0 +1,35 @@
+[project]
+name = "lead-portal"
+version = "0.3.0"
+description = "Locally-run lead research tool for DACH e-commerce SMEs"
+requires-python = ">=3.11"
+
+# The dependency list is a design decision, not an accident. Adding anything
+# beyond this requires asking first. See the implementation brief.
+dependencies = [
+    "fastapi",
+    "httpx",
+    "selectolax",
+    "anthropic",
+    "pydantic",
+    "jinja2",
+]
+
+[project.scripts]
+portal = "portal.cli:main"
+
+# Default ruff config, per the brief. The single deviation: docs/ holds spec
+# prose whose illustrative Python blocks ruff would otherwise reformat. The
+# spec is the source of truth; a formatter does not get to edit it.
+[tool.ruff]
+extend-exclude = ["docs"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["portal"]
+
+[tool.setuptools.package-data]
+portal = ["migrations/*.sql"]

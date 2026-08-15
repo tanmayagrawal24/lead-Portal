@@ -1,0 +1,17 @@
+# Secrets: environment only, never in the repo (§7 control 9)
+.env
+
+# Runtime state: the database and fetched artifact bodies
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
