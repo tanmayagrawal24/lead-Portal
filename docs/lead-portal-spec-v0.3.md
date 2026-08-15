@@ -29,8 +29,30 @@ Resolutions to findings raised in `v0.3-review-findings.md`. Applied before M0.
 | B2 | `needs_review_reason` is one column; three soft flags can co-occur | Reasons move to a `review_flag` table, one row per (company, reason). `company.needs_review` survives as a boolean maintained by trigger, so §9's filter and `idx_company_review` still work; `company.needs_review_reason` is dropped. | §4, §6.2, §6.4, §9 |
 | B4 | `run_id` for signals written by `reconcile` was undefined | Reconciled signals carry the **submitting** run's id (`llm_batch.run_id`), not the reconciling run's. | §5.6 |
 | B3.1 | Cost-ledger ownership across the batch boundary | `actual_cost_usd` reconciles against the submitting run's `est_cost_usd`, where the reservation was made. | §5.6 |
+| A5.1 | Product sample must be stable across runs | **Tier 0 reuse:** an existing `product_page` artifact is re-sampled while it still returns HTTP 200; on 404/error it is discarded and selection falls through to Tier 1/2. §4 requires that re-scoring never need a refetch, so the evidence a score points at must not move under it. | §5.2 |
+| A5.2 | Candidate sources undefined | Three tiers: platform product sitemap (union of **all** shards, `.xml.gz` decompressed) → path-pattern candidates from fetched sitemaps → product-pattern links on the homepage. | §5.2 |
+| A5.3 | Ordering undefined | Lexicographic minimum by **Unicode code point**, never locale collation. Chosen over document order because Shopware re-shards product sitemaps on a schedule, making document order stable only by accident. | §5.2 |
+| A5.4 | Non-product URLs contaminate the candidate set | Four filters: reject query strings; require a path segment after the pattern; reject category/listing patterns; reject anything under the detected blog path. | §5.2 |
+| A5.5 | Unchecked sites scored as "no schema" | Zero candidates, or a selected sample whose fetch fails, writes **no** `schema.product_present` signal — not `0`. | §5.2 |
+| A5.6 | `opp.no_product_schema` could fire unmeasured | **Guard:** the rule fires only when `schema.product_present` was written from a product page fetched with HTTP 200; absent that signal it fires in neither direction. Clarifies what the existing predicate presupposes — no weight or threshold changes. **✅ Ratified 2026-08-15.** | §6.2 |
+| A5.7 | Selection was unauditable from the database | New signal key `catalog.product_sample_url` (text, unscored, no schema change); `evidence_url` is the sitemap or homepage it was read from. **✅ Ratified 2026-08-15.** | §5.2, §5.3 |
 
-Remaining findings (A1–A5, B1, B3.2–B3.3, B5–B7, C1–C4) are still open and are not required by M0.
+### Amendments after the M1 review — 2026-08-15
+
+Rulings on the questions M1 parked (`docs/m1-handoff.md` §7) and on one defect the review found. Applied on `m1-fetch`.
+
+| # | Question or defect | Resolution | Section |
+|---|---|---|---|
+| M1.1 | Redirect hops bypassed the rate limiter and could reach a host whose robots.txt was never read | Redirects are followed one hop at a time, each waiting on the limiter; a hop that changes host is followed only after that host's robots.txt has been fetched and consulted, and is otherwise refused and recorded. | §5.2 |
+| M1.2 | `Crawl-delay` was ignored | Honour `max(1.0, Crawl-delay)`, capped at 10 s; above the cap the domain is skipped and the reason recorded. | §5.2 |
+| M1.3 | `defusedxml` for third-party sitemap XML | **Declined — no new dependency.** A sitemap whose bytes contain `<!DOCTYPE` or `<!ENTITY` is refused before parsing, which removes the entity-expansion class outright. | §5.2 |
+| M1.4 | `/p/` as a Tier 2 product pattern | **Dropped** until observed in the wild. The errors are asymmetric: a false positive wrongly awards +10, a false negative only leaves a signal unwritten, which A5.5 already handles. | §5.2 |
+| M1.5 | `signal` writes used `INSERT OR IGNORE`, which swallows CHECK violations | Idiom changes to `ON CONFLICT (run_id, company_id, key, evidence_url) DO NOTHING`, everywhere signals are written. Same fix `review_flag` already carries. | §4, §5.6 |
+| M1.6 | `uvicorn` absent from the named stack | **Approved for M4.** FastAPI cannot serve itself; a gap in the stack list, not scope creep. | §3 |
+| M1.7 | Failure-artifact and robots-exclusion policy existed only in code | Both written into the spec: failure rows update in place, and "required paths" is defined for the two paths that are not knowable up front. | §5.2 |
+| M1.8 | Apex and www were separate politeness budgets for one server, so an apex→www redirect ran at 2 req/s | The politeness key strips `www.` and keeps the port; other subdomains stay separate, recorded as accepted. The robots.txt key stays origin-based, so each name is still asked for its own file. | §5.2 |
+
+Remaining findings (A1–A4, B1, B3.2–B3.3, B5–B7, C1–C4) are still open and are not required by M0 or M1.
 
 ## Changelog v0.1 → v0.2 (retained for the record)
 
@@ -110,7 +132,9 @@ Explicitly out of scope. Do not implement these, and do not let scope creep add 
                   FastAPI + HTMX UI  (localhost:8000)
 ```
 
-**Stack:** Python 3.11+, FastAPI, SQLite (WAL mode), `httpx`, `selectolax` for parsing, `anthropic` SDK, Jinja2 + HTMX for the UI. No build step, no Node, no Docker.
+**Stack:** Python 3.11+, FastAPI, SQLite (WAL mode), `httpx`, `selectolax` for parsing, `anthropic` SDK, Jinja2 + HTMX for the UI, and `uvicorn` **from M4 only** — FastAPI is a framework and cannot serve itself, so `portal serve` (§9) needs an ASGI server. It is listed here so it is not mistaken for scope creep later. No build step, no Node, no Docker.
+
+The list is closed. Anything not named here is a decision to be taken deliberately, not a convenience import — see M1.3 above, where a security concern was answered inside the stack rather than by adding to it.
 
 **Repo layout:** single self-contained repository. No fork of any scraping framework exists or is needed.
 
@@ -239,10 +263,12 @@ CREATE UNIQUE INDEX uq_artifact_identity ON artifact(company_id, kind, content_h
 ```sql
 INSERT INTO artifact (company_id, kind, url, http_status, content_hash, body_path, bytes, fetched_at, last_checked_at)
 VALUES (?,?,?,?,?,?,?,?,?)
-ON CONFLICT (company_id, kind, content_hash) DO UPDATE
+ON CONFLICT (company_id, kind, content_hash) WHERE content_hash IS NOT NULL DO UPDATE
 SET last_checked_at = excluded.last_checked_at,
     http_status     = excluded.http_status;
 ```
+
+> The `WHERE content_hash IS NOT NULL` on the conflict target is not optional and is not decoration. `uq_artifact_identity` is a **partial** index, and SQLite matches a conflict target to a partial index only when the predicate is repeated verbatim. Without it every artifact write raises `ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint`. Found in M1; v0.3's original snippet omitted it and could never have run.
 
 ```sql
 -- ─────────────────────────────────────────────────────────────
@@ -264,8 +290,19 @@ CREATE TABLE signal (
 );
 CREATE INDEX idx_signal_company_key ON signal(company_id, key);
 -- Idempotency: re-running a crashed extract stage must not duplicate observations
--- within the same run. All writes to signal use INSERT OR IGNORE. See §5 (D6)
--- for what this does and does not guarantee across run boundaries.
+-- within the same run. See §5 (D6) for what this does and does not guarantee
+-- across run boundaries.
+--
+-- M1.5 — every write to signal uses this idiom:
+--
+--   INSERT INTO signal (…) VALUES (…)
+--   ON CONFLICT (run_id, company_id, key, evidence_url) DO NOTHING;
+--
+-- NOT `INSERT OR IGNORE`. `OR IGNORE` suppresses the CHECK on `method` as well
+-- as the uniqueness conflict, so a typo'd or renamed method would be dropped in
+-- silence — a signal that was never written, indistinguishable from one that
+-- was never observed. The targeted DO NOTHING dedupes and nothing more. This is
+-- the same trap review_flag avoids, for the same reason.
 CREATE UNIQUE INDEX uq_signal_identity ON signal(run_id, company_id, key, evidence_url);
 
 -- ─────────────────────────────────────────────────────────────
@@ -425,10 +462,64 @@ Politeness rules are **hard requirements**, not options:
 
 - Fetch and honour `robots.txt` before anything else. Exclusion applies **only if the paths this tool needs** (`/`, `/sitemap.xml`, the Impressum path, the blog path) are disallowed for our User-Agent or `*`. A robots.txt that disallows `/checkout/` or `/account/` is normal and is not a refusal.
 - One request per second per host, max 2 concurrent hosts.
+- **"Host" for the politeness budget means the authority with any `www.` prefix removed.** `example.de` and `www.example.de` are one machine and get one budget. Keyed separately, the apex→www redirect that nearly every shop has would let each back-to-back pair issue two requests to one server inside a second — double this floor, on almost every domain in the corpus. **The port is kept**: `example.de:8001` and `example.de:8002` are separate servers. **Other subdomains are kept separate** — `shop.example.de` is commonly a different machine, and merging its budget with the apex would slow honest crawling for no gain. *Accepted, with the risk named:* where a shop does serve both names off one machine, we allow up to 2 req/s across the pair.
+- This is **not** the same key as the one that decides which `robots.txt` applies. Robots is keyed to the origin (RFC 9309), so `example.de` and `www.example.de` are separate there and each is asked for its own file. Two questions, two keys: collapsing them one way doubles the request rate, the other way skips a robots.txt.
 - `User-Agent: CreativePotatoesBot/1.0 (+https://creative-potato.global)` — identifiable, with a contact route.
 - Plain `httpx` only. No headless browser unless a site returns an empty `<body>`, and then only as a per-domain opt-in flag.
 
+**Which paths are "required" (M1.7).** Two of the four are not knowable before fetching, so the test is defined on what is:
+
+- Hard-exclude when `/` is disallowed, **or** `/sitemap.xml` is disallowed, **or** *every* Impressum probe path (`/impressum`, `/impressum/`, `/imprint`, `/legal`, `/rechtliches`) is disallowed.
+- A *single* disallowed path is never an exclusion. It is skipped per-URL and recorded with `error='robots_disallowed: …'`, so the skip is visible in the artifact table rather than silent.
+- The blog path is checked per-URL once the sitemap reveals it. **A disallowed blog is a missing signal, not grounds for exclusion** — treating it as a refusal would discard exactly the leads whose weak blogs this tool exists to find.
+
+**`Crawl-delay` (M1.2).** Honour `max(1.0, Crawl-delay)` for the stating host: our floor already exceeds a `Crawl-delay: 1`, and a larger value is a request to go slower, which we grant. A delay is read for our own agent token first and the `*` group otherwise.
+
+Above **10 s**, do not obey — **skip the domain** and record `excluded_reason = 'crawl_delay_too_high: …'`. A value that large is a hostile or broken file, and one of two worker slots parked behind it for minutes costs the run more than the domain is worth. The delay is necessarily read from the robots.txt response itself, so that one request goes out at the floor; every subsequent request to that host respects the stated delay.
+
+**Redirects are requests (M1.1).** A redirect chain must not be followed inside a single client call: that issues every hop below the rate limiter, so a site redirecting `http → https → /slash/` fires three requests at one host inside a second, and a cross-host hop reaches a host whose robots.txt was never read. Both breach the two rules above. Therefore:
+
+- Follow at most **5 hops**, one at a time, each waiting on the limiter for **its own** host.
+- A hop that **changes host** is followed only after that host's `robots.txt` has been fetched and consulted, and only if it permits the target. Otherwise the hop is refused and recorded as `error='redirect_refused: …'`. The new host's `Crawl-delay` applies too, cap included.
+- The one exception is the `robots.txt` fetch itself, which may follow a hop within the seeded site (the apex↔www redirect nearly every shop has) — there is no earlier robots.txt that could authorise it, and the hop stays inside the domain we were asked to crawl. A hop off the seeded site during a robots fetch is refused.
+- `artifact.url` records the **final** URL, so the evidence link points where the content actually came from.
+
+`same_site` checks in the callers answer *attribution* — is this our page? They do not answer politeness, because by the time a caller sees the response the request has already gone out. The enforcement belongs in the transport.
+
+**Failure artifacts update in place (M1.7).** `uq_artifact_identity` is a partial index over non-NULL hashes, so it does not constrain failure rows. Left to a plain INSERT, every re-run would append another row for the same dead URL and `artifact` would grow without bound. A failure row for the same `(company_id, kind, url)` is therefore **updated in place**, advancing `last_checked_at`. *When* a URL last failed is worth keeping; a row per attempt is not.
+
+**Third-party XML (M1.3).** Sitemaps are attacker-controlled input parsed by stdlib `ElementTree`. A sitemap whose bytes contain `<!DOCTYPE` or `<!ENTITY` is **refused before parsing** — no real sitemap needs either, and refusing removes the entity-expansion class without adding a dependency. Bodies are capped at 8 MB before parsing and shards at 50 per company; a parse failure yields "no URLs" rather than aborting a run.
+
 Fetch order: `robots.txt` → homepage → `sitemap.xml` (and any nested sitemaps) → Impressum → blog index if a blog path is found → one sample product page if a product path is found.
+
+**Product sample selection (A5).** `opp.no_product_schema` (+10) reads a single sampled product page, so which page is sampled has to be a stated rule. "Deterministic" here cannot mean "the same URL forever" — a catalog changes, and any rule keyed to the catalog picks differently once it does. The guarantee is **same inputs → same choice**, with the chosen URL recorded so the score traces to a specific stored artifact.
+
+*Tier 0 — reuse.* If a `product_page` artifact already exists for this company and its URL is still a valid candidate, re-sample **that** URL and consider nothing else. This is what keeps `schema.product_present` from flipping between runs for reasons unrelated to the site, and it lets the content-hash short-circuit do its job.
+
+Reuse holds only while the stored sample still returns **HTTP 200**. On a 404 or a fetch error the stored sample is discarded and selection falls through to Tier 1/2, so a dead sample is never pinned forever.
+
+"Discarded" means **excluded from the re-selection**, not merely un-reused: a dead URL is still the code-point minimum of its candidate set, so without the exclusion the fall-through would re-choose the very URL that just failed. At most **two** product requests are made per company per run — the Tier 0 probe and one fresh selection. If the fresh selection also fails, no sample is recorded and no `schema.product_present` is written.
+
+*Tier 1 — platform product sitemap.* When a platform-specific product sitemap is detected (Shopware `…-product-….xml(.gz)`, Shopify `sitemap_products_*.xml`, WooCommerce `product-sitemap.xml`), candidates are the **union of all its shards**, not the first shard. `.xml.gz` shards are decompressed before parsing.
+
+*Tier 2 — path patterns.* With no product sitemap, candidates are URLs from the fetched sitemaps matching `/detail/`, `/products/`, `/produkt/`. With no sitemap at all, fall back to product-pattern links on the homepage.
+
+`/p/` was in this list and is **dropped (M1.4)** until it is observed on a real shop. It is a product prefix on some platforms and a *pagination* prefix on others, and the two errors are not equally bad: a false positive feeds a listing page to `schema.product_present` and wrongly awards +10, while a false negative merely leaves the signal unwritten — which the zero-candidates rule below already handles correctly. When the failure modes are asymmetric, take the safe side. A pattern goes back into this list on evidence, not on plausibility.
+
+*Ordering, in every tier:* the **lexicographically smallest** URL, compared by **Unicode code point**. Never locale collation — a locale-dependent sort over a corpus full of umlauts is a reproducibility bug. Code-point ordering over the union is invariant to both intra-file reordering and inter-shard redistribution, which document order is not: Shopware regenerates and re-shards product sitemaps on a schedule, so document order is stable only by accident.
+
+*Filters, applied before ordering.* The ordering barely matters; which URLs qualify matters a great deal, because a non-product URL that reaches the candidate set produces a false `Product`-absent reading and wrongly awards +10. §5.3 already warns that Shopware sitemaps mix content and product URLs.
+
+- Reject URLs carrying a query string — variant and filter permutations, not canonical pages.
+- Require a path segment **after** the pattern. Bare `/products/` is Shopify's collection listing; `/products/<handle>` is the product.
+- Reject URLs also matching category/listing patterns (`/kategorie/`, `/collections/`, `/c/`).
+- Reject anything under the blog path detected for `content.blog_exists`.
+
+*Zero candidates.* No product page is fetched and **no `schema.product_present` signal is written — not `0`.** A `0` there means "checked, absent", which fires `opp.no_product_schema` for +10 against a site whose product pages were never retrieved. That is the same error as the blog ladder's `NULL` branch (§6.2), and it is refused for the same reason. The same applies when a sample is selected but its fetch fails — 404, timeout, robots-disallowed.
+
+No new review reason is needed: zero product candidates on a detected shop platform already satisfies `possible_marketplace_only` (§6.4).
+
+*Auditability.* The chosen URL is recorded as `catalog.product_sample_url` (text, unscored), with `evidence_url` set to the sitemap or homepage it was read from. Without it, `schema.product_present` points at a product page with no record of *why that page*, and the selection rule is unauditable from the database.
 
 **Impressum discovery** is two-step: (1) footer links matching `impressum|imprint|legal notice|rechtliches`; (2) if none, probe direct paths `/impressum`, `/impressum/`, `/imprint`, `/legal`, `/rechtliches` before concluding absence. Only after both steps fail is `no_impressum` recorded — and for CH companies it sets `needs_review`, not `excluded` (§6.4).
 
@@ -449,6 +540,7 @@ Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, pa
 | `perf.lighthouse_performance` | PageSpeed Insights API — **Phase 2 only** (slow: 15–30 s/site) | Cache by `artifact.last_checked_at` age; do not re-run within 30 days |
 | `agency.footer_credit` | Regex for `realisiert von\|umgesetzt von\|powered by\|Webdesign:` in footer, plus outbound footer links whose anchor/title contains `agentur\|design\|media\|digital` | Under-detects (logo-only credits). Treated as bonus negative signal, never as a gate |
 | `reviews.trusted_shops`, `reviews.count` | Trusted Shops badge script detection; visible aggregate review count in `AggregateRating` JSON-LD | Free product-strength proxy |
+| `catalog.product_sample_url` | The product URL selected by the A5 rule in §5.2. Written by `fetch`, not by an extractor — it records a fetch-time decision. | **Unscored.** Exists so the sample behind `schema.product_present` is auditable |
 
 ### 5.4 score --phase 1
 
@@ -551,7 +643,7 @@ The last three exist solely so the research brief can state its basis (§8). The
 
 **B4 — reconciled signals carry the submitting run's `run_id`**, i.e. `llm_batch.run_id`, not the id of the run doing the reconciling.
 
-`uq_signal_identity` is `(run_id, company_id, key, evidence_url)`. Writing under a fresh `run_id` on each invocation would mean the unique index cannot dedupe, so a `reconcile` that writes 40 of 60 companies and then dies would have the next invocation re-insert all 60. Under the submitting run's id, `INSERT OR IGNORE` behaves as it does everywhere else and "safe to run repeatedly" actually holds. It also keeps the reserved spend (§7 control 4) and the resulting evidence on the same `run` row.
+`uq_signal_identity` is `(run_id, company_id, key, evidence_url)`. Writing under a fresh `run_id` on each invocation would mean the unique index cannot dedupe, so a `reconcile` that writes 40 of 60 companies and then dies would have the next invocation re-insert all 60. Under the submitting run's id, the §4 `ON CONFLICT … DO NOTHING` idiom behaves as it does everywhere else and "safe to run repeatedly" actually holds. It also keeps the reserved spend (§7 control 4) and the resulting evidence on the same `run` row.
 
 Consequences to expect rather than treat as bugs:
 
@@ -611,7 +703,7 @@ The `blog_last_post is NULL` branch is new and deliberate. A blog index whose da
 | rule_id | Condition | Points |
 |---|---|---|
 | `opp.no_article_schema` | Blog **exists** and no `Article`/`BlogPosting` in JSON-LD on blog pages. Never fires together with `opp.no_blog`. | +8 |
-| `opp.no_product_schema` | No `Product` in JSON-LD on a product page | +10 |
+| `opp.no_product_schema` | No `Product` in JSON-LD on a product page. **Fires only when `schema.product_present` was written from a product page fetched with HTTP 200** (§5.2, A5) — absent that signal the rule fires in neither direction. | +10 |
 | `opp.ai_invisible` | `ai.queries_checked >= 2` and `ai.brand_mentions = 0` (Phase 2) | +15 |
 | `opp.slow_site` | Lighthouse performance < 50 (Phase 2) | +10 |
 | `opp.de_only` | Single distinct language (locale variants don't count), expansion angle | +5 |

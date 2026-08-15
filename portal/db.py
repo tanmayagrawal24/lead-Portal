@@ -20,7 +20,16 @@ def connect(path: Path) -> sqlite3.Connection:
     all-or-nothing guarantee migrations need.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, isolation_level=None)
+    conn = sqlite3.connect(
+        path,
+        isolation_level=None,
+        # The fetch stage runs two host-workers (§5.2) that share this
+        # connection. Every cross-thread use is serialised behind
+        # `FetchStage._db_lock`, so the same-thread guard is redundant here —
+        # but it is a guard, so removing it puts the onus on that lock. Any
+        # new threaded stage must take the same lock.
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     # WAL is persistent — recorded in the file header, not per connection —
     # but setting it every time costs nothing and keeps it true.

@@ -137,8 +137,19 @@ CREATE TABLE signal (
 );
 CREATE INDEX idx_signal_company_key ON signal(company_id, key);
 -- Idempotency: re-running a crashed extract stage must not duplicate observations
--- within the same run. All writes to signal use INSERT OR IGNORE. See §5 (D6)
--- for what this does and does not guarantee across run boundaries.
+-- within the same run. See §5 (D6) for what this does and does not guarantee
+-- across run boundaries.
+--
+-- M1.5 — every write to signal uses this idiom:
+--
+--   INSERT INTO signal (…) VALUES (…)
+--   ON CONFLICT (run_id, company_id, key, evidence_url) DO NOTHING;
+--
+-- NOT `INSERT OR IGNORE`. `OR IGNORE` suppresses the CHECK on `method` as well
+-- as the uniqueness conflict, so a typo'd or renamed method would be dropped in
+-- silence — a signal that was never written, indistinguishable from one that
+-- was never observed. Same trap review_flag avoids above, same reason.
+--
 -- B4: signals written by `reconcile` carry the SUBMITTING run's run_id, which is
 -- what makes repeated reconciliation dedupe here rather than duplicate (§5.6).
 CREATE UNIQUE INDEX uq_signal_identity ON signal(run_id, company_id, key, evidence_url);
