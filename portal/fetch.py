@@ -17,6 +17,7 @@ This stage writes artifacts and exactly one signal — `catalog.product_sample_u
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -44,6 +45,9 @@ from portal.urls import (
     path_of,
     same_site,
 )
+
+#: Trailing slashes, for the "did this land on the homepage?" check (M1.17).
+_TRAILING_SLASH = re.compile(r"/+$")
 
 
 @dataclass
@@ -291,13 +295,24 @@ class FetchStage:
         def allowed(url: str) -> bool:
             return policy.allows(url)
 
-        def get(kind: str, url: str) -> Response | None:
-            """Fetch one URL if robots permits, recording either way."""
+        def get(
+            kind: str, url: str, accept: Callable[[Response], str | None] | None = None
+        ) -> Response | None:
+            """Fetch one URL if robots permits, recording either way.
+
+            `accept` may reject a 200 that is not what it claims to be, giving
+            the reason. The row is then stored as a *failure* rather than as a
+            body of that kind (M1.17): the request happened and must be
+            recorded, but `artifact` is the interface M2 reads by kind, so a
+            homepage must not sit in it as an `impressum`.
+            """
             if not allowed(url):
                 skipped = Response(url=url, error=robots_mod.disallowed_reason(url))
                 result.artifacts.append(self._record(company_id, domain, kind, skipped))
                 return None
             response = self.fetcher.get(url, hop_allowed=hop_allowed)
+            if response.ok and accept is not None and (why := accept(response)):
+                response = Response(url=url, status=response.status, error=why)
             result.artifacts.append(self._record(company_id, domain, kind, response))
             return response
 
@@ -382,18 +397,39 @@ class FetchStage:
         get,
     ) -> None:
         """§5.2 two-step. `no_impressum` is recorded only after both steps fail."""
+
+        def not_the_homepage(response: Response) -> str | None:
+            """An Impressum request that landed on the homepage is not an
+            Impressum (M1.17).
+
+            `snocks.com` in `run 2`: its real Impressum is robots-disallowed, so
+            probing ran, and `/imprint` redirected to `/#gbaid979323` — the
+            homepage. It was stored as the Impressum, carrying the homepage's
+            own content hash. §5.5b would then hand the homepage to the
+            Impressum extraction and get a confident answer about the wrong
+            page. A soft redirect to the root is the site saying "no such
+            page"; recording it as an absence routes the company to review,
+            which is what §5.2's two-step does with an absence anyway.
+            """
+            if _TRAILING_SLASH.sub("", path_of(response.url)) in ("", "/"):
+                result.notes.append(
+                    f"impressum request landed on the homepage: {response.url}"
+                )
+                return f"soft_redirect_to_homepage: {response.url}"
+            return None
+
         if homepage_html:
             linked = impressum_mod.find_impressum_link(
                 homepage_html, homepage_url(base), domain
             )
             if linked:
-                response = get("impressum", linked)
+                response = get("impressum", linked, accept=not_the_homepage)
                 if response is not None and response.ok:
                     result.notes.append("impressum found via footer link")
                     return
 
         for probe in impressum_mod.probe_urls(base):
-            response = get("impressum", probe)
+            response = get("impressum", probe, accept=not_the_homepage)
             if response is not None and response.ok:
                 result.notes.append(f"impressum found by probing {path_of(probe)}")
                 return

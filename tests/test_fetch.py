@@ -438,6 +438,67 @@ class TestSameHostRedirectsAreRobotsChecked(FetchTestCase):
         allowed and its target genuinely is not."""
         self._assert_never_fetched("/Impressum", "/Impressum")
 
+    def test_a_probe_that_lands_on_the_homepage_is_not_an_impressum(self) -> None:
+        """M1.17, from `run 2`. With the real Impressum robots-disallowed,
+        snocks.com's `/imprint` probe 302'd to `/#gbaid979323` — the homepage —
+        and it was stored as the Impressum, with the homepage's own content
+        hash. A soft redirect to the root means "no such page"."""
+
+        def build(base: str) -> Site:
+            site = shopfixtures.flat_shop(base, with_impressum=False)
+            site.add(
+                "/robots.txt",
+                "User-agent: *\nDisallow: /policies/\n",
+                content_type="text/plain",
+            )
+            site.add(
+                "/",
+                shopfixtures.homepage(
+                    footer_impressum=False,
+                    extra_links='<footer><a href="/policies/legal-notice">'
+                    "Impressum</a></footer>",
+                ),
+            )
+            site.add("/policies/legal-notice", shopfixtures.IMPRESSUM_HTML)
+            for probe in ("/impressum", "/impressum/", "/imprint", "/legal"):
+                site.add_redirect(probe, f"{base}/")
+            return site
+
+        server = self.serve(build)
+        result = self.run_fetch(server)
+
+        impressum_rows = [
+            row
+            for row in self.artifact_rows(result.company_id)
+            if row["kind"] == "impressum"
+        ]
+        self.assertTrue(impressum_rows, "the probes themselves must still be recorded")
+        for row in impressum_rows:
+            self.assertIsNone(
+                row["body_path"],
+                "the homepage must never be stored as an Impressum body",
+            )
+        self.assertTrue(
+            any(
+                "soft_redirect_to_homepage" in (row["error"] or "")
+                for row in impressum_rows
+            ),
+            "the rejection must be recorded with its reason, not silently dropped",
+        )
+
+        homepage_hash = next(
+            row["content_hash"]
+            for row in self.artifact_rows(result.company_id)
+            if row["kind"] == "homepage"
+        )
+        self.assertNotIn(
+            homepage_hash,
+            [row["content_hash"] for row in impressum_rows],
+            "the giveaway in run 2: the impressum row carried the homepage's hash",
+        )
+        self.assertIn("no_impressum", self.review_flags(result.company_id))
+        self.assertIn("landed on the homepage", " ".join(result.notes))
+
     def test_an_allowed_same_host_hop_is_still_followed(self) -> None:
         """The anti-vacuity case. If the new check refused same-host hops
         wholesale the two tests above would pass for the wrong reason, and every
