@@ -50,6 +50,7 @@ Rulings on the questions M1 parked (`docs/m1-handoff.md` §7) and on one defect 
 | M1.5 | `signal` writes used `INSERT OR IGNORE`, which swallows CHECK violations | Idiom changes to `ON CONFLICT (run_id, company_id, key, evidence_url) DO NOTHING`, everywhere signals are written. Same fix `review_flag` already carries. | §4, §5.6 |
 | M1.6 | `uvicorn` absent from the named stack | **Approved for M4.** FastAPI cannot serve itself; a gap in the stack list, not scope creep. | §3 |
 | M1.7 | Failure-artifact and robots-exclusion policy existed only in code | Both written into the spec: failure rows update in place, and "required paths" is defined for the two paths that are not knowable up front. | §5.2 |
+| M1.8 | Apex and www were separate politeness budgets for one server, so an apex→www redirect ran at 2 req/s | The politeness key strips `www.` and keeps the port; other subdomains stay separate, recorded as accepted. The robots.txt key stays origin-based, so each name is still asked for its own file. | §5.2 |
 
 Remaining findings (A1–A4, B1, B3.2–B3.3, B5–B7, C1–C4) are still open and are not required by M0 or M1.
 
@@ -461,6 +462,8 @@ Politeness rules are **hard requirements**, not options:
 
 - Fetch and honour `robots.txt` before anything else. Exclusion applies **only if the paths this tool needs** (`/`, `/sitemap.xml`, the Impressum path, the blog path) are disallowed for our User-Agent or `*`. A robots.txt that disallows `/checkout/` or `/account/` is normal and is not a refusal.
 - One request per second per host, max 2 concurrent hosts.
+- **"Host" for the politeness budget means the authority with any `www.` prefix removed.** `example.de` and `www.example.de` are one machine and get one budget. Keyed separately, the apex→www redirect that nearly every shop has would let each back-to-back pair issue two requests to one server inside a second — double this floor, on almost every domain in the corpus. **The port is kept**: `example.de:8001` and `example.de:8002` are separate servers. **Other subdomains are kept separate** — `shop.example.de` is commonly a different machine, and merging its budget with the apex would slow honest crawling for no gain. *Accepted, with the risk named:* where a shop does serve both names off one machine, we allow up to 2 req/s across the pair.
+- This is **not** the same key as the one that decides which `robots.txt` applies. Robots is keyed to the origin (RFC 9309), so `example.de` and `www.example.de` are separate there and each is asked for its own file. Two questions, two keys: collapsing them one way doubles the request rate, the other way skips a robots.txt.
 - `User-Agent: CreativePotatoesBot/1.0 (+https://creative-potato.global)` — identifiable, with a contact route.
 - Plain `httpx` only. No headless browser unless a site returns an empty `<body>`, and then only as a per-domain opt-in flag.
 

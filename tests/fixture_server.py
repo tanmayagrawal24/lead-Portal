@@ -29,7 +29,7 @@ class Site:
     """A fixture site: a path→response map plus request bookkeeping."""
 
     routes: dict[str, tuple[int, bytes, str]] = field(default_factory=dict)
-    redirects: dict[str, tuple[int, str]] = field(default_factory=dict)
+    redirects: dict[str, tuple[int, str, str | None]] = field(default_factory=dict)
     requests: list[Request] = field(default_factory=list)
     delay: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -49,14 +49,26 @@ class Site:
     ) -> None:
         self.routes[path] = (200, gzip.compress(body.encode("utf-8")), content_type)
 
-    def add_redirect(self, path: str, location: str, status: int = 301) -> None:
+    def add_redirect(
+        self,
+        path: str,
+        location: str,
+        status: int = 301,
+        only_from_host: str | None = None,
+    ) -> None:
         """Serve `path` as a redirect to `location`.
 
         Every hop arrives here as its own request and is recorded like any
         other, which is what lets a test measure whether the politeness floor
         holds *across* a chain rather than only at its head.
+
+        `only_from_host` restricts the redirect to requests carrying that
+        `Host` header, which is how a real apex→www server behaves: one machine,
+        answering on two names, bouncing one to the other. Without it a
+        path-preserving apex→www redirect would bounce forever, since routing
+        here is otherwise by path alone.
         """
-        self.redirects[path] = (status, location)
+        self.redirects[path] = (status, location, only_from_host)
 
     def record_start(self, request: Request) -> None:
         with self._lock:
@@ -69,6 +81,12 @@ class Site:
     def arrivals(self) -> list[float]:
         with self._lock:
             return sorted(r.started for r in self.requests)
+
+    def hosts(self) -> list[str]:
+        """The `Host` header of each request, in arrival order — how a test
+        tells an apex→www hop from a plain same-host one."""
+        with self._lock:
+            return [r.host for r in self.requests]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -92,8 +110,9 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if self.site.delay:
                 time.sleep(self.site.delay)
-            if self.path in self.site.redirects:
-                status, location = self.site.redirects[self.path]
+            redirect = self.site.redirects.get(self.path)
+            if redirect is not None and redirect[2] in (None, host):
+                status, location, _only_from = redirect
                 self.send_response(status)
                 self.send_header("Location", location)
                 self.send_header("Content-Length", "0")

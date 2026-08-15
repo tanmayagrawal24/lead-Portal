@@ -370,6 +370,107 @@ class TestCrossHostRedirects(FetchTestCase):
         )
 
 
+class TestApexToWwwWithinTheSeededSite(FetchTestCase):
+    """The redirect nearly every German shop has, end to end.
+
+    `localhost` and `www.localhost` both resolve to 127.0.0.1, so one fixture
+    server answering on both names is a faithful apex→www host — same machine,
+    two names, one bouncing to the other — with nothing but loopback involved.
+    """
+
+    def _serve_apex_redirecting_to_www(self) -> tuple[FixtureServer, str]:
+        server = FixtureServer(Site())
+        apex = f"localhost:{server.port}"
+        base = f"http://{apex}"
+        server.site.routes.update(shopfixtures.shopware_shop(base).routes)
+        # Path-preserving, and only for requests arriving on the apex name —
+        # exactly how such a server behaves.
+        for path in ("/robots.txt", "/"):
+            server.site.add_redirect(
+                path, f"http://www.{apex}{path}", only_from_host=apex
+            )
+        server.__enter__()
+        self.addCleanup(server.__exit__, None, None, None)
+        return server, base
+
+    def _run(self, base: str) -> fetch.CompanyResult:
+        company_id = self.add_company("localhost")
+        _run_id, results = fetch.run(
+            self.conn,
+            [(company_id, "localhost")],
+            self.artifacts,
+            fetcher=self.fetcher,
+            max_hosts=1,
+            base_url=lambda _d: base,
+        )
+        return results[0]
+
+    def test_the_robots_fetch_follows_the_hop_and_the_run_proceeds(self) -> None:
+        """There is no earlier robots.txt that could authorise this hop, so the
+        rule is that it must stay within the seeded site — which apex→www does.
+        """
+        server, base = self._serve_apex_redirecting_to_www()
+        result = self._run(base)
+
+        apex = f"localhost:{server.port}"
+        robots_hosts = [
+            host
+            for path, host in zip(server.site.paths(), server.site.hosts(), strict=True)
+            if path == "/robots.txt"
+        ]
+        self.assertEqual(
+            robots_hosts,
+            [apex, f"www.{apex}"],
+            "robots.txt should be asked of the apex, then followed to www",
+        )
+        self.assertIsNone(result.excluded_reason)
+        self.assertIn("homepage", result.kinds)
+
+    def test_the_www_policy_is_seeded_so_the_homepage_hop_costs_no_second_fetch(
+        self,
+    ) -> None:
+        """The robots fetch already landed on www, so its policy governs www
+        too. Re-deriving it on the first page hop would be a wasted request
+        against a host we have already read."""
+        server, base = self._serve_apex_redirecting_to_www()
+        self._run(base)
+
+        self.assertEqual(
+            server.site.paths().count("/robots.txt"),
+            2,
+            "one apex request and the hop it redirected to — no re-derivation",
+        )
+
+    def test_a_hop_off_the_seeded_site_during_the_robots_fetch_is_refused(
+        self,
+    ) -> None:
+        """The other half of the rule. Within the site is conventional; anywhere
+        else there is nothing that could have authorised it."""
+        elsewhere = self.serve(
+            lambda base: shopfixtures.shopware_shop(base), address="127.0.0.2"
+        )
+        server = FixtureServer(Site())
+        base = f"http://localhost:{server.port}"
+        server.site.routes.update(shopfixtures.shopware_shop(base).routes)
+        server.site.add_redirect("/robots.txt", f"{elsewhere.base}/robots.txt")
+        server.__enter__()
+        self.addCleanup(server.__exit__, None, None, None)
+
+        result = self._run(base)
+
+        self.assertEqual(
+            elsewhere.site.paths(), [], "the off-site host must never be contacted"
+        )
+        refused = [
+            row
+            for row in self.artifact_rows(result.company_id)
+            if row["error"] and "redirect_refused" in row["error"]
+        ]
+        self.assertTrue(refused, "the refusal must be recorded, not silent")
+        # No usable robots.txt means "no restrictions stated", so the run goes on.
+        self.assertIsNone(result.excluded_reason)
+
+
 class TestImpressumTwoStep(FetchTestCase):
     def test_step_one_follows_a_footer_link(self) -> None:
         server = self.serve(shopfixtures.shopware_shop)

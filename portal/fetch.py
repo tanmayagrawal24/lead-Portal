@@ -35,6 +35,7 @@ from portal.net import (
     Response,
 )
 from portal.urls import (
+    authority_of,
     default_base,
     homepage_url,
     host_of,
@@ -164,10 +165,15 @@ class FetchStage:
     # ── politeness ──────────────────────────────────────────────────────
 
     def _apply_crawl_delay(
-        self, host: str, policy: robots_mod.RobotsPolicy
+        self, url: str, policy: robots_mod.RobotsPolicy
     ) -> str | None:
-        """Honour a host's `Crawl-delay` (§5.2). Returns a refusal reason if it
-        is above the cap, in which case the host must not be fetched at all.
+        """Honour a `Crawl-delay` (§5.2). Returns a refusal reason if it is above
+        the cap, in which case the host must not be fetched at all.
+
+        The delay is stated by an *authority* — apex and www may say different
+        things — but applied to a *budget*, which the two of them share. So the
+        reason names `authority_of` and the limiter is keyed on `host_of`; where
+        both apex and www state a delay, the limiter keeps the larger.
 
         The limiter takes `max(floor, Crawl-delay)`, so a stated delay can only
         ever slow us down. Above `MAX_CRAWL_DELAY_SECONDS` we stop instead of
@@ -180,10 +186,10 @@ class FetchStage:
             return None
         if delay > MAX_CRAWL_DELAY_SECONDS:
             return (
-                f"crawl_delay_too_high: {host} asks for {delay:g}s, "
+                f"crawl_delay_too_high: {authority_of(url)} asks for {delay:g}s, "
                 f"cap is {MAX_CRAWL_DELAY_SECONDS:g}s"
             )
-        self.fetcher.limiter.set_host_interval(host, delay)
+        self.fetcher.limiter.set_host_interval(host_of(url), delay)
         return None
 
     # ── per-company pipeline ────────────────────────────────────────────
@@ -216,46 +222,53 @@ class FetchStage:
             result.excluded_reason = reason
             return result
 
-        # Robots policies by host, so a redirect chain is checked against the
-        # robots.txt of the host it actually lands on. Seeded with both the host
-        # we asked and the host that answered — the same host, unless the robots
-        # fetch was itself redirected within the site, in which case this policy
-        # governs both and its Crawl-delay has to reach both too.
-        seeded_hosts = {host_of(base), host_of(robots_response.url)}
-        policies: dict[str, robots_mod.RobotsPolicy] = dict.fromkeys(
-            seeded_hosts, policy
-        )
-        for host in sorted(seeded_hosts):
-            if (reason := self._apply_crawl_delay(host, policy)) is not None:
+        # Robots policies by authority, so a redirect chain is checked against
+        # the robots.txt of the origin it actually lands on. Seeded with both the
+        # authority we asked and the one that answered — the same, unless the
+        # robots fetch was itself redirected within the site, in which case this
+        # policy governs both and its Crawl-delay has to reach both too.
+        seeded = {
+            authority_of(base): base,
+            authority_of(robots_response.url): robots_response.url,
+        }
+        policies: dict[str, robots_mod.RobotsPolicy] = dict.fromkeys(seeded, policy)
+        for url in seeded.values():
+            if (reason := self._apply_crawl_delay(url, policy)) is not None:
                 self._exclude(company_id, reason)
                 result.excluded_reason = reason
                 return result
 
-        unfetchable: dict[str, str] = {}  # host → why we will not fetch it at all
+        unfetchable: dict[str, str] = {}  # authority → why we will not fetch it
 
         def cross_host(_from_url: str, to_url: str) -> bool:
             """§5.2: "fetch and honour robots.txt before anything else" applies
             to a redirect hop too, because the hop is itself a request.
 
-            Both the lookup and its verdict are memoised per host, so a chain
-            that keeps landing on the same host costs one robots.txt fetch.
+            Keyed on authority rather than on the politeness key: apex and www
+            share a budget but not necessarily a robots.txt, so each is asked
+            for its own. Both the lookup and its verdict are memoised, so a
+            chain that keeps landing on one origin costs one robots.txt fetch.
             """
-            host = host_of(to_url)
-            if host not in policies:
+            authority = authority_of(to_url)
+            if authority not in policies:
                 probe = self.fetcher.get(f"{origin_of(to_url)}/robots.txt")
                 result.artifacts.append(
                     self._record(company_id, domain, "robots", probe)
                 )
-                policies[host] = robots_mod.parse(probe.text() if probe.ok else None)
-                refusal = self._apply_crawl_delay(host, policies[host])
+                policies[authority] = robots_mod.parse(
+                    probe.text() if probe.ok else None
+                )
+                refusal = self._apply_crawl_delay(to_url, policies[authority])
                 if refusal is not None:
-                    unfetchable[host] = refusal
+                    unfetchable[authority] = refusal
                     result.notes.append(f"redirect not followed — {refusal}")
-            if host in unfetchable:
+            if authority in unfetchable:
                 return False
-            if policies[host].allows(to_url):
+            if policies[authority].allows(to_url):
                 return True
-            result.notes.append(f"redirect refused by robots.txt on {host}: {to_url}")
+            result.notes.append(
+                f"redirect refused by robots.txt on {authority}: {to_url}"
+            )
             return False
 
         def allowed(url: str) -> bool:

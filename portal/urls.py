@@ -56,13 +56,36 @@ def absolutise(base: str, href: str) -> str | None:
     return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
 
 
-def host_of(url: str) -> str:
-    """The netloc, used as the rate-limiter and concurrency key.
+def authority_of(url: str) -> str:
+    """The netloc — who answers for this URL, and therefore whose robots.txt
+    governs it. Lowercased, userinfo dropped, port and `www.` both kept.
 
-    Deliberately netloc rather than registered domain: `example.de:8001` and
-    `example.de:8002` are separate servers and separate politeness budgets.
+    `www.example.de` and `example.de` are separate authorities: RFC 9309 keys
+    robots.txt to the origin, and the two may serve different files. Compare
+    with `host_of`, which answers a different question.
     """
-    return urlsplit(url).netloc.lower()
+    netloc = urlsplit(url).netloc.lower()
+    _before, _at, hostport = netloc.rpartition("@")  # drop any userinfo
+    return hostport
+
+
+def host_of(url: str) -> str:
+    """The rate-limiter and concurrency key: `authority_of` minus a `www.`
+    prefix.
+
+    `www.` is stripped because `example.de` and `www.example.de` are one
+    machine with one budget. Nearly every shop redirects apex→www, so treating
+    them as two budgets would let each back-to-back redirect pair issue two
+    requests to one server inside a second — double §5.2's floor, on almost
+    every domain in the corpus.
+
+    The port is deliberately kept: `example.de:8001` and `example.de:8002` are
+    separate servers and separate budgets. Other subdomains are also kept
+    separate — `shop.example.de` and `example.de` are commonly different
+    machines, and merging them would slow honest crawling for no gain. §5.2
+    records that as accepted.
+    """
+    return authority_of(url).removeprefix("www.")
 
 
 def origin_of(url: str) -> str:

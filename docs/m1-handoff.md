@@ -35,10 +35,10 @@ robots.txt → homepage → sitemap.xml (+ nested shards) → Impressum
 
 ### Test coverage
 
-145 tests, all passing; `ruff check` and `ruff format --check` clean.
+158 tests, all passing; `ruff check` and `ruff format --check` clean.
 
 - **Politeness is measured, not asserted.** `tests/test_politeness.py` records request arrival times *at the fixture servers* and asserts every same-host gap is ≥ 1.0 s, and that no more than two distinct hosts were ever served at once. It includes an anti-vacuity test proving the pool really does run two hosts concurrently — otherwise the ceiling assertion would pass trivially on a sequential implementation.
-- **Redirect hops are measured the same way** (7.1): a chain is counted at the server and every hop's spacing asserted, so "each hop is a request" is a property of the running code rather than a claim in a docstring.
+- **Redirect hops are measured the same way** (7.1): a chain is counted at the server and every hop's spacing asserted, so "each hop is a request" is a property of the running code rather than a claim in a docstring. The apex→www hop is included, so the shared politeness budget is measured rather than asserted.
 - **Cross-host redirects:** the target host's robots.txt is fetched before the hop, a disallowed hop is refused and recorded, and the lookup is memoised per host.
 - **`Crawl-delay`:** parsed for our agent and the wildcard group, raises the host's interval but never lowers it, and skips the domain above the 10 s cap.
 - **Robots cases:** allow-all, disallow-required-paths (→ hard exclusion, and nothing past robots.txt is requested), disallow-irrelevant-paths-only (→ not a refusal), single disallowed path (→ skipped and recorded, not fetched), missing robots.txt.
@@ -147,7 +147,7 @@ Step 1 looks inside `<footer>`; if there is no `<footer>` element, or it contain
 - **Redirects followed, max 5** — one hop at a time, each rate-limited, host changes robots-checked (see 7.1). `artifact.url` records the *final* URL, so the evidence link points where the content actually came from.
 - **`check_same_thread=False`** on the SQLite connection, because two host-workers share it. Every cross-thread database touch is serialised behind `FetchStage._db_lock`. **Any new threaded stage must take the same lock.**
 - **A `base_url` seam** on `FetchStage`, defaulting to `https://{domain}`, so tests can point the same code at a loopback fixture server. Production code contains no "is this localhost?" special case.
-- **Domain normalisation keeps non-`www` subdomains** — `shop.example.de` stays distinct from `example.de`.
+- **Domain normalisation keeps non-`www` subdomains** — `shop.example.de` stays distinct from `example.de`, and so do their politeness budgets (§5.2, M1.8). Apex and www share one budget but remain separate robots.txt authorities.
 - **Seed loading fails loudly** on a malformed row, with a line number, rather than skipping it.
 
 ---
@@ -183,11 +183,11 @@ The first approved seed crawl is the real test of M1. I would treat its output a
 
 Three fixture servers on `127.0.0.1/2/3` are three hosts to the rate limiter and to the `Host` header, which is what §5.2 constrains. It is not a test of behaviour under real DNS, connection pooling, or a host that resolves to several addresses.
 
-### 6.3 One redirect path the loopback fixtures cannot reach
+### 6.3 The apex→www loop is covered on loopback, but not under real DNS
 
-The apex↔www case — a `robots.txt` that itself redirects to another host *within the seeded site* — is implemented (both hosts inherit the resulting policy and its `Crawl-delay`) but is **not covered by a test**, because `same_site` compares hostnames and no two loopback IPs share a domain suffix. Every other redirect shape is covered: same-host chains, cross-host hops allowed and refused, over-long chains, and the no-policy default.
+I said in the first pass that the apex↔www redirect could not be tested. That was wrong: `localhost` and `www.localhost` both resolve to 127.0.0.1, so one fixture server answering on both names is a faithful apex→www host with nothing but loopback involved. It is now tested end to end — the robots hop is followed and its policy seeded for both names, an off-site hop during the robots fetch is refused and recorded, and the shared politeness budget is measured at the server across the hop.
 
-The first approved seed crawl will exercise it for real on essentially every domain, since apex→www is the common case. Worth watching in that run's artifact rows.
+What remains genuinely unverified is narrower: **the loop under real DNS and TLS** — a hostname resolving to several addresses, connection reuse across a scheme change, a redirect chain that mixes both. The live smoke against `creative-potato.global` exercises the loop over real HTTPS but that host does not redirect. Only the first approved seed crawl will cover the rest, and apex→www will appear on nearly every domain in it. Worth reading those artifact rows by hand.
 
 ---
 

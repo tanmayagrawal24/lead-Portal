@@ -15,7 +15,13 @@ hop of a chain inside one `client.get()` call, below the limiter — five hops
 against one host in well under a second, and a cross-host hop to a host whose
 robots.txt was never read. So redirects are followed here, one hop at a time,
 each one waiting on the limiter like any other request, and a hop that changes
-host is refused unless the caller vouches for the new host (`cross_host`).
+authority is refused unless the caller vouches for it (`cross_host`).
+
+Two keys, deliberately: the limiter is keyed on `urls.host_of` (apex and www
+share one budget, because they are one machine) and the vouching check on
+`urls.authority_of` (apex and www are separate origins, and may serve separate
+robots.txt files). Collapsing them either way is a bug — one direction doubles
+the request rate, the other skips a robots.txt.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from typing import Self
 
 import httpx
 
-from portal.urls import absolutise, host_of
+from portal.urls import absolutise, authority_of, host_of
 
 USER_AGENT = "CreativePotatoesBot/1.0 (+https://creative-potato.global)"
 
@@ -215,7 +221,10 @@ class Fetcher:
                     status=response.status_code,
                     error=f"redirect_unusable: {location!r}",
                 )
-            if host_of(target) != host_of(current) and not (
+            # `authority_of`, not `host_of`: the two questions differ on `www.`.
+            # apex and www share one politeness budget but may serve different
+            # robots.txt files, so a hop between them still needs vouching.
+            if authority_of(target) != authority_of(current) and not (
                 cross_host is not None and cross_host(current, target)
             ):
                 return Response(

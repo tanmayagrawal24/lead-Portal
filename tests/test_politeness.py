@@ -136,6 +136,42 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
             f"a redirect hop skipped the 1 req/s floor: {gaps}",
         )
 
+    def test_apex_and_www_hops_to_one_server_share_one_budget(self) -> None:
+        """`example.de` and `www.example.de` are one machine. Keyed separately,
+        the apex→www redirect that nearly every shop has would let each
+        back-to-back pair issue two requests to one server inside a second —
+        double §5.2's floor, on almost every domain in the corpus.
+
+        `www.localhost` and `localhost` both resolve to 127.0.0.1, so the shape
+        is reachable end to end without leaving loopback.
+        """
+        server = FixtureServer(Site())
+        server.site.add_redirect("/", f"http://www.localhost:{server.port}/de/")
+        server.site.add("/de/", "<html><body>ok</body></html>")
+
+        with server:
+            fetcher = Fetcher(limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS))
+            self.addCleanup(fetcher.close)
+            response = fetcher.get(
+                f"http://localhost:{server.port}/",
+                # Vouched for, so this test measures the budget and nothing else.
+                cross_host=lambda _from, _to: True,
+            )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            server.site.hosts(),
+            [f"localhost:{server.port}", f"www.localhost:{server.port}"],
+            "the hop must really have crossed apex→www, or this proves nothing",
+        )
+        arrivals = server.site.arrivals()
+        self.assertEqual(len(arrivals), 2)
+        self.assertGreaterEqual(
+            arrivals[1] - arrivals[0],
+            net.MIN_INTERVAL_SECONDS - TOLERANCE,
+            "apex and www were given separate politeness budgets",
+        )
+
     def test_a_chain_longer_than_the_cap_is_abandoned(self) -> None:
         site = Site()
         for hop in range(net.MAX_REDIRECT_HOPS + 2):

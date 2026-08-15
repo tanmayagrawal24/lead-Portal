@@ -44,6 +44,73 @@ class TestSameSite(unittest.TestCase):
     def test_ignores_port(self) -> None:
         self.assertTrue(urls.same_site("http://127.0.0.1:8123/x", "127.0.0.1"))
 
+    def test_the_apex_www_redirect_shape_in_both_directions(self) -> None:
+        """The redirect nearly every shop has. `same_site` is a pure string
+        function, so this shape needs no fixture server to pin — only the
+        end-to-end loop through it does."""
+        self.assertTrue(urls.same_site("https://www.example.de/", "example.de"))
+        # And the reverse: seeded as www, redirected to the apex. Seeds are
+        # normalised www-off, so the domain side is `example.de` either way.
+        self.assertTrue(urls.same_site("https://example.de/", "example.de"))
+        self.assertEqual(urls.normalise_domain("https://www.example.de/"), "example.de")
+
+    def test_a_deeper_subdomain_is_still_the_same_site(self) -> None:
+        self.assertTrue(urls.same_site("https://shop.eu.example.de/x", "example.de"))
+        self.assertTrue(urls.same_site("https://www.shop.example.de/x", "example.de"))
+
+    def test_a_lookalike_prefix_is_not_the_same_site(self) -> None:
+        """`notexample.de` shares a suffix with `example.de` as raw text; the
+        dot in the comparison is what stops it being a match."""
+        for host in ("notexample.de", "myexample.de", "example.de.x"):
+            self.assertFalse(urls.same_site(f"https://{host}/x", "example.de"), host)
+
+    def test_a_suffix_attack_domain_is_not_the_same_site(self) -> None:
+        """`example.de.evil.com` ends with the seeded domain as a *label*, which
+        is exactly the shape an attacker uses to look first-party. It must not
+        match: the test is that the domain is a suffix, not that it appears."""
+        for host in (
+            "example.de.evil.com",
+            "www.example.de.evil.com",
+            "evil.com/?x=example.de",
+        ):
+            self.assertFalse(urls.same_site(f"https://{host}", "example.de"), host)
+
+
+class TestHostOf(unittest.TestCase):
+    """The politeness key. Distinct from `authority_of` on exactly one point."""
+
+    def test_apex_and_www_share_one_key(self) -> None:
+        self.assertEqual(
+            urls.host_of("https://example.de/a"),
+            urls.host_of("https://www.example.de/b"),
+        )
+
+    def test_but_they_remain_separate_authorities(self) -> None:
+        """robots.txt is keyed to the origin, so the two are not interchangeable
+        there — that is why there are two functions."""
+        self.assertNotEqual(
+            urls.authority_of("https://example.de/a"),
+            urls.authority_of("https://www.example.de/b"),
+        )
+
+    def test_the_port_still_separates_budgets(self) -> None:
+        self.assertNotEqual(
+            urls.host_of("http://example.de:8001/"),
+            urls.host_of("http://example.de:8002/"),
+        )
+
+    def test_other_subdomains_stay_separate(self) -> None:
+        """§5.2 records this as accepted: `shop.example.de` is commonly a
+        different machine, and merging budgets would slow honest crawling."""
+        self.assertNotEqual(
+            urls.host_of("https://shop.example.de/"),
+            urls.host_of("https://example.de/"),
+        )
+
+    def test_case_and_userinfo_do_not_split_a_budget(self) -> None:
+        self.assertEqual(urls.host_of("https://WWW.Example.DE/x"), "example.de")
+        self.assertEqual(urls.host_of("https://user@www.example.de/x"), "example.de")
+
 
 class TestAbsolutise(unittest.TestCase):
     def test_resolves_and_drops_fragments(self) -> None:
