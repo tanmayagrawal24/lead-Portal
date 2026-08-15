@@ -184,7 +184,7 @@ class TestFetchCli(SeedTestCase):
         from portal import fetch
         from portal.net import Fetcher, HostRateLimiter
 
-        fetcher = Fetcher(limiter=HostRateLimiter(0.0))
+        fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
         self.addCleanup(fetcher.close)
         _run_id, results = fetch.run(
             conn,

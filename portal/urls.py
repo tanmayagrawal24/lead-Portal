@@ -65,6 +65,12 @@ def host_of(url: str) -> str:
     return urlsplit(url).netloc.lower()
 
 
+def origin_of(url: str) -> str:
+    """`scheme://netloc` — the origin whose robots.txt governs `url`."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def same_site(url: str, domain: str) -> bool:
     """True when `url` belongs to `domain` or a subdomain of it."""
     host = urlsplit(url).hostname

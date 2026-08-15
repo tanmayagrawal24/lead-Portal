@@ -390,6 +390,15 @@ class TestConstraints(SchemaTestCase):
             count = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             self.assertEqual(count, 0, table)
 
+    #: §4's signal idiom. Targeted at the uniqueness conflict and nothing else,
+    #: so a CHECK violation still raises.
+    SIGNAL_INSERT = (
+        "INSERT INTO signal "
+        "(company_id, run_id, key, method, evidence_url, observed_at) "
+        "VALUES (?,?,?,?,?,?) "
+        "ON CONFLICT (run_id, company_id, key, evidence_url) DO NOTHING"
+    )
+
     def test_signal_identity_is_unique_within_a_run(self) -> None:
         """B4 rests on this: reconcile writing under the submitting run dedupes."""
         company_id, run_id = self.add_company(), self.add_run()
@@ -401,14 +410,42 @@ class TestConstraints(SchemaTestCase):
             "https://x/impressum",
             NOW,
         )
-        sql = (
-            "INSERT OR IGNORE INTO signal "
-            "(company_id, run_id, key, method, evidence_url, observed_at) VALUES (?,?,?,?,?,?)"
-        )
-        self.conn.execute(sql, row)
-        self.conn.execute(sql, row)
+        self.conn.execute(self.SIGNAL_INSERT, row)
+        self.conn.execute(self.SIGNAL_INSERT, row)
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0], 1
+        )
+
+    def test_an_unknown_method_raises_rather_than_vanishing(self) -> None:
+        """The same trap `review_flag` already avoids, now closed for `signal`.
+
+        `INSERT OR IGNORE` suppresses CHECK violations as well as uniqueness
+        conflicts, so a typo'd or renamed `method` would be dropped in silence —
+        a signal that was never written, indistinguishable from one that was
+        never observed. The targeted DO NOTHING dedupes and nothing more.
+        """
+        company_id, run_id = self.add_company(), self.add_run()
+        row = (
+            company_id,
+            run_id,
+            "impressum.gf_count",
+            "LLM",  # the CHECK is exact: 'deterministic' or 'llm'
+            "https://x/impressum",
+            NOW,
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(self.SIGNAL_INSERT, row)
+
+        # Pinning the trap itself, as `review_flag` does: OR IGNORE would
+        # neither raise nor write.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO signal "
+            "(company_id, run_id, key, method, evidence_url, observed_at) "
+            "VALUES (?,?,?,?,?,?)",
+            row,
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0], 0
         )
 
     def test_outreach_channel_excludes_email(self) -> None:

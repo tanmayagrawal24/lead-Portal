@@ -28,8 +28,20 @@ from portal import impressum as impressum_mod
 from portal import robots as robots_mod
 from portal import sampling, sitemap
 from portal.artifacts import ArtifactStore, StoredArtifact, utc_now
-from portal.net import MAX_CONCURRENT_HOSTS, Fetcher, Response
-from portal.urls import default_base, homepage_url, path_of, same_site
+from portal.net import (
+    MAX_CONCURRENT_HOSTS,
+    MAX_CRAWL_DELAY_SECONDS,
+    Fetcher,
+    Response,
+)
+from portal.urls import (
+    default_base,
+    homepage_url,
+    host_of,
+    origin_of,
+    path_of,
+    same_site,
+)
 
 
 @dataclass
@@ -149,6 +161,31 @@ class FetchStage:
             ).fetchone()
         return str(row["value_text"]) if row else None
 
+    # ── politeness ──────────────────────────────────────────────────────
+
+    def _apply_crawl_delay(
+        self, host: str, policy: robots_mod.RobotsPolicy
+    ) -> str | None:
+        """Honour a host's `Crawl-delay` (§5.2). Returns a refusal reason if it
+        is above the cap, in which case the host must not be fetched at all.
+
+        The limiter takes `max(floor, Crawl-delay)`, so a stated delay can only
+        ever slow us down. Above `MAX_CRAWL_DELAY_SECONDS` we stop instead of
+        obeying: a worker slot parked for minutes behind one hostile or
+        typo'd value is worse for the run than skipping the domain, and the
+        skip is recorded rather than silent.
+        """
+        delay = policy.crawl_delay()
+        if delay is None:
+            return None
+        if delay > MAX_CRAWL_DELAY_SECONDS:
+            return (
+                f"crawl_delay_too_high: {host} asks for {delay:g}s, "
+                f"cap is {MAX_CRAWL_DELAY_SECONDS:g}s"
+            )
+        self.fetcher.limiter.set_host_interval(host, delay)
+        return None
+
     # ── per-company pipeline ────────────────────────────────────────────
 
     def run_company(self, company_id: int, domain: str) -> CompanyResult:
@@ -156,7 +193,17 @@ class FetchStage:
         base = self.base_url(domain)
 
         # 1. robots.txt, before anything else.
-        robots_response = self.fetcher.get(f"{base}/robots.txt")
+        #
+        # This one fetch may follow a hop off its host, but only within the
+        # seeded site — the apex↔www redirect nearly every shop has. Reading
+        # `www.example.de/robots.txt` for `example.de` is the conventional
+        # behaviour and stays inside the domain we were asked to crawl; a hop
+        # anywhere else is refused, because there is no robots.txt yet that
+        # could authorise it.
+        def within_site(_from_url: str, to_url: str) -> bool:
+            return same_site(to_url, domain)
+
+        robots_response = self.fetcher.get(f"{base}/robots.txt", cross_host=within_site)
         result.artifacts.append(
             self._record(company_id, domain, "robots", robots_response)
         )
@@ -169,6 +216,48 @@ class FetchStage:
             result.excluded_reason = reason
             return result
 
+        # Robots policies by host, so a redirect chain is checked against the
+        # robots.txt of the host it actually lands on. Seeded with both the host
+        # we asked and the host that answered — the same host, unless the robots
+        # fetch was itself redirected within the site, in which case this policy
+        # governs both and its Crawl-delay has to reach both too.
+        seeded_hosts = {host_of(base), host_of(robots_response.url)}
+        policies: dict[str, robots_mod.RobotsPolicy] = dict.fromkeys(
+            seeded_hosts, policy
+        )
+        for host in sorted(seeded_hosts):
+            if (reason := self._apply_crawl_delay(host, policy)) is not None:
+                self._exclude(company_id, reason)
+                result.excluded_reason = reason
+                return result
+
+        unfetchable: dict[str, str] = {}  # host → why we will not fetch it at all
+
+        def cross_host(_from_url: str, to_url: str) -> bool:
+            """§5.2: "fetch and honour robots.txt before anything else" applies
+            to a redirect hop too, because the hop is itself a request.
+
+            Both the lookup and its verdict are memoised per host, so a chain
+            that keeps landing on the same host costs one robots.txt fetch.
+            """
+            host = host_of(to_url)
+            if host not in policies:
+                probe = self.fetcher.get(f"{origin_of(to_url)}/robots.txt")
+                result.artifacts.append(
+                    self._record(company_id, domain, "robots", probe)
+                )
+                policies[host] = robots_mod.parse(probe.text() if probe.ok else None)
+                refusal = self._apply_crawl_delay(host, policies[host])
+                if refusal is not None:
+                    unfetchable[host] = refusal
+                    result.notes.append(f"redirect not followed — {refusal}")
+            if host in unfetchable:
+                return False
+            if policies[host].allows(to_url):
+                return True
+            result.notes.append(f"redirect refused by robots.txt on {host}: {to_url}")
+            return False
+
         def allowed(url: str) -> bool:
             return policy.allows(url)
 
@@ -178,7 +267,7 @@ class FetchStage:
                 skipped = Response(url=url, error=robots_mod.disallowed_reason(url))
                 result.artifacts.append(self._record(company_id, domain, kind, skipped))
                 return None
-            response = self.fetcher.get(url)
+            response = self.fetcher.get(url, cross_host=cross_host)
             result.artifacts.append(self._record(company_id, domain, kind, response))
             return response
 

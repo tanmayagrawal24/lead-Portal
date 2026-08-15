@@ -48,6 +48,19 @@ class RobotsPolicy:
         # falls back to the wildcard group when the named agent has no group.
         return bool(self.parser.can_fetch(USER_AGENT_TOKEN, url))
 
+    def crawl_delay(self) -> float | None:
+        """The host's `Crawl-delay` in seconds, or None if it states none.
+
+        §5.2 honours `max(1.0, crawl_delay)`, so this can only ever slow us
+        down. `RobotFileParser` reads the value as an int and ignores a
+        fractional one (`Crawl-delay: 0.5` arrives here as None) — which is
+        harmless, because any value below the floor changes nothing.
+        """
+        if self.parser is None:
+            return None
+        delay = self.parser.crawl_delay(USER_AGENT_TOKEN)
+        return None if delay is None else float(delay)
+
     def blocks_required_paths(self, base: str) -> str | None:
         """The §5.2 hard-exclusion test. Returns a reason, or None to proceed.
 

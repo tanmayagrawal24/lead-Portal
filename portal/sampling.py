@@ -16,7 +16,14 @@ import re
 from portal.urls import has_query, path_of, same_site
 
 #: §5.2 Tier 2 path patterns.
-PRODUCT_PATH_PATTERNS = ("/detail/", "/products/", "/produkt/", "/p/")
+#:
+#: `/p/` is deliberately absent. It is a product prefix on some shops and a
+#: *pagination* prefix on others, and the two failure modes are not symmetric:
+#: a false positive feeds a listing page to `schema.product_present` and wrongly
+#: awards +10, while a false negative just leaves the signal unwritten, which
+#: A5.5 already handles correctly. It goes back in when it is observed in the
+#: wild, not before.
+PRODUCT_PATH_PATTERNS = ("/detail/", "/products/", "/produkt/")
 
 #: Rejected outright — listing pages, not products.
 CATEGORY_PATH_PATTERNS = ("/kategorie/", "/collections/", "/c/", "/categories/")

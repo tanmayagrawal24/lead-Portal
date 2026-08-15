@@ -41,6 +41,27 @@ class TestFilters(unittest.TestCase):
             sampling.is_product_candidate("https://example.de/products/handle", DOMAIN)
         )
 
+    def test_p_slash_is_not_a_tier_2_pattern(self) -> None:
+        """Dropped until observed in the wild: `/p/` is a product prefix on some
+        shops and a *pagination* prefix on others, and the two errors are not
+        equally bad. A false positive hands a listing page to
+        `schema.product_present` and wrongly awards +10; a false negative just
+        leaves the signal unwritten, which A5.5 already handles.
+        """
+        self.assertNotIn("/p/", sampling.PRODUCT_PATH_PATTERNS)
+        self.assertFalse(
+            sampling.is_product_candidate("https://example.de/p/2", DOMAIN)
+        )
+
+    def test_a_product_sitemap_url_still_needs_no_known_pattern(self) -> None:
+        """Dropping `/p/` costs nothing on a platform product sitemap, where
+        membership is the evidence and the path shape is not consulted."""
+        self.assertTrue(
+            sampling.is_product_candidate(
+                "https://example.de/p/schallbuerste", DOMAIN, require_pattern=False
+            )
+        )
+
     def test_rejects_category_and_listing_patterns(self) -> None:
         """Filter 3."""
         for url in (

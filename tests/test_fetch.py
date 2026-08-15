@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from portal import db, fetch, migrate
+from portal import db, fetch, migrate, net
 from portal.artifacts import ArtifactStore
 from portal.net import Fetcher, HostRateLimiter
 from tests import shopfixtures
@@ -34,19 +34,26 @@ class FetchTestCase(unittest.TestCase):
         self.addCleanup(self.conn.close)
         migrate.apply_pending(self.conn)
         self.artifacts = self.root / "artifacts"
-        self.fetcher = Fetcher(limiter=HostRateLimiter(0.0))
+        self.fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
         self.addCleanup(self.fetcher.close)
 
-    def serve(self, build) -> FixtureServer:
+    def serve(self, build, address: str = "127.0.0.1") -> FixtureServer:
         """Start a fixture server whose site is built from its own base URL.
 
         Sitemaps contain absolute URLs, so the builder needs the port — which
         only exists once the socket is bound. `FixtureServer` binds in its
         constructor, so the site is populated after construction and before
         serving starts.
+
+        `address` exists for the cross-host redirect tests: `127.0.0.0/8` is
+        all loopback, so a second server on 127.0.0.2 is a genuinely different
+        host to the limiter, to `same_site`, and to robots.txt — with no
+        third-party domain involved.
         """
-        server = FixtureServer(Site())
-        server.site.routes.update(build(server.base).routes)
+        server = FixtureServer(Site(), address=address)
+        site = build(server.base)
+        server.site.routes.update(site.routes)
+        server.site.redirects.update(site.redirects)
         server.__enter__()
         self.addCleanup(server.__exit__, None, None, None)
         return server
@@ -233,6 +240,134 @@ class TestRobotsHandling(FetchTestCase):
         result = self.run_fetch(self.serve(build))
         self.assertIsNone(result.excluded_reason)
         self.assertIn("homepage", result.kinds)
+
+
+class TestCrawlDelay(FetchTestCase):
+    """§5.2: honour `max(floor, Crawl-delay)`, and skip above the cap."""
+
+    def test_a_stated_delay_raises_the_interval_for_that_host(self) -> None:
+        server = self.serve(
+            lambda base: shopfixtures.shopware_shop(
+                base, robots_txt="User-agent: *\nCrawl-delay: 3\nAllow: /\n"
+            )
+        )
+        result = self.run_fetch(server)
+
+        self.assertIsNone(result.excluded_reason)
+        self.assertEqual(self.fetcher.limiter.interval_for(server.netloc), 3.0)
+
+    def test_a_delay_below_the_floor_changes_nothing(self) -> None:
+        """A `Crawl-delay: 1` is not permission to speed up — the floor holds."""
+        server = self.serve(
+            lambda base: shopfixtures.shopware_shop(
+                base, robots_txt="User-agent: *\nCrawl-delay: 1\nAllow: /\n"
+            )
+        )
+        limiter = HostRateLimiter(net.MIN_INTERVAL_SECONDS)
+        self.assertEqual(limiter.interval_for(server.netloc), net.MIN_INTERVAL_SECONDS)
+        limiter.set_host_interval(server.netloc, 1.0)
+        self.assertEqual(limiter.interval_for(server.netloc), net.MIN_INTERVAL_SECONDS)
+
+    def test_a_delay_above_the_cap_skips_the_domain_and_records_why(self) -> None:
+        server = self.serve(
+            lambda base: shopfixtures.shopware_shop(
+                base, robots_txt="User-agent: *\nCrawl-delay: 60\nAllow: /\n"
+            )
+        )
+        result = self.run_fetch(server)
+
+        assert result.excluded_reason is not None
+        self.assertIn("crawl_delay_too_high", result.excluded_reason)
+        row = self.conn.execute(
+            "SELECT excluded, excluded_reason FROM company WHERE id = ?",
+            (result.company_id,),
+        ).fetchone()
+        self.assertEqual(row["excluded"], 1)
+        self.assertIn("crawl_delay_too_high", row["excluded_reason"])
+        self.assertEqual(
+            server.site.paths(),
+            ["/robots.txt"],
+            "we must stop rather than stall behind the delay",
+        )
+
+
+class TestCrossHostRedirects(FetchTestCase):
+    """A redirect hop is a request, so it is subject to the robots.txt of the
+    host it lands on — which, on a host change, we have not read yet."""
+
+    def _shop_redirecting_a_product_to(self, other_base: str):
+        def build(base: str) -> Site:
+            site = shopfixtures.shopware_shop(base)
+            del site.routes["/detail/alpha-buerste"]
+            site.add_redirect(
+                "/detail/alpha-buerste", f"{other_base}/detail/alpha-buerste"
+            )
+            return site
+
+        return build
+
+    def test_the_new_hosts_robots_is_read_before_the_hop_is_followed(self) -> None:
+        other = self.serve(
+            lambda base: shopfixtures.shopware_shop(base), address="127.0.0.2"
+        )
+        server = self.serve(self._shop_redirecting_a_product_to(other.base))
+        result = self.run_fetch(server)
+
+        paths = other.site.paths()
+        self.assertIn("/robots.txt", paths)
+        self.assertLess(
+            paths.index("/robots.txt"),
+            paths.index("/detail/alpha-buerste"),
+            "robots.txt must be read before anything else on a host, redirect "
+            "targets included",
+        )
+        self.assertEqual(result.product_sample, f"{server.base}/detail/alpha-buerste")
+
+    def test_a_hop_the_new_host_disallows_is_refused_and_recorded(self) -> None:
+        other = self.serve(
+            lambda base: shopfixtures.shopware_shop(
+                base, robots_txt="User-agent: *\nDisallow: /detail/\n"
+            ),
+            address="127.0.0.2",
+        )
+        server = self.serve(self._shop_redirecting_a_product_to(other.base))
+        result = self.run_fetch(server)
+
+        self.assertEqual(
+            other.site.paths(),
+            ["/robots.txt"],
+            "the disallowed page must never be requested on the new host",
+        )
+        refused = [
+            row
+            for row in self.artifact_rows(result.company_id)
+            if row["error"] and "redirect_refused" in row["error"]
+        ]
+        self.assertTrue(refused, "a refused hop must be recorded, not silent")
+        self.assertIn("refused by robots.txt", " ".join(result.notes))
+        self.assertIsNone(result.product_sample)
+
+    def test_the_new_hosts_robots_is_read_once_however_many_hops_land_on_it(
+        self,
+    ) -> None:
+        def build(base: str) -> Site:
+            site = shopfixtures.shopware_shop(base)
+            for handle in ("alpha-buerste", "beta-buerste"):
+                del site.routes[f"/detail/{handle}"]
+                site.add_redirect(f"/detail/{handle}", f"{other.base}/detail/{handle}")
+            return site
+
+        other = self.serve(
+            lambda base: shopfixtures.shopware_shop(base), address="127.0.0.2"
+        )
+        server = self.serve(build)
+        self.run_fetch(server)
+
+        self.assertEqual(
+            other.site.paths().count("/robots.txt"),
+            1,
+            "the per-company robots lookup should be memoised by host",
+        )
 
 
 class TestImpressumTwoStep(FetchTestCase):

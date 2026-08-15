@@ -29,6 +29,7 @@ class Site:
     """A fixture site: a path→response map plus request bookkeeping."""
 
     routes: dict[str, tuple[int, bytes, str]] = field(default_factory=dict)
+    redirects: dict[str, tuple[int, str]] = field(default_factory=dict)
     requests: list[Request] = field(default_factory=list)
     delay: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -47,6 +48,15 @@ class Site:
         self, path: str, body: str, content_type: str = "application/xml"
     ) -> None:
         self.routes[path] = (200, gzip.compress(body.encode("utf-8")), content_type)
+
+    def add_redirect(self, path: str, location: str, status: int = 301) -> None:
+        """Serve `path` as a redirect to `location`.
+
+        Every hop arrives here as its own request and is recorded like any
+        other, which is what lets a test measure whether the politeness floor
+        holds *across* a chain rather than only at its head.
+        """
+        self.redirects[path] = (status, location)
 
     def record_start(self, request: Request) -> None:
         with self._lock:
@@ -82,6 +92,13 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if self.site.delay:
                 time.sleep(self.site.delay)
+            if self.path in self.site.redirects:
+                status, location = self.site.redirects[self.path]
+                self.send_response(status)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             status, body, content_type = self.site.routes.get(
                 self.path, (404, b"not found", "text/plain")
             )

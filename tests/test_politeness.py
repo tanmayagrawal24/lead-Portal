@@ -68,6 +68,116 @@ class TestHostRateLimiter(unittest.TestCase):
             self.assertGreaterEqual(later - earlier, 0.3 - TOLERANCE)
 
 
+class TestTheBypassIsExplicit(unittest.TestCase):
+    """Switching the floor off must be an act, not a falsy default."""
+
+    def test_a_zero_or_negative_interval_is_refused(self) -> None:
+        for value in (0, 0.0, -1.0):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                HostRateLimiter(value)
+
+    def test_the_named_bypass_is_the_only_way_through(self) -> None:
+        limiter = HostRateLimiter.unthrottled()
+        started = time.monotonic()
+        for _ in range(5):
+            limiter.wait("example.de")
+        self.assertLess(time.monotonic() - started, 0.1)
+
+
+class TestCrawlDelay(unittest.TestCase):
+    """§5.2: honour `max(floor, Crawl-delay)`; a delay can only slow us down."""
+
+    def test_a_host_delay_raises_the_gap_but_never_lowers_it(self) -> None:
+        limiter = HostRateLimiter(0.25)
+        limiter.set_host_interval("slow.de", 0.5)
+        limiter.set_host_interval("hasty.de", 0.05)
+        self.assertEqual(limiter.interval_for("slow.de"), 0.5)
+        self.assertEqual(limiter.interval_for("hasty.de"), 0.25)
+        self.assertEqual(limiter.interval_for("silent.de"), 0.25)
+
+    def test_the_wider_gap_is_actually_waited(self) -> None:
+        limiter = HostRateLimiter(0.1)
+        limiter.set_host_interval("slow.de", 0.4)
+        started = time.monotonic()
+        limiter.wait("slow.de")
+        limiter.wait("slow.de")
+        self.assertGreaterEqual(time.monotonic() - started, 0.4 - TOLERANCE)
+
+
+class TestRedirectsAreRateLimited(unittest.TestCase):
+    """The hop is a request. A chain followed inside one `client.get()` would
+    put every hop but the first below the limiter — five requests at one host
+    inside a second, which is exactly what §5.2 forbids."""
+
+    def test_every_hop_of_a_chain_waits_its_turn(self) -> None:
+        site = Site()
+        site.add_redirect("/produkt/alpha", "/de/produkt/alpha")
+        site.add_redirect("/de/produkt/alpha", "/de/produkt/alpha/")
+        site.add("/de/produkt/alpha/", shopfixtures.product_html("alpha"))
+
+        with FixtureServer(site) as server:
+            fetcher = Fetcher(limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS))
+            self.addCleanup(fetcher.close)
+            response = fetcher.get(f"{server.base}/produkt/alpha")
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.url, f"{server.base}/de/produkt/alpha/")
+
+        arrivals = server.site.arrivals()
+        self.assertEqual(
+            server.site.paths(),
+            ["/produkt/alpha", "/de/produkt/alpha", "/de/produkt/alpha/"],
+            "every hop should have arrived at the server as its own request",
+        )
+        gaps = [later - earlier for earlier, later in itertools.pairwise(arrivals)]
+        self.assertGreaterEqual(
+            min(gaps),
+            net.MIN_INTERVAL_SECONDS - TOLERANCE,
+            f"a redirect hop skipped the 1 req/s floor: {gaps}",
+        )
+
+    def test_a_chain_longer_than_the_cap_is_abandoned(self) -> None:
+        site = Site()
+        for hop in range(net.MAX_REDIRECT_HOPS + 2):
+            site.add_redirect(f"/hop{hop}", f"/hop{hop + 1}")
+
+        with FixtureServer(site) as server:
+            fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+            self.addCleanup(fetcher.close)
+            response = fetcher.get(f"{server.base}/hop0")
+
+        self.assertIsNone(response.body)
+        assert response.error is not None
+        self.assertIn("too_many_redirects", response.error)
+        self.assertEqual(
+            len(server.site.paths()),
+            net.MAX_REDIRECT_HOPS + 1,
+            "the cap counts hops followed, not requests refused",
+        )
+
+    def test_a_host_change_is_refused_when_the_caller_vouches_for_nothing(
+        self,
+    ) -> None:
+        """The transport's default. It cannot know who has read whose
+        robots.txt, so with no policy supplied the answer is no."""
+        elsewhere = Site()
+        elsewhere.add("/", "<html><body>somewhere else</body></html>")
+        site = Site()
+
+        with FixtureServer(elsewhere, address="127.0.0.2") as other:
+            site.add_redirect("/", f"{other.base}/")
+            with FixtureServer(site) as server:
+                fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+                self.addCleanup(fetcher.close)
+                response = fetcher.get(f"{server.base}/")
+
+            self.assertEqual(
+                other.site.paths(), [], "the other host must never be contacted"
+            )
+        assert response.error is not None
+        self.assertIn("redirect_refused", response.error)
+
+
 class PolitenessTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -138,7 +248,7 @@ class TestConcurrencyCeiling(PolitenessTestCase):
         servers = {a: self.serve(a, tracker, delay=0.15) for a in addresses}
         targets = [(self.add_company(a), a) for a in addresses]
 
-        fetcher = Fetcher(limiter=HostRateLimiter(0.0))
+        fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
         self.addCleanup(fetcher.close)
         fetch.run(
             self.conn,
@@ -165,7 +275,7 @@ class TestConcurrencyCeiling(PolitenessTestCase):
         servers = {a: self.serve(a, tracker, delay=0.3) for a in addresses}
         targets = [(self.add_company(a), a) for a in addresses]
 
-        fetcher = Fetcher(limiter=HostRateLimiter(0.0))
+        fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
         self.addCleanup(fetcher.close)
         fetch.run(
             self.conn,

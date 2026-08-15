@@ -2,10 +2,15 @@
 
 Uses stdlib `xml.etree.ElementTree`. That parser is documented as vulnerable to
 entity-expansion attacks, and these documents come from third parties, so the
-mitigations are: bodies are capped before they reach here (`net.MAX_BODY_BYTES`),
-a shard budget caps how many documents one company can make us parse, and every
-parse failure is swallowed into "no URLs" rather than aborting a run. Adding
-`defusedxml` would be a dependency change and needs asking first.
+mitigations are: a document declaring a DTD or an entity is refused before it
+reaches the parser at all, bodies are capped before they reach here
+(`net.MAX_BODY_BYTES`), a shard budget caps how many documents one company can
+make us parse, and every parse failure is swallowed into "no URLs" rather than
+aborting a run.
+
+The DTD refusal is what closes the entity-expansion class, and it is preferred
+over `defusedxml` because the dependency list is deliberately locked: a sitemap
+has no legitimate reason to carry a DTD, so refusing one costs nothing.
 """
 
 from __future__ import annotations
@@ -19,6 +24,10 @@ from xml.etree import ElementTree
 MAX_SHARDS = 50
 
 _TAG = re.compile(r"^\{[^}]*\}")
+
+#: A sitemap declaring a DTD or an entity is refused unparsed — that is the
+#: whole entity-expansion attack surface, and no real sitemap needs either.
+_DTD = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.IGNORECASE)
 
 #: Platform-specific product sitemaps, per §5.2 Tier 1.
 _PRODUCT_SITEMAP_PATTERNS = (
@@ -54,11 +63,14 @@ def parse(body: bytes, url: str) -> tuple[list[str], list[str]]:
     """Return `(child_sitemap_urls, page_urls)` for one sitemap document.
 
     A `<sitemapindex>` yields children; a `<urlset>` yields pages. Anything
-    unparseable yields both empty — a broken sitemap is a missing signal, not a
-    crash.
+    unparseable — or anything carrying a DTD — yields both empty, because a
+    broken or hostile sitemap is a missing signal, not a crash.
     """
+    document = decompress(body, url)
+    if _DTD.search(document):
+        return [], []
     try:
-        root = ElementTree.fromstring(decompress(body, url))
+        root = ElementTree.fromstring(document)
     except ElementTree.ParseError:
         return [], []
 

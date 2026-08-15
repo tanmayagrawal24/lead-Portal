@@ -105,6 +105,21 @@ class TestRobotsPolicy(unittest.TestCase):
             robots.parse("\x00\x01 not robots at all").allows("https://example.de/")
         )
 
+    def test_crawl_delay_is_read_for_our_agent(self) -> None:
+        policy = robots.parse(
+            f"User-agent: {robots.USER_AGENT_TOKEN}\nCrawl-delay: 5\nDisallow:\n\n"
+            "User-agent: *\nCrawl-delay: 2\n"
+        )
+        self.assertEqual(policy.crawl_delay(), 5.0)
+
+    def test_crawl_delay_falls_back_to_the_wildcard_group(self) -> None:
+        policy = robots.parse("User-agent: *\nCrawl-delay: 4\nAllow: /\n")
+        self.assertEqual(policy.crawl_delay(), 4.0)
+
+    def test_no_crawl_delay_stated_is_none(self) -> None:
+        self.assertIsNone(robots.parse("User-agent: *\nAllow: /\n").crawl_delay())
+        self.assertIsNone(robots.parse(None).crawl_delay())
+
     def test_sitemap_directives_are_extracted(self) -> None:
         policy = robots.parse(
             "User-agent: *\nAllow: /\n"
@@ -172,6 +187,35 @@ class TestSitemapParsing(unittest.TestCase):
         self.assertEqual(
             sitemap.parse(b"<not xml", "https://example.de/s.xml"), ([], [])
         )
+
+    def test_a_sitemap_declaring_a_dtd_is_refused_unparsed(self) -> None:
+        """The billion-laughs shape. Refusing the document is what removes the
+        entity-expansion class without taking on `defusedxml`."""
+        bomb = (
+            b'<?xml version="1.0"?>\n'
+            b'<!DOCTYPE urlset [<!ENTITY lol "lol">'
+            b'<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">]>\n'
+            b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            b"<url><loc>https://example.de/detail/a&lol2;</loc></url></urlset>"
+        )
+        self.assertEqual(sitemap.parse(bomb, "https://example.de/s.xml"), ([], []))
+
+    def test_the_dtd_refusal_survives_gzip_and_odd_spacing(self) -> None:
+        """A `.xml.gz` shard is decompressed before the check, or the check
+        would read compressed bytes and pass everything."""
+        doctype = (
+            b'<!doctype   urlset SYSTEM "x.dtd">'
+            b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            b"<url><loc>https://example.de/detail/a</loc></url></urlset>"
+        )
+        self.assertEqual(
+            sitemap.parse(gzip.compress(doctype), "https://example.de/s.xml.gz"),
+            ([], []),
+        )
+
+    def test_an_ordinary_sitemap_is_not_caught_by_the_dtd_refusal(self) -> None:
+        _children, pages = sitemap.parse(URLSET.encode(), "https://example.de/s.xml")
+        self.assertEqual(len(pages), 2)
 
     def test_product_sitemap_detection_per_platform(self) -> None:
         for url in (

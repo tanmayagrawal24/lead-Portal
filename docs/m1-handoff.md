@@ -35,9 +35,12 @@ robots.txt → homepage → sitemap.xml (+ nested shards) → Impressum
 
 ### Test coverage
 
-123 tests, all passing; `ruff check` and `ruff format --check` clean.
+145 tests, all passing; `ruff check` and `ruff format --check` clean.
 
 - **Politeness is measured, not asserted.** `tests/test_politeness.py` records request arrival times *at the fixture servers* and asserts every same-host gap is ≥ 1.0 s, and that no more than two distinct hosts were ever served at once. It includes an anti-vacuity test proving the pool really does run two hosts concurrently — otherwise the ceiling assertion would pass trivially on a sequential implementation.
+- **Redirect hops are measured the same way** (7.1): a chain is counted at the server and every hop's spacing asserted, so "each hop is a request" is a property of the running code rather than a claim in a docstring.
+- **Cross-host redirects:** the target host's robots.txt is fetched before the hop, a disallowed hop is refused and recorded, and the lookup is memoised per host.
+- **`Crawl-delay`:** parsed for our agent and the wildcard group, raises the host's interval but never lowers it, and skips the domain above the 10 s cap.
 - **Robots cases:** allow-all, disallow-required-paths (→ hard exclusion, and nothing past robots.txt is requested), disallow-irrelevant-paths-only (→ not a refusal), single disallowed path (→ skipped and recorded, not fetched), missing robots.txt.
 - **Impressum two-step:** footer link present; footer link absent so direct probing runs; neither, so `no_impressum` is raised as a *soft* flag with `excluded` still 0.
 - **A5:** gzipped multi-shard product sitemap, sitemap mixing content and product URLs, zero candidates, Tier 0 reuse, Tier 0 fall-through on a 404, and stability across shard redistribution.
@@ -123,11 +126,11 @@ Caught by a test that failed. After a Tier 0 sample 404s, the dead URL is *still
 
 ### 4.3 Failure artifacts update in place rather than appending
 
-`uq_artifact_identity` is a partial index over non-NULL hashes, so it does not constrain failure rows. Left to a plain INSERT, every re-run would append another row for the same dead URL and `artifact` would grow without bound. A failure row for the same `(company_id, kind, url)` is updated in place instead, advancing `last_checked_at`. *When* a URL last failed is worth keeping; a row per attempt is not. **Not currently in the spec — a candidate addition to §5.2 if you agree.**
+`uq_artifact_identity` is a partial index over non-NULL hashes, so it does not constrain failure rows. Left to a plain INSERT, every re-run would append another row for the same dead URL and `artifact` would grow without bound. A failure row for the same `(company_id, kind, url)` is updated in place instead, advancing `last_checked_at`. *When* a URL last failed is worth keeping; a row per attempt is not. **Now stated in §5.2 (M1.7).**
 
 ### 4.4 How "required paths" is interpreted for robots exclusion
 
-§5.2 names `/`, `/sitemap.xml`, the Impressum path and the blog path. The last two are not knowable before fetching. Implemented as: hard-exclude when `/` is disallowed, **or** `/sitemap.xml` is disallowed, **or** *every* one of the five Impressum probe paths is disallowed. A single disallowed path is skipped per-URL and recorded with `error='robots_disallowed: …'`, never an exclusion. The blog path is checked per-URL once discovered — a disallowed blog is a missing signal, not grounds for exclusion. **Also a candidate for §5.2.**
+§5.2 names `/`, `/sitemap.xml`, the Impressum path and the blog path. The last two are not knowable before fetching. Implemented as: hard-exclude when `/` is disallowed, **or** `/sitemap.xml` is disallowed, **or** *every* one of the five Impressum probe paths is disallowed. A single disallowed path is skipped per-URL and recorded with `error='robots_disallowed: …'`, never an exclusion. The blog path is checked per-URL once discovered — a disallowed blog is a missing signal, not grounds for exclusion. **Now stated in §5.2 (M1.7).**
 
 ### 4.5 A missing or unparseable robots.txt is not a refusal
 
@@ -141,7 +144,7 @@ Step 1 looks inside `<footer>`; if there is no `<footer>` element, or it contain
 
 - **Sitemap shard cap of 50 per company**, so a broken or hostile sitemap index cannot turn one company into thousands of requests.
 - **Response bodies truncated at 8 MB.**
-- **Redirects followed, max 5.** `artifact.url` records the *final* URL, so the evidence link points where the content actually came from.
+- **Redirects followed, max 5** — one hop at a time, each rate-limited, host changes robots-checked (see 7.1). `artifact.url` records the *final* URL, so the evidence link points where the content actually came from.
 - **`check_same_thread=False`** on the SQLite connection, because two host-workers share it. Every cross-thread database touch is serialised behind `FetchStage._db_lock`. **Any new threaded stage must take the same lock.**
 - **A `base_url` seam** on `FetchStage`, defaulting to `https://{domain}`, so tests can point the same code at a loopback fixture server. Production code contains no "is this localhost?" special case.
 - **Domain normalisation keeps non-`www` subdomains** — `shop.example.de` stays distinct from `example.de`.
@@ -170,7 +173,7 @@ ON CONFLICT (company_id, kind, content_hash) DO UPDATE
 The hard boundary against third-party crawling means every fixture is one I wrote. Specifically unverified:
 
 - **The product-sitemap regexes.** Shopware's `…-product-….xml.gz`, Shopify's `sitemap_products_*.xml`, WooCommerce's `product-sitemap.xml` and JTL's `/sitemap/product` come from documentation and convention, not from observation. If any is wrong, Tier 1 silently falls through to Tier 2 and the sample gets picked by path pattern instead — a quality regression that produces no error.
-- **The Tier 2 path patterns** `/detail/`, `/products/`, `/produkt/`, `/p/`. I am least confident about `/p/`: it is a real product prefix on some shops and a *pagination* prefix on others. A false match there feeds a listing page to `schema.product_present` and wrongly awards +10. Consider dropping it until it is seen in the wild.
+- **The Tier 2 path patterns** `/detail/`, `/products/`, `/produkt/`. `/p/` was here and has since been **dropped** (7.3): it is a real product prefix on some shops and a *pagination* prefix on others, and a false match feeds a listing page to `schema.product_present` and wrongly awards +10.
 - **Real robots.txt variety** — the fixtures cover the shapes §5.2 names, not the mess of production files.
 - **Gzipped multi-shard sitemaps** work against my fixtures. Shopware's real output is untested.
 
@@ -180,16 +183,34 @@ The first approved seed crawl is the real test of M1. I would treat its output a
 
 Three fixture servers on `127.0.0.1/2/3` are three hosts to the rate limiter and to the `Host` header, which is what §5.2 constrains. It is not a test of behaviour under real DNS, connection pooling, or a host that resolves to several addresses.
 
+### 6.3 One redirect path the loopback fixtures cannot reach
+
+The apex↔www case — a `robots.txt` that itself redirects to another host *within the seeded site* — is implemented (both hosts inherit the resulting policy and its `Crawl-delay`) but is **not covered by a test**, because `same_site` compares hostnames and no two loopback IPs share a domain suffix. Every other redirect shape is covered: same-host chains, cross-host hops allowed and refused, over-long chains, and the no-policy default.
+
+The first approved seed crawl will exercise it for real on essentially every domain, since apex→www is the common case. Worth watching in that run's artifact rows.
+
 ---
 
-## 7. Questions I parked rather than guessing at
+## 7. Questions I parked — all now ruled on
 
-1. **`Crawl-delay` is currently ignored.** It appears in plenty of German robots.txt files. Our flat 1 req/s is *more* polite than a `Crawl-delay: 1` but *less* polite than a `Crawl-delay: 10`, and §5.2 says nothing about it. Stdlib `RobotFileParser.crawl_delay()` already parses it, so honouring `max(1.0, crawl_delay)` is about three lines. **I did not add it, because it changes a stated politeness rule.** I think it should be added.
-2. **`defusedxml` for sitemap parsing.** Sitemaps are third-party XML and stdlib `ElementTree` is documented as vulnerable to entity-expansion attacks. Mitigated for now by the 8 MB body cap, the 50-shard cap, and swallowing parse errors. A proper fix is a new dependency, which needs your approval.
-3. **Should `/p/` stay in the Tier 2 patterns?** See 6.1.
-4. **Ratification still outstanding from A5:** A5.6 (the `opp.no_product_schema` guard, which touches §6.2) and A5.7 (`catalog.product_sample_url` as a new signal key). Both are marked in the amendments table.
-5. **Carried over from M0, still open and now relevant to M2:** `signal` writes use `INSERT OR IGNORE` per §4, and `signal` carries `CHECK (method IN ('deterministic','llm'))`. `OR IGNORE` suppresses CHECK violations as well as uniqueness conflicts, so a typo'd `method` would vanish silently instead of raising. The `review_flag` writes here use `ON CONFLICT … DO NOTHING` for exactly this reason, and `_write_sample_signal` does too. **The spec's `signal` idiom should change before M2 writes signals in bulk.**
-6. **`uvicorn` will be needed for `portal serve` at M4.** FastAPI alone cannot run. Not in the named stack.
+Ruled 2026-08-15, after review. Each is recorded in the spec's M1 amendments table and implemented on this branch; nothing below is still open.
+
+1. **`Crawl-delay` — added.** Honour `max(1.0, crawl_delay)`, capped at 10 s; above the cap the domain is skipped with `excluded_reason = 'crawl_delay_too_high: …'` rather than stalling a worker slot. Written into §5.2.
+2. **`defusedxml` — declined, no new dependency.** Instead a sitemap whose bytes contain `<!DOCTYPE` or `<!ENTITY` is refused before parsing. Two lines, and it eliminates the entity-expansion class outright while the dependency list stays locked.
+3. **`/p/` — dropped** until observed in the wild, on the asymmetry argument in 6.1: a false positive wrongly awards +10, a false negative only leaves a signal unwritten, which A5.5 already handles.
+4. **A5.6 and A5.7 — both ratified.** Marked approved in the amendments table.
+5. **`signal` idiom — changed.** `ON CONFLICT (run_id, company_id, key, evidence_url) DO NOTHING` replaces `INSERT OR IGNORE` in §4, in the migration, and everywhere signals are written. `test_schema.py` now pins that a bad `method` **raises** rather than vanishing, and that `OR IGNORE` would have neither raised nor written.
+6. **`uvicorn` — approved for M4.** Added to §3's stack list, marked M4-only, so it is not re-litigated later.
+
+### 7.1 The defect this review found: redirects bypassed the limiter
+
+`Fetcher.get` rate-limited only the original URL and then handed the chain to `httpx` with `follow_redirects=True, max_redirects=5`. Every hop after the first was an unthrottled request: a same-host chain could fire up to five requests at one host inside a second, breaking §5.2's hard 1 req/s rule on any redirecting domain, and a cross-host hop fetched from a host whose robots.txt had never been read.
+
+The old comment — "callers check `same_site`" — answered *attribution*, not politeness. By the time a caller inspects the response the request is already out.
+
+Fixed: `follow_redirects=False`, hops walked one at a time with `limiter.wait()` per hop, and a host change followed only after that host's robots.txt has been fetched and consulted (its `Crawl-delay` included). A refused hop is recorded as `error='redirect_refused: …'`, never silent. The one exception is the robots.txt fetch itself, which may follow a hop **within the seeded site** — the apex↔www redirect nearly every shop has, where no earlier robots.txt exists to authorise it.
+
+`tests/test_politeness.py` now counts hop arrivals *at the fixture server* and asserts the spacing holds across a chain; `tests/test_fetch.py` asserts that a redirect target's `/robots.txt` is requested before anything else on that host, that a disallowed hop is refused and recorded, and that the lookup is memoised per host.
 
 ---
 
