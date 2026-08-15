@@ -71,6 +71,32 @@ MAX_CRAWL_DELAY_SECONDS = 10.0
 HopPolicy = Callable[[str, str], bool]
 
 
+class _RobotsExempt:
+    """The only legitimate reason to fetch without a robots policy: the request
+    that *is* the robots.txt fetch, which by definition runs before any rules
+    exist (§5.2's stated exception).
+
+    A sentinel rather than a default, because this subsystem has now produced
+    two defects of identical shape — enforcement written correctly, invocation
+    skipped (M1.1's host-only check, and the `follow_redirects=True` before it).
+    A permissive default is how the third one arrives: it makes forgetting the
+    policy silent at runtime instead of loud at the call site. Passing this is
+    a sentence in the diff that a reviewer can object to.
+
+    It is *not* a licence to follow anything: a hop that changes authority is
+    still refused, because a new authority has a robots.txt that provably has
+    not been read. It permits only same-authority hops, where there is nothing
+    to consult.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RobotsExempt"
+
+
+#: See `_RobotsExempt`. Import and pass explicitly; never default to it.
+RobotsExempt = _RobotsExempt()
+
+
 class HostRateLimiter:
     """Blocks until the host's interval has elapsed since the last call for it.
 
@@ -192,7 +218,7 @@ class Fetcher:
             follow_redirects=False,
         )
 
-    def get(self, url: str, *, hop_allowed: HopPolicy | None = None) -> Response:
+    def get(self, url: str, *, hop_allowed: HopPolicy | _RobotsExempt) -> Response:
         """Fetch one URL, never raising. Failures come back as `Response.error`.
 
         Redirects are followed a hop at a time, up to `MAX_REDIRECT_HOPS`, each
@@ -201,13 +227,12 @@ class Fetcher:
         stay on the same authority, because an allowed URL may redirect to a
         disallowed one and it is the landing request that robots governs.
 
-        With no policy supplied, a same-authority hop is followed and a hop that
-        changes authority is refused. The asymmetry is deliberate: the transport
-        holds no rules of its own, so for a same-authority hop there is nothing
-        to consult, while for a new authority there is a robots.txt that
-        provably has not been read. The one caller that relies on this is the
-        robots.txt fetch itself, which by definition runs before any rules exist
-        (§5.2's stated exception).
+        `hop_allowed` is **required**. Omitting it is a `TypeError` at the call
+        site rather than a silent bypass at runtime — see `_RobotsExempt` for
+        why that trade is worth one extra argument at four call sites. The
+        robots.txt fetch, which runs before any rules exist, passes
+        `RobotsExempt`; it then permits same-authority hops and refuses
+        authority changes.
 
         A refused or over-long chain comes back as an error `Response`, so it is
         recorded like any other failed fetch rather than passing silently.
@@ -238,14 +263,15 @@ class Fetcher:
                     status=response.status_code,
                     error=f"redirect_unusable: {location!r}",
                 )
-            # Asked for every hop (M1.12). `authority_of`, not `host_of`, decides
-            # only the *default* when no policy was supplied: the two questions
-            # differ on `www.`, and apex and www share one politeness budget but
-            # may serve different robots.txt files.
-            if hop_allowed is not None:
-                permitted = hop_allowed(current, target)
-            else:
+            # Asked for every hop (M1.12). Under `RobotsExempt` there are no
+            # rules to ask, so the question collapses to "does this hop leave
+            # the origin?" — `authority_of`, not `host_of`, because the two
+            # differ on `www.`: apex and www share one politeness budget but may
+            # serve different robots.txt files.
+            if isinstance(hop_allowed, _RobotsExempt):
                 permitted = authority_of(target) == authority_of(current)
+            else:
+                permitted = hop_allowed(current, target)
             if not permitted:
                 return Response(
                     url=current,
