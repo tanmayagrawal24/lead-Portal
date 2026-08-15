@@ -10,7 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from portal import __version__, audit, config, db, fetch, migrate, seeds
+from portal import __version__, audit, config, db, extract, fetch, migrate, seeds
 from portal.net import MAX_CONCURRENT_HOSTS, Fetcher, HostRateLimiter, RequestLog
 
 
@@ -109,6 +109,50 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
     return 0
 
 
+def cmd_extract_p1(path: Path) -> int:
+    """Deterministic extraction over artifacts already on disk (§5.3).
+
+    Costs nothing and makes no requests, so it is always safe to re-run — which
+    is the point: a parser fix is re-applied to the whole corpus by running this
+    again, with no third-party server involved.
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    conn = db.connect(path)
+    try:
+        version = migrate.current_version(conn)
+        highest = migrate.discover()[-1][0]
+        if version < highest:
+            print(
+                f"database at {path} is at migration {version:03d} but the code "
+                f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+                file=sys.stderr,
+            )
+            return 2
+        targets = [
+            (row["id"], row["domain"])
+            for row in conn.execute(
+                "SELECT id, domain FROM company WHERE excluded = 0 ORDER BY id"
+            )
+        ]
+        if not targets:
+            print("no companies to extract — run `portal fetch` first", file=sys.stderr)
+            return 2
+        run_id, results = extract.run(conn, targets, config.artifacts_root(path))
+    finally:
+        conn.close()
+
+    print(f"\nrun {run_id}: extract-p1 over {len(results)} companies")
+    for result in results:
+        print(f"  {result.domain}: {len(result.signals)} signals")
+        for key, value in sorted(result.signals.items()):
+            print(f"      {key} = {value}")
+        for note in result.notes:
+            print(f"      note: {note}")
+    return 0
+
+
 def cmd_audit_politeness(log_path: Path) -> int:
     """Report measured spacing and host concurrency. Non-zero if §5.2 was broken.
 
@@ -158,6 +202,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds between requests to one host (default: 1.0, the §5.2 floor). "
         "Values below the floor are refused.",
     )
+    sub.add_parser(
+        "extract-p1",
+        help="deterministic §5.3 signals from artifacts already on disk; no requests",
+    )
+
     audit_parser = sub.add_parser(
         "audit-politeness",
         help="measure §5.2 spacing and host concurrency from the request log",
@@ -206,6 +255,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         return cmd_fetch(path, args.seed, interval, args.max_hosts)
+
+    if args.command == "extract-p1":
+        return cmd_extract_p1(path)
 
     if args.command == "audit-politeness":
         return cmd_audit_politeness(

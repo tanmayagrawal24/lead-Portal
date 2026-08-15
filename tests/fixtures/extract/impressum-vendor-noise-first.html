@@ -1,0 +1,15 @@
+<!-- The false positive that provider-block anchoring exists to prevent: a
+     cookie-consent vendor's own GmbH appears in the page BEFORE the operator's
+     details. Observed on germanelectronic.de and opulent-wohnen.com, where a
+     naive first-match returned the vendor. Here the operator states no legal
+     form at all, so a correct parser must return None, not the vendor's GmbH. -->
+<html><body>
+<div class="cookie-banner">
+  <p>Datenschutz-Einstellungen. Verarbeitende Firma: Beispiel Consent GmbH,
+     Beispielweg 9, 12345 Beispielstadt. Nutzungsbedingungen.</p>
+</div>
+<main>
+<p>Impressum Gesetzliche Anbieterkennung: Max Mustermann MUSTERSHOP
+Musterstraße 1 50667 Musterstadt Deutschland
+Telefon: 0221 1234567 E-Mail: info@muster.example</p>
+</main></body></html>
