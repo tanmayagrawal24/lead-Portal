@@ -29,8 +29,15 @@ Resolutions to findings raised in `v0.3-review-findings.md`. Applied before M0.
 | B2 | `needs_review_reason` is one column; three soft flags can co-occur | Reasons move to a `review_flag` table, one row per (company, reason). `company.needs_review` survives as a boolean maintained by trigger, so §9's filter and `idx_company_review` still work; `company.needs_review_reason` is dropped. | §4, §6.2, §6.4, §9 |
 | B4 | `run_id` for signals written by `reconcile` was undefined | Reconciled signals carry the **submitting** run's id (`llm_batch.run_id`), not the reconciling run's. | §5.6 |
 | B3.1 | Cost-ledger ownership across the batch boundary | `actual_cost_usd` reconciles against the submitting run's `est_cost_usd`, where the reservation was made. | §5.6 |
+| A5.1 | Product sample must be stable across runs | **Tier 0 reuse:** an existing `product_page` artifact is re-sampled while it still returns HTTP 200; on 404/error it is discarded and selection falls through to Tier 1/2. §4 requires that re-scoring never need a refetch, so the evidence a score points at must not move under it. | §5.2 |
+| A5.2 | Candidate sources undefined | Three tiers: platform product sitemap (union of **all** shards, `.xml.gz` decompressed) → path-pattern candidates from fetched sitemaps → product-pattern links on the homepage. | §5.2 |
+| A5.3 | Ordering undefined | Lexicographic minimum by **Unicode code point**, never locale collation. Chosen over document order because Shopware re-shards product sitemaps on a schedule, making document order stable only by accident. | §5.2 |
+| A5.4 | Non-product URLs contaminate the candidate set | Four filters: reject query strings; require a path segment after the pattern; reject category/listing patterns; reject anything under the detected blog path. | §5.2 |
+| A5.5 | Unchecked sites scored as "no schema" | Zero candidates, or a selected sample whose fetch fails, writes **no** `schema.product_present` signal — not `0`. | §5.2 |
+| A5.6 | `opp.no_product_schema` could fire unmeasured | **Guard:** the rule fires only when `schema.product_present` was written from a product page fetched with HTTP 200; absent that signal it fires in neither direction. Clarifies what the existing predicate presupposes — no weight or threshold changes. **⚠ Needs Tanmay's ratification.** | §6.2 |
+| A5.7 | Selection was unauditable from the database | New signal key `catalog.product_sample_url` (text, unscored, no schema change); `evidence_url` is the sitemap or homepage it was read from. **⚠ "Stop and ask" item — approved, pending ratification.** | §5.2, §5.3 |
 
-Remaining findings (A1–A5, B1, B3.2–B3.3, B5–B7, C1–C4) are still open and are not required by M0.
+Remaining findings (A1–A4, B1, B3.2–B3.3, B5–B7, C1–C4) are still open and are not required by M0 or M1.
 
 ## Changelog v0.1 → v0.2 (retained for the record)
 
@@ -430,6 +437,31 @@ Politeness rules are **hard requirements**, not options:
 
 Fetch order: `robots.txt` → homepage → `sitemap.xml` (and any nested sitemaps) → Impressum → blog index if a blog path is found → one sample product page if a product path is found.
 
+**Product sample selection (A5).** `opp.no_product_schema` (+10) reads a single sampled product page, so which page is sampled has to be a stated rule. "Deterministic" here cannot mean "the same URL forever" — a catalog changes, and any rule keyed to the catalog picks differently once it does. The guarantee is **same inputs → same choice**, with the chosen URL recorded so the score traces to a specific stored artifact.
+
+*Tier 0 — reuse.* If a `product_page` artifact already exists for this company and its URL is still a valid candidate, re-sample **that** URL and consider nothing else. This is what keeps `schema.product_present` from flipping between runs for reasons unrelated to the site, and it lets the content-hash short-circuit do its job.
+
+Reuse holds only while the stored sample still returns **HTTP 200**. On a 404 or a fetch error the stored sample is discarded and selection falls through to Tier 1/2, so a dead sample is never pinned forever.
+
+*Tier 1 — platform product sitemap.* When a platform-specific product sitemap is detected (Shopware `…-product-….xml(.gz)`, Shopify `sitemap_products_*.xml`, WooCommerce `product-sitemap.xml`), candidates are the **union of all its shards**, not the first shard. `.xml.gz` shards are decompressed before parsing.
+
+*Tier 2 — path patterns.* With no product sitemap, candidates are URLs from the fetched sitemaps matching `/detail/`, `/products/`, `/produkt/`, `/p/`. With no sitemap at all, fall back to product-pattern links on the homepage.
+
+*Ordering, in every tier:* the **lexicographically smallest** URL, compared by **Unicode code point**. Never locale collation — a locale-dependent sort over a corpus full of umlauts is a reproducibility bug. Code-point ordering over the union is invariant to both intra-file reordering and inter-shard redistribution, which document order is not: Shopware regenerates and re-shards product sitemaps on a schedule, so document order is stable only by accident.
+
+*Filters, applied before ordering.* The ordering barely matters; which URLs qualify matters a great deal, because a non-product URL that reaches the candidate set produces a false `Product`-absent reading and wrongly awards +10. §5.3 already warns that Shopware sitemaps mix content and product URLs.
+
+- Reject URLs carrying a query string — variant and filter permutations, not canonical pages.
+- Require a path segment **after** the pattern. Bare `/products/` is Shopify's collection listing; `/products/<handle>` is the product.
+- Reject URLs also matching category/listing patterns (`/kategorie/`, `/collections/`, `/c/`).
+- Reject anything under the blog path detected for `content.blog_exists`.
+
+*Zero candidates.* No product page is fetched and **no `schema.product_present` signal is written — not `0`.** A `0` there means "checked, absent", which fires `opp.no_product_schema` for +10 against a site whose product pages were never retrieved. That is the same error as the blog ladder's `NULL` branch (§6.2), and it is refused for the same reason. The same applies when a sample is selected but its fetch fails — 404, timeout, robots-disallowed.
+
+No new review reason is needed: zero product candidates on a detected shop platform already satisfies `possible_marketplace_only` (§6.4).
+
+*Auditability.* The chosen URL is recorded as `catalog.product_sample_url` (text, unscored), with `evidence_url` set to the sitemap or homepage it was read from. Without it, `schema.product_present` points at a product page with no record of *why that page*, and the selection rule is unauditable from the database.
+
 **Impressum discovery** is two-step: (1) footer links matching `impressum|imprint|legal notice|rechtliches`; (2) if none, probe direct paths `/impressum`, `/impressum/`, `/imprint`, `/legal`, `/rechtliches` before concluding absence. Only after both steps fail is `no_impressum` recorded — and for CH companies it sets `needs_review`, not `excluded` (§6.4).
 
 Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, path recorded in `artifact.body_path`. Skip re-extraction when `content_hash` is unchanged from the previous run.
@@ -449,6 +481,7 @@ Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, pa
 | `perf.lighthouse_performance` | PageSpeed Insights API — **Phase 2 only** (slow: 15–30 s/site) | Cache by `artifact.last_checked_at` age; do not re-run within 30 days |
 | `agency.footer_credit` | Regex for `realisiert von\|umgesetzt von\|powered by\|Webdesign:` in footer, plus outbound footer links whose anchor/title contains `agentur\|design\|media\|digital` | Under-detects (logo-only credits). Treated as bonus negative signal, never as a gate |
 | `reviews.trusted_shops`, `reviews.count` | Trusted Shops badge script detection; visible aggregate review count in `AggregateRating` JSON-LD | Free product-strength proxy |
+| `catalog.product_sample_url` | The product URL selected by the A5 rule in §5.2. Written by `fetch`, not by an extractor — it records a fetch-time decision. | **Unscored.** Exists so the sample behind `schema.product_present` is auditable |
 
 ### 5.4 score --phase 1
 
@@ -611,7 +644,7 @@ The `blog_last_post is NULL` branch is new and deliberate. A blog index whose da
 | rule_id | Condition | Points |
 |---|---|---|
 | `opp.no_article_schema` | Blog **exists** and no `Article`/`BlogPosting` in JSON-LD on blog pages. Never fires together with `opp.no_blog`. | +8 |
-| `opp.no_product_schema` | No `Product` in JSON-LD on a product page | +10 |
+| `opp.no_product_schema` | No `Product` in JSON-LD on a product page. **Fires only when `schema.product_present` was written from a product page fetched with HTTP 200** (§5.2, A5) — absent that signal the rule fires in neither direction. | +10 |
 | `opp.ai_invisible` | `ai.queries_checked >= 2` and `ai.brand_mentions = 0` (Phase 2) | +15 |
 | `opp.slow_site` | Lighthouse performance < 50 (Phase 2) | +10 |
 | `opp.de_only` | Single distinct language (locale variants don't count), expansion angle | +5 |
