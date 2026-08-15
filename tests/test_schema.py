@@ -184,6 +184,53 @@ class TestReviewFlag(SchemaTestCase):
             self.conn.execute("SELECT COUNT(*) FROM review_flag").fetchone()[0], 0
         )
 
+    def test_every_ratified_reason_is_accepted(self) -> None:
+        """The CHECK is the list, and a reason ratified in §6.4 but never added
+        to it is a flag that cannot be raised — which fails at the write, in
+        whichever stage happens to be first to hit the case."""
+        company_id, run_id = self.add_company(), self.add_run()
+        for reason in (
+            "no_impressum",
+            "possible_marketplace_only",
+            "blog_date_unparseable",
+            "domain_moved",
+            "duplicate_site",
+            "catalog_not_measurable",
+            "blog_date_unbounded",
+        ):
+            self.raise_flag(company_id, run_id, reason)
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM review_flag WHERE company_id = ?", (company_id,)
+        ).fetchone()[0]
+        self.assertEqual(count, 7)
+
+    def test_a_raise_note_survives_and_is_optional(self) -> None:
+        """Migration 004. `blog_date_unbounded` sends a human to open a blog,
+        and the one fact they need — the newest post we could see — has to be
+        in the queue entry rather than joined out of three signals."""
+        company_id, run_id = self.add_company(), self.add_run()
+        self.conn.execute(
+            "INSERT INTO review_flag "
+            "(company_id, reason, raised_run_id, raised_at, raised_note) "
+            "VALUES (?,?,?,?,?)",
+            (
+                company_id,
+                "blog_date_unbounded",
+                run_id,
+                NOW,
+                "newest post seen: 2022-08-26 (sampled article only)",
+            ),
+        )
+        self.raise_flag(company_id, run_id, "no_impressum")
+        notes = dict(
+            self.conn.execute(
+                "SELECT reason, raised_note FROM review_flag WHERE company_id = ?",
+                (company_id,),
+            ).fetchall()
+        )
+        self.assertIn("2022-08-26", notes["blog_date_unbounded"])
+        self.assertIsNone(notes["no_impressum"])
+
     def test_raising_sets_the_boolean(self) -> None:
         company_id, run_id = self.add_company(), self.add_run()
         self.assertEqual(self.needs_review(company_id), 0)
