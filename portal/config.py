@@ -15,7 +15,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "portal.db"
 
 
+#: §5.2 politeness floor, in seconds per host. Not configurable below this.
+POLITENESS_INTERVAL = 1.0
+
+
 def db_path() -> Path:
     """The database path, honouring the PORTAL_DB environment override."""
     override = os.environ.get("PORTAL_DB")
     return Path(override).expanduser() if override else DEFAULT_DB_PATH
+
+
+def artifacts_root(database: Path | None = None) -> Path:
+    """Where fetched bodies live: `data/artifacts/` beside the database (§5.2)."""
+    base = (database or db_path()).parent
+    return base / "artifacts"

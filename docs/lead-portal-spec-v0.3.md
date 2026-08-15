@@ -246,10 +246,12 @@ CREATE UNIQUE INDEX uq_artifact_identity ON artifact(company_id, kind, content_h
 ```sql
 INSERT INTO artifact (company_id, kind, url, http_status, content_hash, body_path, bytes, fetched_at, last_checked_at)
 VALUES (?,?,?,?,?,?,?,?,?)
-ON CONFLICT (company_id, kind, content_hash) DO UPDATE
+ON CONFLICT (company_id, kind, content_hash) WHERE content_hash IS NOT NULL DO UPDATE
 SET last_checked_at = excluded.last_checked_at,
     http_status     = excluded.http_status;
 ```
+
+> The `WHERE content_hash IS NOT NULL` on the conflict target is not optional and is not decoration. `uq_artifact_identity` is a **partial** index, and SQLite matches a conflict target to a partial index only when the predicate is repeated verbatim. Without it every artifact write raises `ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint`. Found in M1; v0.3's original snippet omitted it and could never have run.
 
 ```sql
 -- ─────────────────────────────────────────────────────────────
@@ -442,6 +444,8 @@ Fetch order: `robots.txt` → homepage → `sitemap.xml` (and any nested sitemap
 *Tier 0 — reuse.* If a `product_page` artifact already exists for this company and its URL is still a valid candidate, re-sample **that** URL and consider nothing else. This is what keeps `schema.product_present` from flipping between runs for reasons unrelated to the site, and it lets the content-hash short-circuit do its job.
 
 Reuse holds only while the stored sample still returns **HTTP 200**. On a 404 or a fetch error the stored sample is discarded and selection falls through to Tier 1/2, so a dead sample is never pinned forever.
+
+"Discarded" means **excluded from the re-selection**, not merely un-reused: a dead URL is still the code-point minimum of its candidate set, so without the exclusion the fall-through would re-choose the very URL that just failed. At most **two** product requests are made per company per run — the Tier 0 probe and one fresh selection. If the fresh selection also fails, no sample is recorded and no `schema.product_present` is written.
 
 *Tier 1 — platform product sitemap.* When a platform-specific product sitemap is detected (Shopware `…-product-….xml(.gz)`, Shopify `sitemap_products_*.xml`, WooCommerce `product-sitemap.xml`), candidates are the **union of all its shards**, not the first shard. `.xml.gz` shards are decompressed before parsing.
 
