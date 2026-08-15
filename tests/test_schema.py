@@ -75,6 +75,28 @@ class SchemaTestCase(unittest.TestCase):
             ).fetchone()[0]
         )
 
+    def desynced_companies(self) -> list[int]:
+        """Companies where the cached boolean disagrees with the flag rows."""
+        return [
+            int(row[0])
+            for row in self.conn.execute(
+                """
+                SELECT c.id FROM company c
+                WHERE c.needs_review <> EXISTS (
+                    SELECT 1 FROM review_flag f
+                    WHERE f.company_id = c.id AND f.resolved_at IS NULL
+                )
+                """
+            )
+        ]
+
+    def assert_cache_is_consistent(self) -> None:
+        self.assertEqual(
+            self.desynced_companies(),
+            [],
+            "company.needs_review disagrees with review_flag for these companies",
+        )
+
 
 class TestObjectsExist(SchemaTestCase):
     def test_every_spec_table_exists(self) -> None:
@@ -207,11 +229,133 @@ class TestReviewFlag(SchemaTestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.conn.execute("UPDATE review_flag SET resolved_by_human = 1")
 
+    def test_resolved_by_human_is_constrained_to_zero_or_one(self) -> None:
+        company_id, run_id = self.add_company(), self.add_run()
+        self.raise_flag(company_id, run_id, "no_impressum")
+        for bad in (2, -1, 7):
+            with self.assertRaises(sqlite3.IntegrityError, msg=f"accepted {bad}"):
+                self.conn.execute(
+                    "UPDATE review_flag SET resolved_at = ?, resolved_by_human = ?",
+                    (NOW, bad),
+                )
+        for good in (0, 1):
+            self.conn.execute(
+                "UPDATE review_flag SET resolved_at = ?, resolved_by_human = ?",
+                (NOW, good),
+            )
+
+    def test_moving_a_flag_between_companies_updates_both(self) -> None:
+        """The UPDATE trigger recomputes OLD.company_id as well as NEW's, so
+        the company a flag left behind does not stay marked."""
+        source, target, run_id = (
+            self.add_company("source.de"),
+            self.add_company("target.de"),
+            self.add_run(),
+        )
+        self.raise_flag(source, run_id, "no_impressum")
+        self.assertEqual((self.needs_review(source), self.needs_review(target)), (1, 0))
+
+        self.conn.execute(
+            "UPDATE review_flag SET company_id = ? WHERE company_id = ?",
+            (target, source),
+        )
+        self.assertEqual((self.needs_review(source), self.needs_review(target)), (0, 1))
+        self.assert_cache_is_consistent()
+
     def test_deleting_flags_clears_the_boolean(self) -> None:
         company_id, run_id = self.add_company(), self.add_run()
         self.raise_flag(company_id, run_id, "no_impressum")
         self.conn.execute("DELETE FROM review_flag WHERE company_id = ?", (company_id,))
         self.assertEqual(self.needs_review(company_id), 0)
+
+
+class TestNeedsReviewInvariant(SchemaTestCase):
+    """`company.needs_review` == "has an unresolved review_flag", for every
+    company, after any sequence of flag writes.
+
+    The schema comment claims one write path; the triggers are what make that
+    true, and this is what checks they do. Note the residual gap pinned at the
+    bottom: nothing stops a direct UPDATE on company from breaking it.
+    """
+
+    def raise_flag(self, company_id: int, run_id: int, reason: str) -> None:
+        self.conn.execute(
+            "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at) "
+            "VALUES (?,?,?,?) ON CONFLICT (company_id, reason) DO NOTHING",
+            (company_id, reason, run_id, NOW),
+        )
+
+    def resolve(self, company_id: int, reason: str, by_human: int = 1) -> None:
+        self.conn.execute(
+            "UPDATE review_flag SET resolved_at = ?, resolved_by_human = ? "
+            "WHERE company_id = ? AND reason = ?",
+            (NOW, by_human, company_id, reason),
+        )
+
+    def test_invariant_holds_across_a_mixed_population(self) -> None:
+        run_id = self.add_run()
+
+        untouched = self.add_company("untouched.de")
+        one_open = self.add_company("one-open.de")
+        all_resolved = self.add_company("all-resolved.de")
+        partly_resolved = self.add_company("partly-resolved.de")
+        flags_deleted = self.add_company("flags-deleted.de")
+
+        self.raise_flag(one_open, run_id, "no_impressum")
+
+        self.raise_flag(all_resolved, run_id, "no_impressum")
+        self.raise_flag(all_resolved, run_id, "blog_date_unparseable")
+        self.resolve(all_resolved, "no_impressum")
+        self.resolve(all_resolved, "blog_date_unparseable", by_human=0)
+
+        self.raise_flag(partly_resolved, run_id, "no_impressum")
+        self.raise_flag(partly_resolved, run_id, "possible_marketplace_only")
+        self.resolve(partly_resolved, "no_impressum")
+
+        self.raise_flag(flags_deleted, run_id, "no_impressum")
+        self.conn.execute(
+            "DELETE FROM review_flag WHERE company_id = ?", (flags_deleted,)
+        )
+
+        self.assert_cache_is_consistent()
+        self.assertEqual(
+            [
+                self.needs_review(c)
+                for c in (
+                    untouched,
+                    one_open,
+                    all_resolved,
+                    partly_resolved,
+                    flags_deleted,
+                )
+            ],
+            [0, 1, 0, 1, 0],
+        )
+
+    def test_invariant_survives_re_raising_and_cascade_delete(self) -> None:
+        run_id = self.add_run()
+        kept = self.add_company("kept.de")
+        dropped = self.add_company("dropped.de")
+
+        for reason in ("no_impressum", "possible_marketplace_only"):
+            self.raise_flag(kept, run_id, reason)
+            self.raise_flag(dropped, run_id, reason)
+        self.raise_flag(kept, run_id, "no_impressum")  # re-raise, must be a no-op
+        self.assert_cache_is_consistent()
+
+        self.conn.execute("DELETE FROM company WHERE id = ?", (dropped,))
+        self.assert_cache_is_consistent()
+        self.assertEqual(self.needs_review(kept), 1)
+
+    def test_direct_write_to_company_desyncs_the_cache(self) -> None:
+        """The known gap, pinned rather than assumed away: the invariant holds
+        because every writer goes through review_flag. Nothing in the schema
+        enforces that, so `needs_review` must never be written directly."""
+        company_id = self.add_company()
+        self.conn.execute(
+            "UPDATE company SET needs_review = 1 WHERE id = ?", (company_id,)
+        )
+        self.assertEqual(self.desynced_companies(), [company_id])
 
 
 class TestConstraints(SchemaTestCase):

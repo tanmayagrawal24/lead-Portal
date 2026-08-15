@@ -15,6 +15,12 @@ dependencies = [
     "jinja2",
 ]
 
+# Tooling, not stack: neither is imported at runtime, so this is not a change
+# to the dependency list above. Tests are stdlib unittest; pytest is here as
+# the runner, and ruff is the lint/format tool the conventions name.
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
 [project.scripts]
 portal = "portal.cli:main"
 

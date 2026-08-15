@@ -16,8 +16,9 @@ Nothing else is built yet; the remaining stages arrive with their milestones.
 ## Setup
 
 ```bash
-pip install -e .
-portal init          # or: python -m portal init
+pip install -e .            # runtime
+pip install -e ".[dev]"     # runtime + test/lint tooling
+portal init                 # or: python -m portal init
 ```
 
 `portal init` creates the database, applies every pending migration, and prints
@@ -30,7 +31,10 @@ is gitignored and never committed.
 
 ## Tests
 
+Tests are stdlib `unittest`, so either runner works:
+
 ```bash
+pytest                                        # or:
 python -m unittest discover -s tests -t .
 ruff check . && ruff format --check .
 ```

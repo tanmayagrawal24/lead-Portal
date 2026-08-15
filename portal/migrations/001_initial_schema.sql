@@ -44,9 +44,9 @@ CREATE INDEX idx_company_review ON company(needs_review);
 -- dropped silently rather than raising, which is the opposite of the
 -- fail-loudly rule the CHECK is there to enforce.
 --
--- A resolution is sticky: once resolved, a later run that re-detects
--- the same condition does not re-raise it. This is deliberate — the
--- alternative re-adjudicates the same CH shop every month.
+-- Resolution is sticky — see §6.4, which states the rule and the
+-- reasoning. The unique index is what implements it; §6.4 is what
+-- decides it.
 -- ─────────────────────────────────────────────────────────────
 CREATE TABLE review_flag (
     id            INTEGER PRIMARY KEY,
@@ -56,7 +56,10 @@ CREATE TABLE review_flag (
     raised_run_id INTEGER NOT NULL REFERENCES run(id),
     raised_at     TEXT NOT NULL,
     resolved_at   TEXT,                        -- NULL = not yet reviewed
-    resolved_by_human INTEGER,                 -- 1 = a human dismissed it; 0 = the pipeline cleared it
+    resolved_by_human INTEGER CHECK (resolved_by_human IN (0,1)),
+                                               -- 1 = a human dismissed it; 0 = the pipeline cleared it.
+                                               -- NULL passes: a SQLite CHECK holds unless it evaluates
+                                               -- false, and the paired CHECK below governs the NULL case.
     resolved_note TEXT,
     CHECK ((resolved_at IS NULL     AND resolved_by_human IS NULL)
         OR (resolved_at IS NOT NULL AND resolved_by_human IS NOT NULL))
@@ -68,24 +71,28 @@ CREATE INDEX idx_review_flag_open ON review_flag(company_id) WHERE resolved_at I
 -- correct by trigger so there is exactly one write path: write the flag,
 -- the boolean follows. §9's filter stays an indexed column lookup rather
 -- than an EXISTS subquery on every page load.
+-- All three correlate the subquery to `company.id` rather than to NEW/OLD, so
+-- the UPDATE trigger can recompute both sides with one statement: an update
+-- that moved a flag between companies would otherwise leave the company it
+-- left behind still marked.
 CREATE TRIGGER trg_review_flag_after_insert AFTER INSERT ON review_flag
 BEGIN
     UPDATE company SET needs_review = EXISTS (
-        SELECT 1 FROM review_flag WHERE company_id = NEW.company_id AND resolved_at IS NULL
+        SELECT 1 FROM review_flag WHERE company_id = company.id AND resolved_at IS NULL
     ) WHERE id = NEW.company_id;
 END;
 
 CREATE TRIGGER trg_review_flag_after_update AFTER UPDATE ON review_flag
 BEGIN
     UPDATE company SET needs_review = EXISTS (
-        SELECT 1 FROM review_flag WHERE company_id = NEW.company_id AND resolved_at IS NULL
-    ) WHERE id = NEW.company_id;
+        SELECT 1 FROM review_flag WHERE company_id = company.id AND resolved_at IS NULL
+    ) WHERE id IN (OLD.company_id, NEW.company_id);
 END;
 
 CREATE TRIGGER trg_review_flag_after_delete AFTER DELETE ON review_flag
 BEGIN
     UPDATE company SET needs_review = EXISTS (
-        SELECT 1 FROM review_flag WHERE company_id = OLD.company_id AND resolved_at IS NULL
+        SELECT 1 FROM review_flag WHERE company_id = company.id AND resolved_at IS NULL
     ) WHERE id = OLD.company_id;
 END;
 
