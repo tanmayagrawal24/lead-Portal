@@ -155,7 +155,7 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
             response = fetcher.get(
                 f"http://localhost:{server.port}/",
                 # Vouched for, so this test measures the budget and nothing else.
-                cross_host=lambda _from, _to: True,
+                hop_allowed=lambda _from, _to: True,
             )
 
         self.assertEqual(response.status, 200)

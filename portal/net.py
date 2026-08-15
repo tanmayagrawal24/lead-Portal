@@ -14,8 +14,16 @@ that skips the rate limiter, because there is no other way to issue one.
 hop of a chain inside one `client.get()` call, below the limiter — five hops
 against one host in well under a second, and a cross-host hop to a host whose
 robots.txt was never read. So redirects are followed here, one hop at a time,
-each one waiting on the limiter like any other request, and a hop that changes
-authority is refused unless the caller vouches for it (`cross_host`).
+each one waiting on the limiter like any other request, and **every** hop target
+is put to the caller's `hop_allowed` policy before it is followed.
+
+*Every* hop, not only the ones that change authority (M1.12). Robots permission
+does not survive a redirect: an allowed URL may redirect to a disallowed one,
+and the request that lands on the disallowed URL is the one robots governs.
+Checking only authority changes is what let this transport fetch two
+robots-disallowed pages on the first real crawl — via a different path on one
+domain, and via a path differing from the `Disallow` rule only in case on the
+other. The callback's name says "hop", not "cross host", for that reason.
 
 Two keys, deliberately: the limiter is keyed on `urls.host_of` (apex and www
 share one budget, because they are one machine) and the vouching check on
@@ -58,9 +66,9 @@ MAX_REDIRECT_HOPS = 5
 #: worker slot behind a hostile or broken value.
 MAX_CRAWL_DELAY_SECONDS = 10.0
 
-#: `(from_url, to_url) -> may we follow this hop?`, asked only when the hop
-#: changes host. See `Fetcher.get`.
-CrossHostPolicy = Callable[[str, str], bool]
+#: `(from_url, to_url) -> may we follow this hop?`, asked for **every** hop
+#: (M1.12), not only the ones that change host. See `Fetcher.get`.
+HopPolicy = Callable[[str, str], bool]
 
 
 class HostRateLimiter:
@@ -184,16 +192,25 @@ class Fetcher:
             follow_redirects=False,
         )
 
-    def get(self, url: str, *, cross_host: CrossHostPolicy | None = None) -> Response:
+    def get(self, url: str, *, hop_allowed: HopPolicy | None = None) -> Response:
         """Fetch one URL, never raising. Failures come back as `Response.error`.
 
         Redirects are followed a hop at a time, up to `MAX_REDIRECT_HOPS`, each
-        hop waiting on the limiter for *its own* host. A hop that leaves the
-        current host is put to `cross_host` first; with no policy supplied the
-        answer is no, because the transport cannot know whether anyone has read
-        that host's robots.txt. A refused or over-long chain comes back as an
-        error `Response`, so it is recorded like any other failed fetch rather
-        than passing silently.
+        hop waiting on the limiter for *its own* host. **Every** hop target is
+        put to `hop_allowed` before it is followed (M1.12) — including hops that
+        stay on the same authority, because an allowed URL may redirect to a
+        disallowed one and it is the landing request that robots governs.
+
+        With no policy supplied, a same-authority hop is followed and a hop that
+        changes authority is refused. The asymmetry is deliberate: the transport
+        holds no rules of its own, so for a same-authority hop there is nothing
+        to consult, while for a new authority there is a robots.txt that
+        provably has not been read. The one caller that relies on this is the
+        robots.txt fetch itself, which by definition runs before any rules exist
+        (§5.2's stated exception).
+
+        A refused or over-long chain comes back as an error `Response`, so it is
+        recorded like any other failed fetch rather than passing silently.
         """
         assert self._client is not None
         current = url
@@ -221,12 +238,15 @@ class Fetcher:
                     status=response.status_code,
                     error=f"redirect_unusable: {location!r}",
                 )
-            # `authority_of`, not `host_of`: the two questions differ on `www.`.
-            # apex and www share one politeness budget but may serve different
-            # robots.txt files, so a hop between them still needs vouching.
-            if authority_of(target) != authority_of(current) and not (
-                cross_host is not None and cross_host(current, target)
-            ):
+            # Asked for every hop (M1.12). `authority_of`, not `host_of`, decides
+            # only the *default* when no policy was supplied: the two questions
+            # differ on `www.`, and apex and www share one politeness budget but
+            # may serve different robots.txt files.
+            if hop_allowed is not None:
+                permitted = hop_allowed(current, target)
+            else:
+                permitted = authority_of(target) == authority_of(current)
+            if not permitted:
                 return Response(
                     url=current,
                     status=response.status_code,

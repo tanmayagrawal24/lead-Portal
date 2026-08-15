@@ -206,10 +206,16 @@ class FetchStage:
         # behaviour and stays inside the domain we were asked to crawl; a hop
         # anywhere else is refused, because there is no robots.txt yet that
         # could authorise it.
+        # Now consulted for every hop, not only host-changing ones (M1.12).
+        # There are no robots rules to check a target against yet — this fetch
+        # is how we get them — so the only question it can answer is whether the
+        # hop stays inside the seeded site.
         def within_site(_from_url: str, to_url: str) -> bool:
             return same_site(to_url, domain)
 
-        robots_response = self.fetcher.get(f"{base}/robots.txt", cross_host=within_site)
+        robots_response = self.fetcher.get(
+            f"{base}/robots.txt", hop_allowed=within_site
+        )
         result.artifacts.append(
             self._record(company_id, domain, "robots", robots_response)
         )
@@ -240,9 +246,17 @@ class FetchStage:
 
         unfetchable: dict[str, str] = {}  # authority → why we will not fetch it
 
-        def cross_host(_from_url: str, to_url: str) -> bool:
+        def hop_allowed(_from_url: str, to_url: str) -> bool:
             """§5.2: "fetch and honour robots.txt before anything else" applies
             to a redirect hop too, because the hop is itself a request.
+
+            Asked for **every** hop, not only those that change authority
+            (M1.12). A same-authority hop takes the fast path — its rules are
+            already in `policies` — and is then checked against them exactly
+            like any other target. That check is the whole fix: `/impressum`
+            being allowed says nothing about the `/policies/legal-notice` it
+            redirects to, and it was the unchecked same-host hop that fetched
+            two disallowed pages on the first crawl.
 
             Keyed on authority rather than on the politeness key: apex and www
             share a budget but not necessarily a robots.txt, so each is asked
@@ -280,7 +294,7 @@ class FetchStage:
                 skipped = Response(url=url, error=robots_mod.disallowed_reason(url))
                 result.artifacts.append(self._record(company_id, domain, kind, skipped))
                 return None
-            response = self.fetcher.get(url, cross_host=cross_host)
+            response = self.fetcher.get(url, hop_allowed=hop_allowed)
             result.artifacts.append(self._record(company_id, domain, kind, response))
             return response
 
