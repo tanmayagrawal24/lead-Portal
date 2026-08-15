@@ -67,12 +67,34 @@ def detect_platform(html: str) -> str | None:
 # ── JSON-LD ─────────────────────────────────────────────────────────────
 
 
-def jsonld_types(html: str) -> set[str]:
-    """Every `@type` in every `application/ld+json` block, `@graph` included.
+#: A legacy XHTML script guard, still emitted around JSON-LD by real shops
+#: (`snocks.com`, on all three of its blocks). It is not JSON, and it made the
+#: whole document unparseable — `schema.article_present` read `0` on a page
+#: carrying `BlogPosting`, which is a wrong "checked and absent" (M1.31).
+_CDATA_OPEN = re.compile(r"^\s*(?://\s*)?<!\[CDATA\[")
+_CDATA_CLOSE = re.compile(r"(?://\s*)?\]\]>\s*$")
+
+
+def _jsonld_documents(html: str) -> list[object]:
+    """Every parseable `application/ld+json` block on the page.
 
     Malformed blocks are skipped rather than raising: a third-party page is
     allowed to ship broken JSON, and one bad block must not hide the good ones.
+    A CDATA guard is not "broken", though — it is a wrapper, so it is unwrapped
+    before the block is judged.
     """
+    documents: list[object] = []
+    for block in HTMLParser(html).css('script[type="application/ld+json"]'):
+        payload = _CDATA_CLOSE.sub("", _CDATA_OPEN.sub("", block.text())).strip()
+        try:
+            documents.append(json.loads(payload))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return documents
+
+
+def jsonld_types(html: str) -> set[str]:
+    """Every `@type` in every `application/ld+json` block, `@graph` included."""
     found: set[str] = set()
 
     def collect(node: object) -> None:
@@ -89,11 +111,8 @@ def jsonld_types(html: str) -> set[str]:
                 if key in node:
                     collect(node[key])
 
-    for block in HTMLParser(html).css('script[type="application/ld+json"]'):
-        try:
-            collect(json.loads(block.text()))
-        except (json.JSONDecodeError, ValueError):
-            continue
+    for document in _jsonld_documents(html):
+        collect(document)
     return found
 
 
@@ -377,7 +396,15 @@ _GERMAN_DATE = re.compile(
     r"\b(\d{1,2})\.\s*([A-Za-zäöüÄÖÜ]+)\.?\s+(\d{4})\b", re.IGNORECASE
 )
 _NUMERIC_DATE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b")
-_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+#: An ISO date, **including one that opens a timestamp** (M1.31).
+#:
+#: This was `\b(\d{4})-(\d{2})-(\d{2})\b`, and the trailing `\b` is the bug: in
+#: `2026-05-29T10:56:32+0200` the `9` and the `T` are both word characters, so
+#: there is no boundary between them and the match failed. A timestamp is what
+#: `datePublished` and `<time datetime>` actually carry — 4 of 7 blogs in the
+#: corpus reported no date at all because of it, and it had been unmeasurable
+#: from the index alone, so nothing else exposed it.
+_ISO_DATE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 
 
 def _parse_iso(value: str) -> date | None:
@@ -422,11 +449,8 @@ def _jsonld_dates(html: str) -> list[date]:
             for value in node.values():
                 collect(value)
 
-    for block in HTMLParser(html).css('script[type="application/ld+json"]'):
-        try:
-            collect(json.loads(block.text()))
-        except (json.JSONDecodeError, ValueError):
-            continue
+    for document in _jsonld_documents(html):
+        collect(document)
     return found
 
 

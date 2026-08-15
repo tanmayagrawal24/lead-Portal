@@ -146,6 +146,18 @@ class TestJsonLd(unittest.TestCase):
                     )
                 )
 
+    def test_a_cdata_guarded_block_is_unwrapped_rather_than_discarded(self) -> None:
+        """M1.31, observed on snocks.com — all three of its blocks. The legacy
+        `// <![CDATA[` guard is not JSON, so the whole document failed to parse
+        and `schema.article_present` read `0` on a page carrying `BlogPosting`.
+        A wrapper is not malformed JSON; only what it wraps is judged."""
+        html = (
+            '<script type="application/ld+json">// <![CDATA[\n'
+            '{"@type":"BlogPosting","datePublished":"2022-08-26"}\n'
+            "// ]]></script>"
+        )
+        self.assertTrue(parsers.has_article_schema(html))
+
     def test_review_count_is_none_rather_than_zero_when_absent(self) -> None:
         """`qual.product_strength` must not read "no markup" as "no reviews"."""
         self.assertIsNone(parsers.aggregate_review_count("<html></html>"))
@@ -243,6 +255,36 @@ class TestBlogDates(unittest.TestCase):
         <script type="application/ld+json">{"@type":"BlogPosting","datePublished":"2024-03-01"}</script>
         <script type="application/ld+json">{"@type":"BlogPosting","datePublished":"2025-07-19"}</script>"""
         self.assertEqual(parsers.newest_post_date(html, self.TODAY), date(2025, 7, 19))
+
+    def test_an_iso_timestamp_is_a_date(self) -> None:
+        """M1.31. `\\b(\\d{4})-(\\d{2})-(\\d{2})\\b` never matched a timestamp —
+        in `2026-05-29T10:56:32+0200` the `9` and the `T` are both word
+        characters, so there is no boundary between them. A timestamp is what
+        `datePublished` and `<time datetime>` actually carry, and 4 of 7 real
+        blogs reported no date at all because of it."""
+        for value, expected in (
+            ("2026-05-29T10:56:32+0200", date(2026, 5, 29)),
+            ("2019-08-25T08:30:00Z", date(2019, 8, 25)),
+            ("2022-08-26", date(2022, 8, 26)),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    parsers.newest_post_date(
+                        f'<time datetime="{value}">x</time>', date(2026, 8, 15)
+                    ),
+                    expected,
+                )
+
+    def test_a_longer_number_is_not_a_date(self) -> None:
+        """The guard the word boundary was there for, kept: an id or a version
+        string that merely contains a date shape is not a date."""
+        for value in ("12026-05-29", "2026-05-291"):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    parsers.newest_post_date(
+                        f'<time datetime="{value}">x</time>', date(2026, 8, 15)
+                    )
+                )
 
     def test_a_future_date_is_discarded(self) -> None:
         """A scheduled post would otherwise make a dead blog look current —

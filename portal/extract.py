@@ -418,29 +418,30 @@ class ExtractStage:
             None,
         )
 
-        # A6: the date lives on the article. `content.blog_last_post` reads the
-        # sample first and falls back to the index, because an index that does
-        # carry dates — the German visible-date shops do — is already an answer
-        # and is not worth preferring a single post over.
+        # A6, corrected by running it (M1.30): **the later of the two sources
+        # wins, and neither is preferred.**
+        #
+        # The proposal read the sample first and fell back to the index. On the
+        # corpus that lost two months on `navucko.com` and seventeen on
+        # `bio-fleischer-laden.de`, because a *sampled* article is one post's
+        # date while the index's is a maximum over every post it lists — and it
+        # is not simply the other way round either: on `ekomia.de` the sampled
+        # article is four months *newer* than anything the index dates. Neither
+        # source is reliably the newest post, so both are lower bounds, and the
+        # later of two lower bounds is the better one and never the worse.
+        dated: list[tuple[date, str]] = []
+        if read.newest_post is not None:
+            dated.append((read.newest_post, index.url))
+        article_html = self._body(article) if article is not None else ""
         if article is not None:
-            article_html = self._body(article)
             if (
                 published := parsers.newest_post_date(article_html, self.today)
             ) is not None:
-                self._write(
-                    result, "content.blog_last_post", article.url, day=published
-                )
-            elif read.newest_post is not None:
-                self._write(
-                    result, "content.blog_last_post", index.url, day=read.newest_post
-                )
-            else:
-                result.notes.append(
-                    "neither the sampled article nor the index is dated"
-                )
-            # A6: and so does the markup. `Article`/`BlogPosting` is on the post,
+                dated.append((published, article.url))
+            # A6: the markup lives on the post too. `Article`/`BlogPosting` is
             # never on the listing — `schema.article_present` was `0` on every
-            # blog index in the corpus, which was a wrong "checked and absent".
+            # blog index in the corpus, a wrong "checked and absent" for the
+            # four shops whose posts do carry it.
             self._write(
                 result,
                 "schema.article_present",
@@ -448,20 +449,20 @@ class ExtractStage:
                 num=1 if parsers.has_article_schema(article_html) else 0,
             )
         else:
-            if read.newest_post is not None:
-                self._write(
-                    result, "content.blog_last_post", index.url, day=read.newest_post
-                )
-            else:
-                # §6.2's NULL branch: a blog whose dates cannot be parsed is an
-                # unknown, not a stale blog. The flag is raised by `score`, not
-                # here; this stage only declines to invent a date.
-                result.notes.append("blog index has no parseable post date")
             # A6.1: no article, no claim about article markup. A `0` from the
             # index is a fact about the wrong page.
             result.notes.append(
                 "no blog article on disk — schema.article_present stays unwritten (A6.1)"
             )
+
+        if dated:
+            newest, evidence = max(dated)
+            self._write(result, "content.blog_last_post", evidence, day=newest)
+        else:
+            # §6.2's NULL branch: a blog whose dates cannot be parsed is an
+            # unknown, not a stale blog. The flag is raised by `score`, not
+            # here; this stage only declines to invent a date.
+            result.notes.append("no parseable post date on the index or the sample")
 
         if read.post_count is not None:
             self._write(

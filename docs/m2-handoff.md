@@ -24,7 +24,7 @@ Assumes no prior context beyond §5.3 and `docs/first-crawl-findings.md`. Two co
 
 **Not written, deliberately:** everything Phase 2 owns (`perf.lighthouse_performance`, `impressum.gf_count`, `impressum.owner_named`, `ai.*`), and the two sample URLs — `catalog.product_sample_url` (A5) and `content.blog_sample_url` (A6) — which `fetch` writes because they record fetch-time decisions.
 
-279 tests pass; `ruff check` and `ruff format --check` clean.
+283 tests pass; `ruff check` and `ruff format --check` clean.
 
 ---
 
@@ -112,7 +112,7 @@ Three findings that need M3's attention:
 
 **(a) and (b) — the blog date and the Article markup — are closed by A6 (M1.29), and the table above still shows the state before it runs.** Five of the seven detected blogs yielded no date, and it was never a parser weakness: Shopify blog *indexes* carry no `<time>`, no `datePublished` and no `Article` markup at all. All three live on the post. `schema.article_present` was `0` on **every** blog index in the corpus — a wrong "checked and absent" — and §6.2's ladder was raising `blog_date_unparseable` for the majority platform on missing evidence that was never on the page we fetched.
 
-A6 samples one article under the fetched index and reads both from there; A6.1 writes neither where no article is obtained, which is why the `last post` and `product schema` columns above have *fewer* entries than they did before — **the signals are now correctly silent, pending a fetch that stores the articles**. See §8.
+A6 samples one article under the fetched index and reads both from there. **The fetch has since run** — see §8 for what the blog signals became, and for the two silent parser defects that only fetching an article could expose.
 
 **(c) Three shops have no legal form because their Impressum is not on disk or states none** — `ekomia.de`'s is robots-disallowed (M1.12, correctly refused), and `blackpolish.de`/`navucko.com`/`smile-store.de` state none. This is §10.2's open question showing up as data: 4 of 13 are sole traders the predicate cannot see.
 
@@ -141,22 +141,51 @@ No scoring — `score --phase 1` is M3 and nothing here computes a band. No Phas
 
 ---
 
-## 8. The one thing that is built and not yet exercised against real sites
+## 8. A6 against the real corpus — and the two silent parsers it exposed
 
-**A6 changes the fetch stage, and no fetch has run since.** It is covered end to end against the loopback fixture server — the `blog_article` artifact is fetched, the sample is selected by the stated rule, and the extract side reads the date and the markup off it. What has *not* happened is a `portal fetch` against the 13 real domains, so no `blog_article` body is on disk for any of them.
+**The fetch ran.** 13 domains, `portal audit-politeness` reports **§5.2: HELD** — every host at or above its declared interval, max 2 hosts in flight. Seven `blog_article` artifacts, one per blog, and the selection matched the dry-run replay exactly on all seven, which is the determinism guarantee doing its job.
 
-The visible consequence is in §5's table: `content.blog_last_post` and `schema.article_present` are now **unwritten** for the seven shops with blogs. That is A6.1 behaving correctly — the article was never retrieved, so nothing is claimed — but it means the corpus currently carries *less* blog evidence than it did before A6, not more, and it stays that way until a fetch runs.
+P0 held again: `snocks.com` and `smoke2u.de` both produced `redirect refused by robots.txt` and neither yielded a 200 on a disallowed URL.
 
-The selection rule itself was replayed against the sitemaps already on disk, which needs no requests. It resolves on all seven blogs, every one from Tier 1:
+**Running it found two parser defects, and neither was reachable before A6** — both live on article pages, and until A6 no article page had ever been fetched:
 
-| shop | index (M1.15) | selected article |
-|---|---|---|
-| bio-fleischer-laden.de | `/blogs/rezepte` | `/blogs/rezepte/bbq-schweinenacken` |
-| blackpolish.de | `/blogs/news` | `/blogs/news/blackpolish-is-live` |
-| doonails.de | `/blogs/press-ons-instructions` | `/blogs/press-ons-instructions/pedicure-press-ons-instruction` |
-| ekomia.de | `/blogs/inside-ekomia` | `/blogs/inside-ekomia/arbeiten-rueckenuebungen-fuer-das-buero` |
-| navucko.com | `/blogs/news` | `/blogs/news/broome-street-temple-x-navucko` |
-| smile-store.de | `/magazin` | `/magazin/auszeichnung-dental-champions-in-der-apotheke` |
-| snocks.com | `/blogs/lifestyle` | `/blogs/lifestyle/das-poloshirt-und-was-man-daruber-wissen-muss` |
+1. **`_ISO_DATE` could not read a timestamp.** The pattern ended in `\b`, and in `2026-05-29T10:56:32+0200` the `9` and the `T` are both word characters, so there is no boundary between them. `datePublished` and `<time datetime>` carry timestamps — so **4 of 7 blogs reported no date at all**. This bug had been in `content.blog_last_post` since the parser was written and was invisible from an index that carries no timestamps.
+2. **`snocks.com` wraps all three of its JSON-LD blocks in a legacy `// <![CDATA[` guard**, which is not JSON, so every document failed to parse and `schema.article_present` read `0` on a page carrying `BlogPosting`. A wrapper is not malformed JSON; it is now unwrapped before the block is judged.
 
-**Cost of the run that would close this:** seven extra requests over the whole corpus, subject to §5.2's limiter and robots rules like any other. A crawl touches third-party servers, so it waits on a decision rather than being taken as implied by "build it".
+**And one design error in A6 itself, found the same way (M1.30).** The proposal — which I wrote and which was ratified as written — preferred the sampled article's date over the index's. A sample is not a maximum: the index's date is the newest over every post it lists, the article's is one post's. Preferring the sample lost 17 months on `bio-fleischer-laden.de` and 4 on `navucko.com`. It is not simply the reverse either, because on `ekomia.de` the sampled article is 4 months *newer* than anything the index dates. Both are lower bounds, so the later of the two is taken; it is never worse than either alone.
+
+### What the blog signals became
+
+| shop | last post — before A6 | after A6 + M1.30/M1.31 | `schema.article_present` |
+|---|---|---|---|
+| bio-fleischer-laden.de | 2022-12-01 | **2024-09-06** | — → **1** |
+| blackpolish.de | *none* | **2020-03-24** | — → **0** |
+| doonails.de | *none* | **2026-05-29** | — → **1** |
+| ekomia.de | 2025-12-08 | **2026-04-24** | — → **1** |
+| navucko.com | 2026-06-21 | 2026-06-20 † | — → **1** |
+| smile-store.de | *none* | *none* — genuinely undated | — → **0** |
+| snocks.com | *none* | **2022-08-26** | — → **1** |
+
+† one day earlier, not a regression: `…T22:00:00Z` is the 21st in CEST and is read as a UTC date. Immaterial at §6.2's month-scale thresholds; recorded in §10.5 so it is not later mistaken for drift.
+
+**`blog_date_unparseable` would now fill with one shop instead of five**, and `smile-store.de` is the one case where it is *correct*: its magazine articles carry no `<time>`, no JSON-LD and no visible German date anywhere. That is the review queue working — a real unknown routed to a person — rather than a parser error wearing a flag.
+
+**`schema.article_present` was `0` on all seven before A6 and is now 1 on four, 0 on three.** The three zeroes are now facts about the post; the seven were a fact about the wrong page.
+
+### The remaining gap, stated rather than closed
+
+Even the later of the two dates is a **lower bound**, not the last post date. `opp.blog_stale` awards +25 for *not* publishing, so an under-estimate of freshness fires it wrongly — the expensive direction. The fix available is to select the sample by the newest `<lastmod>` in the blog shard while still reading `datePublished` off the page: lastmod as the *selector*, never as the *value*, so its freshness bias cannot reach the signal. **That changes A6's ratified ordering, so it is in §10.5 rather than in this branch.**
+
+---
+
+## 9. Reproducing any of this
+
+```
+portal init                       # migrations 001–003
+portal fetch --seed seeds/candidates.csv
+portal audit-politeness           # exits non-zero if §5.2 was broken
+portal extract-p1                 # no requests; safe to re-run after any parser fix
+portal diff-signals               # what that changed, per domain
+```
+
+`data/` is gitignored, so artifacts and the database stay local to the Codespace.

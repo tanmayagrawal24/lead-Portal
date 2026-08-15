@@ -415,16 +415,33 @@ class TestBlogArticleSample(ExtractTestCase):
         )
         return company_id
 
-    def test_the_articles_date_wins_over_the_indexs(self) -> None:
-        company_id = self.stocked()
+    def test_the_later_of_the_two_dates_wins(self) -> None:
+        """M1.30, found by running A6 rather than by testing it. A sampled
+        article carries one post's date; the index carries a maximum over the
+        posts it lists. Neither is reliably the newest — preferring the sample
+        lost 17 months on bio-fleischer-laden.de, and preferring the index would
+        have lost 4 on ekomia.de — so both are lower bounds and the later one
+        is taken."""
+        company_id = self.stocked()  # index dates 2024-02-01
         self.artifact(
             company_id,
             "blog_article",
             "https://muster.de/blogs/news/erster",
-            BLOG_ARTICLE,
+            BLOG_ARTICLE,  # 2025-06-30
         )
         result = self.extract(company_id)
         self.assertEqual(str(result.signals["content.blog_last_post"]), "2025-06-30")
+
+    def test_an_older_article_does_not_overwrite_a_newer_index(self) -> None:
+        company_id = self.stocked()  # index dates 2024-02-01
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/erster",
+            '<html><body><time datetime="2021-07-22">alt</time></body></html>',
+        )
+        result = self.extract(company_id)
+        self.assertEqual(str(result.signals["content.blog_last_post"]), "2024-02-01")
 
     def test_article_markup_is_read_from_the_article(self) -> None:
         company_id = self.stocked()
@@ -456,8 +473,7 @@ class TestBlogArticleSample(ExtractTestCase):
         self.assertEqual(self.extract(company_id).signals["schema.article_present"], 0)
 
     def test_an_undated_article_falls_back_to_the_index(self) -> None:
-        """An index that does carry dates is already an answer, and is not worth
-        discarding for one undated post."""
+        """An index that carries dates is already an answer."""
         company_id = self.stocked()
         self.artifact(
             company_id,
@@ -480,9 +496,7 @@ class TestBlogArticleSample(ExtractTestCase):
         )
         result = self.extract(company_id)
         self.assertNotIn("content.blog_last_post", result.signals)
-        self.assertIn(
-            "neither the sampled article nor the index", " ".join(result.notes)
-        )
+        self.assertIn("no parseable post date", " ".join(result.notes))
 
     def test_no_blog_index_writes_zero_and_says_why(self) -> None:
         """§10.1: this instrument under-detects — a blog on a subdomain or on
