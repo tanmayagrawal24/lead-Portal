@@ -28,7 +28,18 @@ IMPRESSUM_PROBE_PATHS = (
 )
 
 #: §5.3 `content.blog_exists` vocabulary. Used here only to decide what to fetch.
-BLOG_SEGMENTS = ("blog", "magazin", "ratgeber", "news", "journal", "tipps")
+#:
+#: `blogs` is Shopify's, and its absence made every Shopify blog invisible
+#: (M1.14): five shops in the first crawl reported "no blog path found" while
+#: publishing actively, one of them with 670 blog URLs. Listed before `blog` for
+#: readability only — the alternation is followed by `(?:/|$)`, so `/blogs/`
+#: could never have matched `blog` whichever way round they sit.
+#:
+#: Observed in that crawl: `blogs` on 5 Shopify shops, `magazin` on Shopware 5.
+#: The rest are still convention. Two real blogs remain undetectable by *any*
+#: entry in this tuple, because the vocabulary is the wrong instrument for them
+#: — see M1.14.
+BLOG_SEGMENTS = ("blogs", "blog", "magazin", "ratgeber", "news", "journal", "tipps")
 
 _BLOG_PATH = re.compile(
     r"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?(" + "|".join(BLOG_SEGMENTS) + r")(?:/|$)",
