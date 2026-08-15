@@ -38,15 +38,13 @@ Assumes no prior context beyond §5.3 and `docs/first-crawl-findings.md`.
 
 The third row matters as much as the second: "we could not tell" and "we never looked" are different, and only the first is a property of the shop.
 
-**My recommendation: promote this to a review reason, not just a signal.** `catalog.not_measurable` is currently a signal, which needs no migration and no §4 change — that is why it is a signal today. But a signal is read by the scorer, and **nobody is shown it**. The company that needs a human is a shop where three rules went quiet at once; §6.4's review queue is the mechanism that exists for exactly that, and this is the same shape as `blog_date_unparseable` — an instrument that could not measure, routed to a person rather than guessed at.
+**My recommendation was to promote this to a review reason, not just a signal** — a signal is read by the scorer and **nobody is shown it**, while the company that needs a human is a shop where three rules went quiet at once. **Ratified, and built:** `catalog_not_measurable` is a §6.4 soft flag as of migration 003, raised wherever the signal is written. The signal stays and carries the reason text, which a flag has no room for; the flag carries the routing. Same division as `blog_date_unparseable`.
 
-Concretely, for M3: add `catalog_not_measurable` to §6.4's soft flags and raise it wherever this signal is written. It needs a `CHECK` widening (migration 003) and a §6.4 entry. I have not done it here because it is a scoring-model and schema change, and the M1.21/M1.22 precedent is that those get ratified before they are built.
+**One caveat that changes the shape of the problem, found by running this against the corpus.** The three-state rule catches *zero* matches. It does not catch *few* matches, and few-matches looks exactly like a small catalogue. The case this was raised on was `smile-store.de`, counted at 6 against a real catalogue of ~360.
 
-**One caveat that changes the shape of the problem, found by running this against the corpus.** The three-state rule catches *zero* matches. It does not catch *few* matches, and few-matches looks exactly like a small catalogue:
+**That case has since been explained, and it was not an instance of the problem.** The shop publishes all 194 of its products in a sitemap shard named `articles`, which matched none of the four filename conventions in the pattern list; the count of 6 came from the path-pattern fallback while the primary instrument sat unread in the index. With M1.24 it reports 194 from Tier 1, `qual.product_depth` fires correctly, and B7 fires on evidence rather than luck. See `docs/catalogue-recount-findings.md`.
 
-> `smile-store.de` (Shopware 5) has **2,494** sitemap URLs. Twelve contain `/detail/`, six survive the filters, so `catalog.product_url_count = 6`. Its real catalogue is ~360 products, living under category-shaped first segments (`/zahnpasta/…`, `/zahnbuersten/…`, `/zahnpflege/…`). The count is off by roughly fifty times, and it is *written*, so it reads as measured.
-
-That costs it `qual.product_depth` (needs ≥ 20) wrongly, and it passes B7 (needs ≥ 5) by luck rather than by evidence. **An undercount is worse than an unmeasurable, because it does not announce itself.** So the recommendation above should probably become a *measurability* judgement rather than a binary — but what threshold makes a count untrustworthy is not something a 13-shop corpus can answer, and inventing one now would be exactly the plausibility-over-evidence error M1.4 and M1.9 were about. **Flagging it as the open question rather than picking a number.**
+**The question stays open with less evidence than it had.** An undercount is still worse than an unmeasurable because it does not announce itself — but the corpus now contains no known instance of a genuinely small catalogue being mistaken for one, which is not the same as there being none. Inventing a threshold on zero observations is the plausibility-over-evidence error M1.4 and M1.9 were about. §10.3 carries the question; the partial answer already shipped is that the tier travels with the count, so a low number from `product_sitemap` is the shop's own statement and a low number from `sitemap_path_pattern` is ours.
 
 ---
 
@@ -89,29 +87,29 @@ A redactor that must be perfect on adversarial input is the wrong tool when the 
 
 ## 5. What running it against the corpus showed
 
-All 13 companies, from `portal extract-p1`:
+All 13 companies, from `portal extract-p1`. Catalogue counts are **post-M1.24/M1.25/M1.26** — five of the eight measurable counts changed, and `docs/catalogue-recount-findings.md` is the account of why:
 
-| domain | platform | catalogue | blog | last post | product schema | legal form |
-|---|---|---|---|---|---|---|
-| bio-fleischer-laden.de | Shopify | 306 | yes | 2022-12-01 | 1 | GmbH |
-| blackpolish.de | Shopify | 22 | yes | — | 0 | — |
-| doonails.de | Shopify | 389 | yes | — | 1 | Ltd |
-| ekomia.de | Shopify | 2861 | yes | 2025-12-08 | 0 | — |
-| germanelectronic.de | JTL | *not measured* | no | — | — | — |
-| navucko.com | Shopify | 144 | yes | 2026-06-21 | 1 | — |
-| opulent-wohnen.com | JTL | **not measurable** | no | — | — | — |
-| propellerdiscount.de | WooCommerce | *not measured* | no | — | 1 | GmbH |
-| smile-store.de | *(undetected)* | 6 ⚠ | yes | — | 0 | — |
-| smoke2u.de | JTL | **not measurable** | no | — | — | GmbH & Co. KG |
-| snocks.com | Shopify | 4620 | yes | — | 1 | GmbH |
-| verpackungskoenig.de | JTL | **not measurable** | no | — | — | GmbH |
-| zecplus.de | Shopify | 242 | no | — | 1 | GmbH & Co. KG |
+| domain | platform | catalogue | tier | blog | last post | product schema | legal form |
+|---|---|---|---|---|---|---|---|
+| bio-fleischer-laden.de | Shopify | 306 | product_sitemap | yes | 2022-12-01 | 1 | GmbH |
+| blackpolish.de | Shopify | 22 | product_sitemap | yes | — | 0 | — |
+| doonails.de | Shopify | 389 | product_sitemap | yes | — | 1 | Ltd |
+| ekomia.de | Shopify | 335 | product_sitemap | yes | 2025-12-08 | 0 | — |
+| germanelectronic.de | JTL | *not measured* | — | no | — | — | — |
+| navucko.com | Shopify | 72 | product_sitemap | yes | 2026-06-21 | 1 | — |
+| opulent-wohnen.com | JTL | **not measurable** | — | no | — | — | — |
+| propellerdiscount.de | WooCommerce | *not measured* | — | no | — | 1 | GmbH |
+| smile-store.de | *(undetected)* | 194 | product_sitemap | yes | — | 0 | — |
+| smoke2u.de | JTL | **not measurable** | — | no | — | — | GmbH & Co. KG |
+| snocks.com | Shopify | 462 | product_sitemap | yes | — | 1 | GmbH |
+| verpackungskoenig.de | JTL | **not measurable** | — | no | — | — | GmbH |
+| zecplus.de | Shopify | 242 | product_sitemap | no | — | 1 | GmbH & Co. KG |
 
 Three findings that need M3's attention:
 
-**(a) `content.blog_last_post` is unobtainable for most Shopify blogs.** Five of the nine detected blogs yield no date, and it is not a parser weakness: Shopify's blog *index* pages carry **no `<time>` element and no `datePublished`** at all — those live on the article pages, which we do not fetch. §6.2's ladder therefore hits its `blog_last_post is NULL` branch and raises `blog_date_unparseable` for the majority platform in the corpus. That is the ladder behaving correctly on missing evidence, but a review queue that fills with most of the corpus is not a review queue. Fixing it means fetching one article per blog — a §5.2 change and one more request per company, not an M2 change.
+**(a) `content.blog_last_post` is unobtainable for most Shopify blogs.** Five of the seven detected blogs yield no date, and it is not a parser weakness: Shopify's blog *index* pages carry **no `<time>` element and no `datePublished`** at all — those live on the article pages, which we do not fetch. §6.2's ladder therefore hits its `blog_last_post is NULL` branch and raises `blog_date_unparseable` for the majority platform in the corpus. That is the ladder behaving correctly on missing evidence, but a review queue that fills with most of the corpus is not a review queue. Fixing it means fetching one article per blog — a §5.2 change and one more request per company, not an M2 change. **Proposed as A6 in `docs/blog-article-sample-proposal.md`; awaiting ratification.**
 
-**(b) `schema.article_present` is 0 on every blog index.** Same cause: `Article`/`BlogPosting` markup lives on the post, not the listing. §5.3 says to check "the blog index", and on real shops that is the wrong page for this signal. Worth a §5.3 correction.
+**(b) `schema.article_present` is 0 on every blog index.** Same cause: `Article`/`BlogPosting` markup lives on the post, not the listing. §5.3 says to check "the blog index", and on real shops that is the wrong page for this signal. Covered by the same proposal, and recorded in §10.1.
 
 **(c) Three shops have no legal form because their Impressum is not on disk or states none** — `ekomia.de`'s is robots-disallowed (M1.12, correctly refused), and `blackpolish.de`/`navucko.com`/`smile-store.de` state none. This is §10.2's open question showing up as data: 4 of 13 are sole traders the predicate cannot see.
 

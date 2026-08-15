@@ -179,6 +179,39 @@ class TestHreflang(unittest.TestCase):
         self.assertIsNone(parsers.hreflang_language_count("<html></html>"))
 
 
+class TestLocalePrefixes(unittest.TestCase):
+    """M1.25: where a site says its translations live."""
+
+    def test_x_default_names_the_primary_and_the_rest_are_secondary(self) -> None:
+        """smile-store.de's real declaration, verbatim."""
+        html = """
+        <link rel="alternate" hreflang="x-default" href="https://www.smile-store.de/" />
+        <link rel="alternate" hreflang="en-GB" href="https://www.smile-store.de/shop/en/" />"""
+        prefixes = parsers.hreflang_prefixes(html, "smile-store.de")
+        self.assertEqual(prefixes.primary, "")
+        self.assertEqual(prefixes.secondary, ("/shop/en",))
+
+    def test_an_alternate_on_another_registrable_domain_is_ignored(self) -> None:
+        """zecplus.de points `de-CH` at zecplus.ch — a different site, already
+        excluded by `same_site`, and not a path prefix of anything."""
+        html = """
+        <link rel="alternate" hreflang="de" href="https://www.zecplus.de/" />
+        <link rel="alternate" hreflang="de-CH" href="https://www.zecplus.ch/" />"""
+        self.assertEqual(parsers.hreflang_prefixes(html, "zecplus.de").secondary, ())
+
+    def test_a_shop_serving_its_default_from_a_prefix(self) -> None:
+        html = """
+        <link rel="alternate" hreflang="x-default" href="https://muster.de/de/" />
+        <link rel="alternate" hreflang="en" href="https://muster.de/en/" />"""
+        prefixes = parsers.hreflang_prefixes(html, "muster.de")
+        self.assertEqual(prefixes.primary, "/de")
+        self.assertEqual(prefixes.secondary, ("/en",))
+
+    def test_no_hreflang_declares_nothing(self) -> None:
+        prefixes = parsers.hreflang_prefixes("<html></html>", "muster.de")
+        self.assertEqual((prefixes.primary, prefixes.secondary), ("", ()))
+
+
 class TestAgencyCredit(unittest.TestCase):
     def test_reads_a_real_footer_credit(self) -> None:
         html = "<footer><p>Realisiert von Musteragentur Webdesign Köln</p></footer>"

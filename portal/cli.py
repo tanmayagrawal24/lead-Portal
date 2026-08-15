@@ -150,6 +150,8 @@ def cmd_extract_p1(path: Path) -> int:
             print(f"      {key} = {value}")
         for note in result.notes:
             print(f"      note: {note}")
+        for flag in result.review_flags:
+            print(f"      review: {flag}")
     return 0
 
 

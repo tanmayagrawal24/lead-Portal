@@ -131,6 +131,64 @@ class TestFilters(unittest.TestCase):
             )
 
 
+class TestSecondaryLocales(unittest.TestCase):
+    """M1.25. A translation of a product is not a second product.
+
+    A multi-locale shop lists one product sitemap per market, each holding the
+    same catalogue under a different prefix. Counting their union multiplies a
+    shop's catalogue by its number of markets: `snocks.com` ships ten copies of
+    462 products, `ekomia.de` nine copies of 335.
+    """
+
+    def test_a_declared_prefix_is_secondary(self) -> None:
+        """`smile-store.de` serves its English subshop from `/shop/en/` and says
+        so in an `hreflang` alternate. No path-shape rule would see that."""
+        self.assertTrue(
+            sampling.is_secondary_locale(
+                "https://www.smile-store.de/shop/en/brands/prevdent/plaque-detector",
+                primary="",
+                secondary=("/shop/en",),
+            )
+        )
+        self.assertFalse(
+            sampling.is_secondary_locale(
+                "https://www.smile-store.de/stoebern/prevdent/plaque-detector",
+                primary="",
+                secondary=("/shop/en",),
+            )
+        )
+
+    def test_an_undeclared_locale_is_caught_by_its_shape(self) -> None:
+        """`snocks.com` declares three of its ten markets. The other seven are
+        visible only as a leading segment of locale-code shape."""
+        for path in ("/fr-fr/products/x", "/pl-pl/products/x", "/en-es/products/x"):
+            self.assertTrue(
+                sampling.is_secondary_locale(f"https://snocks.com{path}"), path
+            )
+
+    def test_the_primary_storefront_is_never_secondary(self) -> None:
+        """A shop serving its default from `/de/` declares `x-default` there.
+        Excluding it would empty the catalogue rather than deduplicate it."""
+        self.assertFalse(
+            sampling.is_secondary_locale(
+                "https://example.de/de/products/x", primary="/de"
+            )
+        )
+        self.assertTrue(
+            sampling.is_secondary_locale(
+                "https://example.de/en/products/x", primary="/de"
+            )
+        )
+
+    def test_ordinary_paths_are_not_locales(self) -> None:
+        for url in (
+            "https://example.de/products/alpha",
+            "https://example.de/detail/beta",
+            "https://example.de/",
+        ):
+            self.assertFalse(sampling.is_secondary_locale(url), url)
+
+
 class TestOrdering(unittest.TestCase):
     def test_picks_the_code_point_minimum(self) -> None:
         candidates = [

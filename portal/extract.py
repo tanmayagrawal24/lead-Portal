@@ -40,6 +40,7 @@ class ExtractResult:
     company_id: int
     signals: dict[str, object] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    review_flags: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,20 @@ class ExtractStage:
             ),
         )
         result.signals[key] = num if num is not None else (text or day)
+
+    def _raise_review_flag(self, result: ExtractResult, reason: str) -> None:
+        """§6.4 soft flag. Same idiom as `fetch`: `DO NOTHING` on the uniqueness
+        conflict only, so a misspelled reason still raises a CHECK violation
+        rather than becoming a flag that silently never existed.
+
+        No lock here, unlike `fetch` — this stage is single-threaded.
+        """
+        self.conn.execute(
+            "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at) "
+            "VALUES (?,?,?,?) ON CONFLICT (company_id, reason) DO NOTHING",
+            (result.company_id, reason, self.run_id, utc_now()),
+        )
+        result.review_flags.append(reason)
 
     # ── per-company ─────────────────────────────────────────────────────
 
@@ -241,6 +256,7 @@ class ExtractStage:
         (findings §4) — so the count is left unwritten and the reason recorded.
         """
         page_urls: list[str] = []
+        catalogue_urls: list[str] = []
         product_sitemap_urls: list[str] = []
         sitemaps = [a for a in artifacts if a.kind == "sitemap" and a.body_path]
         for artifact in sitemaps:
@@ -251,30 +267,76 @@ class ExtractStage:
             page_urls.extend(pages)
             if sitemap.is_product_sitemap(artifact.url):
                 product_sitemap_urls.extend(pages)
+            if not sitemap.is_blog_sitemap(artifact.url):
+                # A shard the shop itself labels as content is not catalogue,
+                # whatever its URLs look like (M1.24). Kept in `page_urls`
+                # regardless: dropping it there took `/blogs/…` away from blog
+                # *path* detection and silently turned `snocks.com` — 107 blog
+                # URLs, a post from July — into `blog_exists = 0`, which is
+                # `opp.no_blog`'s +25 against a shop that publishes weekly.
+                catalogue_urls.extend(pages)
 
         blog_path = self._blog_path(page_urls, homepage_html, domain)
         evidence = sitemaps[0].url if sitemaps else ""
+        locales = parsers.hreflang_prefixes(homepage_html, domain)
 
-        if product_sitemap_urls:
+        def candidates(urls: list[str], require_pattern: bool) -> set[str]:
+            """Filtered to one locale, because a translation is not a product."""
+            found = {
+                url
+                for url in urls
+                if sampling.is_product_candidate(
+                    url, domain, blog_path=blog_path, require_pattern=require_pattern
+                )
+            }
+            primary = {
+                url
+                for url in found
+                if not sampling.is_secondary_locale(
+                    url, locales.primary, locales.secondary
+                )
+            }
+            if found and not primary:
+                # An exclusion that empties a catalogue is evidence about the
+                # exclusion, not about the shop. Fall back rather than convert a
+                # measured shop into an unmeasurable one on a path-shape guess.
+                result.notes.append(
+                    "locale filter would have excluded every candidate — not applied"
+                )
+                return found
+            if len(found) != len(primary):
+                result.notes.append(
+                    f"locale filter dropped {len(found) - len(primary)} translated URLs"
+                )
+            return primary
+
+        # A5's tier hierarchy, now shared with the count (M1.24). The primary
+        # instrument is the shop's own product sitemap; path patterns are the
+        # fallback, not the default. Reading them in the other order is what
+        # made `smile-store.de` report 6 products against a catalogue of 194:
+        # the shard holding all of them sat unread in the index while a
+        # `/detail/` pattern scraped six stragglers off the rest of the site.
+        if counted := candidates(product_sitemap_urls, require_pattern=False):
             # Tier 1's own membership is the evidence, so the path need not
             # match a pattern — SEO-rewritten catalogues would otherwise count
             # as empty.
-            counted = {
-                url
-                for url in product_sitemap_urls
-                if sampling.is_product_candidate(
-                    url, domain, blog_path=blog_path, require_pattern=False
-                )
-            }
+            tier = "product_sitemap"
+        elif counted := candidates(catalogue_urls, require_pattern=True):
+            tier = "sitemap_path_pattern"
         else:
-            counted = {
-                url
-                for url in page_urls
-                if sampling.is_product_candidate(url, domain, blog_path=blog_path)
-            }
+            tier = ""
 
         if counted:
-            self._write(result, "catalog.product_url_count", evidence, num=len(counted))
+            # The tier travels with the number: a count of 6 from a path
+            # pattern and a count of 6 from a product sitemap are different
+            # claims, and only one of them is the shop's own statement.
+            self._write(
+                result,
+                "catalog.product_url_count",
+                evidence,
+                num=len(counted),
+                text=tier,
+            )
             return blog_path
 
         if not sitemaps:
@@ -283,10 +345,11 @@ class ExtractStage:
 
         # §10.3: the instrument does not apply. Not a zero, and not silence.
         reason = (
-            "no URL matched a product pattern; on this platform products are "
-            "root-level slugs indistinguishable from categories"
+            "no product sitemap and no URL matching a product pattern; on this "
+            "platform products are root-level slugs indistinguishable from categories"
         )
         self._write(result, "catalog.not_measurable", evidence, num=1, text=reason)
+        self._raise_review_flag(result, "catalog_not_measurable")
         result.notes.append(
             f"catalog not measurable: {len(page_urls)} URLs, none identifiable as products"
         )

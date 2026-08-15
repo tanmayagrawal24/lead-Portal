@@ -324,6 +324,103 @@ class TestSitemapParsing(unittest.TestCase):
             self.assertFalse(sitemap.is_product_sitemap(url), url)
 
 
+class TestShardSemantics(unittest.TestCase):
+    """M1.24. A sitemap index is a labelled table of contents; read the labels.
+
+    The convention list this backs up answers "is this Shopify's product
+    sitemap?" and cannot answer "what did this shop call its catalogue?".
+    `smile-store.de` calls it `articles`, published all 194 of its products
+    there, and was counted at **6** — from a `/detail/` pattern scraping
+    stragglers off the rest of the site while the shard sat unread.
+    """
+
+    def test_a_semantically_named_shard_is_a_product_sitemap(self) -> None:
+        """Observed on one shop (Shopware 5 + PixupSitemap), per M1.9."""
+        self.assertTrue(
+            sitemap.is_product_sitemap(
+                "https://www.smile-store.de/PixupSitemap/sitemap/area/articles-0-sitemap.xml"
+            )
+        )
+
+    def test_the_german_forms_are_carried_but_unobserved(self) -> None:
+        """`artikel` and `produkte` are in the vocabulary and no shop in the
+        corpus serves either. The test pins the behaviour; the docstring is the
+        only place that records the evidence is missing."""
+        for url in (
+            "https://example.de/sitemap/artikel-0.xml",
+            "https://example.de/produkte-sitemap.xml",
+        ):
+            self.assertTrue(sitemap.is_product_sitemap(url), url)
+
+    def test_a_blog_shard_is_content_and_not_catalogue(self) -> None:
+        for url in (
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/blogs-0-sitemap.xml",
+            "https://example.de/magazin-sitemap.xml",
+            "https://example.de/sitemap-ratgeber-1.xml",
+        ):
+            self.assertTrue(sitemap.is_blog_sitemap(url), url)
+            self.assertFalse(sitemap.is_product_sitemap(url), url)
+
+    def test_the_blog_reading_wins_where_both_words_appear(self) -> None:
+        """`article` is a product in German commerce and a post in English CMS
+        usage. Where a shard says both, the content reading is taken."""
+        self.assertEqual(
+            sitemap.shard_kind("https://example.de/blog-articles-0-sitemap.xml"), "blog"
+        )
+
+    def test_the_siblings_of_a_product_shard_are_not_products(self) -> None:
+        """Every one of these sits beside `articles-0-sitemap.xml` in a real
+        index, and counting any of them would inflate the catalogue."""
+        for url in (
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/categories-0-sitemap.xml",
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/customPages-0-sitemap.xml",
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/suppliers-0-sitemap.xml",
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/pictures-0-sitemap.xml",
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/landingPages-0-sitemap.xml",
+            "https://verpackungskoenig.de/export/sitemap_0.xml.gz",
+        ):
+            self.assertIsNone(sitemap.shard_kind(url), url)
+            self.assertFalse(sitemap.is_product_sitemap(url), url)
+
+    def test_scaffolding_words_carry_no_meaning(self) -> None:
+        self.assertEqual(
+            sitemap.shard_words("https://example.de/area/sitemap_index.xml.gz"),
+            frozenset(),
+        )
+
+
+class TestImageLocationsAreNotPages(unittest.TestCase):
+    """`<image:loc>` is metadata about a page, not another page.
+
+    Stripping namespaces before comparing tag names made every Shopify product
+    sitemap read as twice its size. It never reached a count on this corpus —
+    Shopify serves images from `cdn.shopify.com` and `same_site` discarded them
+    — but a shop hosting its own images under `/products/…` would have had every
+    product counted twice by a rule that believed it was counting pages.
+    """
+
+    WITH_IMAGES = """<?xml version="1.0"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+      <url>
+        <loc>https://example.de/products/alpha</loc>
+        <image:image><image:loc>https://example.de/products/alpha.jpg</image:loc></image:image>
+      </url>
+    </urlset>"""
+
+    def test_only_the_page_location_is_returned(self) -> None:
+        _children, pages = sitemap.parse(
+            self.WITH_IMAGES.encode(), "https://example.de/sitemap_products_1.xml"
+        )
+        self.assertEqual(pages, ["https://example.de/products/alpha"])
+
+    def test_a_namespaceless_sitemap_still_parses(self) -> None:
+        """Real sitemaps omit the declaration; an extension element cannot."""
+        body = b"<urlset><url><loc>https://example.de/detail/a</loc></url></urlset>"
+        _children, pages = sitemap.parse(body, "https://example.de/s.xml")
+        self.assertEqual(pages, ["https://example.de/detail/a"])
+
+
 class TestBlogPathDetection(unittest.TestCase):
     """§5.3's blog vocabulary, against the paths real shops actually serve."""
 

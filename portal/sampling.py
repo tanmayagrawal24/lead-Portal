@@ -41,6 +41,32 @@ _TRAILING_SLASHES = re.compile(r"/+$")
 _LOCALE_ROOT = re.compile(r"^/[a-z]{2}(-[a-z]{2})?$", re.IGNORECASE)
 
 
+def is_secondary_locale(
+    url: str, primary: str = "", secondary: tuple[str, ...] = ()
+) -> bool:
+    """True when `url` is a translation of something counted elsewhere (M1.25).
+
+    Two instruments, because neither alone covers the corpus:
+
+    1. **Declared.** `smile-store.de` serves its English subshop from
+       `/shop/en/` and says so in an `hreflang` alternate. No path-shape rule
+       would recognise `/shop/en` as a locale.
+    2. **Shaped.** `snocks.com` serves ten locales and declares only three of
+       them; the other seven (`/fr-fr`, `/pl-pl`, `/en-es`, …) are visible only
+       as a leading segment of locale-code shape — the same shape M1.16 already
+       treats as a storefront root rather than a product.
+
+    Where the primary storefront *is* under a prefix, it is never secondary:
+    the point is to drop a shop's siblings, not its own catalogue.
+    """
+    path = path_of(url).rstrip("/") or "/"
+    for prefix in secondary:
+        if path == prefix or path.startswith(f"{prefix}/"):
+            return True
+    first = f"/{path.split('/')[1]}" if path.count("/") >= 1 and len(path) > 1 else ""
+    return bool(first and first != primary and _LOCALE_ROOT.match(first))
+
+
 def _segment_after_pattern(path: str, pattern: str) -> str:
     """The path remainder after `pattern`, with trailing slashes removed."""
     index = path.lower().find(pattern)

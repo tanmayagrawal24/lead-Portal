@@ -24,6 +24,8 @@ from datetime import UTC, date, datetime
 
 from selectolax.parser import HTMLParser, Node
 
+from portal.urls import path_of, same_site
+
 # ── platform signatures (§5.3, M1.9–M1.11) ──────────────────────────────
 #
 # Observed in the homepage HTML of all 13 shops in the first crawl, not taken
@@ -167,6 +169,55 @@ def hreflang_language_count(html: str) -> int | None:
             continue
         languages.add(value.split("-")[0])
     return len(languages) if languages else None
+
+
+@dataclass(frozen=True)
+class LocalePrefixes:
+    """Where a site says its translations live (M1.25).
+
+    `primary` is the path prefix of the storefront the site nominates as its
+    default; `secondary` are the prefixes of the declared alternates. Both are
+    normalised without a trailing slash, and the site root is `""`.
+    """
+
+    primary: str = ""
+    secondary: tuple[str, ...] = ()
+
+
+def hreflang_prefixes(html: str, site: str) -> LocalePrefixes:
+    """Read the declared locale storefronts off the homepage (M1.25).
+
+    A multi-locale shop lists **one product sitemap per locale**, each holding
+    the same catalogue under a different path prefix, so counting their union
+    multiplies a shop's catalogue by its number of markets. `snocks.com` ships
+    ten copies of 925 products.
+
+    Only same-site alternates count, and only those with a path: `zecplus.de`
+    points its `de-CH` alternate at `zecplus.ch`, a different registrable
+    domain that `same_site` already excludes, and an alternate pointing at the
+    root is not a prefix at all.
+
+    The `x-default` alternate names the primary storefront, which is the part
+    that makes this safe to apply: a shop serving German from `/de/` declares
+    `x-default` there too, so the rule excludes its *siblings* rather than its
+    catalogue. Absent `x-default`, the primary is the root.
+    """
+    primary = ""
+    declared: list[str] = []
+    for node in HTMLParser(html).css("link[rel=alternate][hreflang]"):
+        code = (node.attributes.get("hreflang") or "").strip().lower()
+        href = (node.attributes.get("href") or "").strip()
+        if not code or not href or not same_site(href, site):
+            continue
+        prefix = path_of(href).rstrip("/")
+        if code == "x-default":
+            primary = prefix
+        elif prefix:
+            declared.append(prefix)
+    return LocalePrefixes(
+        primary=primary,
+        secondary=tuple(sorted({p for p in declared if p != primary})),
+    )
 
 
 #: Trusted Shops ships several script hosts; all of them carry this token.

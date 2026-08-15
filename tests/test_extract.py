@@ -145,6 +145,38 @@ class TestCatalogueMeasurability(ExtractTestCase):
         self.assertEqual(row["value_num"], 1)
         self.assertIn("root-level slugs", row["value_text"])
 
+    def test_an_unmeasurable_catalogue_reaches_the_review_queue(self) -> None:
+        """Ratified after M2: a signal is read by the scorer and shown to
+        nobody, and the company that most needs a human is the one where
+        `qual.product_depth`, `qual.own_domain_shop` and `opp.no_product_schema`
+        all went quiet at once. Same routing as `blog_date_unparseable`."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP_ROOT_SLUGS
+        )
+        result = self.extract(company_id)
+
+        self.assertIn("catalog_not_measurable", result.review_flags)
+        row = self.conn.execute(
+            "SELECT reason, resolved_at FROM review_flag WHERE company_id = ?",
+            (company_id,),
+        ).fetchone()
+        self.assertEqual(
+            (row["reason"], row["resolved_at"]), ("catalog_not_measurable", None)
+        )
+        needs_review = self.conn.execute(
+            "SELECT needs_review FROM company WHERE id = ?", (company_id,)
+        ).fetchone()["needs_review"]
+        self.assertEqual(needs_review, 1)
+
+    def test_a_measured_catalogue_raises_no_flag(self) -> None:
+        """Anti-vacuity: the flag has to be capable of not firing."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP)
+        self.assertEqual(self.extract(company_id).review_flags, [])
+
     def test_no_sitemap_writes_neither_signal(self) -> None:
         """Not measurable and not-even-looked-at are different facts too."""
         company_id = self.company()
@@ -170,6 +202,148 @@ class TestCatalogueMeasurability(ExtractTestCase):
         self.assertEqual(
             self.extract(company_id).signals["catalog.product_url_count"], 2
         )
+
+
+class TestCatalogueTierHierarchy(ExtractTestCase):
+    """M1.24: the count uses A5's tiers, product sitemap before path patterns.
+
+    Reading them in the other order is what produced the corpus's worst number:
+    `smile-store.de` counted at 6 against a catalogue of 194, because a
+    `/detail/` pattern found six stragglers on the rest of the site while the
+    shard holding every product sat unread in the index.
+    """
+
+    #: The real shape: a semantically named shard, and a handful of URLs
+    #: elsewhere on the site that happen to match a path pattern.
+    ARTICLES_SHARD = """<?xml version="1.0"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><loc>https://muster.de/stoebern/marke/produkt-eins</loc></url>
+      <url><loc>https://muster.de/kosmetik/produkt-zwei</loc></url>
+      <url><loc>https://muster.de/geschenke/produkt-drei</loc></url>
+    </urlset>"""
+
+    STRAGGLERS = """<?xml version="1.0"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><loc>https://muster.de/detail/uebriggebliebenes</loc></url>
+    </urlset>"""
+
+    def stocked(self) -> int:
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id,
+            "sitemap",
+            "https://muster.de/PixupSitemap/sitemap/area/articles-0-sitemap.xml",
+            self.ARTICLES_SHARD,
+        )
+        self.artifact(
+            company_id,
+            "sitemap",
+            "https://muster.de/PixupSitemap/sitemap/area/customPages-0-sitemap.xml",
+            self.STRAGGLERS,
+        )
+        return company_id
+
+    def test_the_named_shard_is_counted_not_the_path_patterns(self) -> None:
+        company_id = self.stocked()
+        result = self.extract(company_id)
+        self.assertEqual(result.signals["catalog.product_url_count"], 3)
+
+    def test_the_tier_travels_with_the_count(self) -> None:
+        """A count of 3 from a product sitemap and a count of 3 from a path
+        pattern are different claims. Only one is the shop's own statement."""
+        company_id = self.stocked()
+        self.extract(company_id)
+        row = self.signals(company_id)["catalog.product_url_count"]
+        self.assertEqual(row["value_text"], "product_sitemap")
+
+    def test_path_patterns_still_answer_when_no_shard_is_named(self) -> None:
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP)
+        self.extract(company_id)
+        row = self.signals(company_id)["catalog.product_url_count"]
+        self.assertEqual(
+            (row["value_num"], row["value_text"]), (2, "sitemap_path_pattern")
+        )
+
+    def test_a_content_shard_is_not_catalogue(self) -> None:
+        """A shard the shop labels `blogs` holds posts, whatever their paths
+        look like — but its URLs stay available to blog *path* detection, which
+        is where dropping them turned snocks.com into `blog_exists = 0`."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id,
+            "sitemap",
+            "https://muster.de/sitemap_blogs_1.xml",
+            """<?xml version="1.0"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>https://muster.de/blogs/news</loc></url>
+              <url><loc>https://muster.de/blogs/news/erster</loc></url>
+            </urlset>""",
+        )
+        self.artifact(
+            company_id, "blog_index", "https://muster.de/blogs/news", BLOG_INDEX
+        )
+        result = self.extract(company_id)
+        self.assertNotIn("catalog.product_url_count", result.signals)
+        self.assertEqual(result.signals["content.blog_exists"], 1)
+
+
+class TestMultiLocaleCatalogues(ExtractTestCase):
+    """M1.25: ten storefronts are one catalogue."""
+
+    def locale_shop(self) -> int:
+        company_id = self.company()
+        self.artifact(
+            company_id,
+            "homepage",
+            "https://muster.de/",
+            """<html><head>
+            <link rel="alternate" hreflang="x-default" href="https://muster.de/">
+            <link rel="alternate" hreflang="en" href="https://muster.de/en">
+            </head></html>""",
+        )
+        for prefix in ("", "/en", "/fr-ch"):
+            self.artifact(
+                company_id,
+                "sitemap",
+                f"https://muster.de{prefix}/sitemap_products_1.xml",
+                f"""<?xml version="1.0"?>
+                <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+                  <url><loc>https://muster.de{prefix}/products/alpha</loc></url>
+                  <url><loc>https://muster.de{prefix}/products/beta</loc></url>
+                </urlset>""",
+            )
+        return company_id
+
+    def test_translations_are_not_counted_twice(self) -> None:
+        """Declared (`/en`) and undeclared (`/fr-ch`) alike: `snocks.com` names
+        three of its ten markets and serves all ten."""
+        result = self.extract(self.locale_shop())
+        self.assertEqual(result.signals["catalog.product_url_count"], 2)
+        self.assertIn("locale filter dropped 4", " ".join(result.notes))
+
+    def test_a_filter_that_would_empty_the_catalogue_is_not_applied(self) -> None:
+        """An exclusion that removes everything is evidence about the exclusion,
+        not about the shop. A shop serving its whole catalogue from a two-letter
+        first segment must not become unmeasurable on a path-shape guess."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id,
+            "sitemap",
+            "https://muster.de/sitemap_products_1.xml",
+            """<?xml version="1.0"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>https://muster.de/de/products/alpha</loc></url>
+              <url><loc>https://muster.de/de/products/beta</loc></url>
+            </urlset>""",
+        )
+        result = self.extract(company_id)
+        self.assertEqual(result.signals["catalog.product_url_count"], 2)
+        self.assertIn("not applied", " ".join(result.notes))
 
 
 class TestProductSchemaGuard(ExtractTestCase):
