@@ -81,6 +81,8 @@ One defect, found by reading `run 1`'s artifact rows (`docs/first-crawl-findings
 | M1.19 | **M1's done-when says "1 req/s observed" and nothing observed it.** `artifact` rows are written when a response *lands*, so gaps between them measure the server's latency variance rather than our spacing — reading them that way appeared to show ten violations in the first crawl and showed nothing of the kind. | `net.RequestLog` records every issued request — issue time on both clocks, politeness key, authority, requested and final URL, status — from inside `Fetcher.get`, below which no request can be issued. `portal audit-politeness` reports measured min-gap per key and max hosts in flight, and **exits non-zero on a breach**, so it is an acceptance check rather than something to read. Gaps are computed from `time.monotonic`, so a wall-clock change mid-run cannot manufacture or hide a violation. | §5.2 |
 | M1.20 | **`portal fetch` ran against a database older than the code**, and died inside a worker thread on `no such column: site_domain` — after real requests had already gone out to real hosts. | `fetch` compares `PRAGMA user_version` against the highest migration on disk and refuses before the first request, naming `portal init` as the fix. Migrations stay explicit; this only makes the mismatch loud and early. | §5.2 |
 | M1.21 | **A1 — the Phase-2 bound is under-counted.** `qual.owner_operated` (+15) was omitted from `PHASE2_MAX_POINTS`, giving 35 where a correct derivation gives 50, `ADVANCE_THRESHOLD = 5`, and a gate that `qual.ecommerce_platform` clears on its own. | Two parts. **(a)** Extract `company.legal_form` deterministically in `extract-p1` (§5.3) — a real Phase-1 signal, 7/12 with 0 false positives on the verified corpus. **(b)** Rewrite the gate itself: see M1.22. **⚠️ Needs Tanmay's ratification** (scoring-model change), same handling as A5.6/A5.7. | §5.3, §5.4 |
+| M1.23 | **§7's ceiling would abort every month.** With M1.22's gate admitting ~95%, steady state is $31–36/month against a `$25` default — a ceiling that trips on correct behaviour, which teaches its operator to raise it without reading it. | **Default raised to `$45`**, and reframed as a runaway guard rather than a budget; the "should bite occasionally" job moves to the per-run ceiling. Cutting AI-visibility to one query was rejected: §6.2's `opp.ai_invisible` predicate requires `ai.queries_checked >= 2`, so one query silently disables a **+15** rule. Arithmetic in §7.1. | §7 |
+| B7 | **`qual.own_domain_shop` (+5) had no predicate**, in any section — untracked since Task 0. M3 could not implement it, so it could never fire: a permanent −5 on every company, making §6.5's bands stricter than the calibration they came from. | Defined as `catalog.product_url_count >= 5`, the exact inverse of §6.4's `possible_marketplace_only`, so the two cannot disagree. Computable in **Phase 1** from a signal §5.3 already writes. Unwritten count → neither fires (A5.5 discipline), which costs the four JTL shops their +5. | §6.1, §10 |
 | M1.22 | **A global `PHASE2_MAX_POINTS` cannot be derived correctly at all**, so extracting `legal_form` does not rescue it. A rule belongs in the bound when Phase 2 can still **award** it — not when all its inputs are Phase-2-only. `qual.owner_operated` has three disjuncts; §5.3 decides the first in Phase 1, but the other two are LLM extractions, so a company failing the legal-form test can still win the full +15 in Phase 2. The rule stays Phase-2-reachable, the constant stays 50, the threshold stays 5. | **§5.4 is rewritten, not amended.** The gate becomes per-company: `advance(c)` iff `phase1_total(c) + remaining_upside(c) >= B_band_floor`, where `remaining_upside(c)` sums the maximum positive points of every rule Phase 2 can still influence for `c` and that Phase 1 has not already awarded. Safe by construction and strictly tighter than any safe global constant — 20 for a company that banked `owner_operated`, 5 for one that did not. Each rule declares its Phase-2 reachability; startup asserts every rule declares it. D1 stays in the changelog as superseded. **⚠️ Needs Tanmay's ratification.** | §5.4 |
 
 **The measurement is what makes M1.22 unavoidable rather than tidy.** The five shops with no legal-form token are exactly the five sole traders — the companies *most* likely to win `qual.owner_operated` in Phase 2 on "owner named on site". The +15 that must stay inside the bound sits on the best leads in the corpus, so dropping it to make the arithmetic come out at 35 would discard precisely the companies the tool exists to find.
@@ -755,8 +757,15 @@ Recomputes the full score including Phase-2 signals. Writes a `phase=2` score ro
 | `qual.owner_operated` | `legal_form ∈ {e.K., Einzelunternehmen, GbR}` **or** Impressum names ≤ 2 natural-person Geschäftsführer **or** owner named on site | +15 |
 | `qual.product_depth` | ≥ 20 product URLs | +10 |
 | `qual.own_brand` | Sells own-brand/manufactured products, not pure reselling | +10 |
-| `qual.own_domain_shop` | Sells on own domain, not marketplace-only | +5 |
+| `qual.own_domain_shop` | `catalog.product_url_count >= 5` — the exact inverse of §6.4's `possible_marketplace_only` (B7) | +5 |
 | `qual.product_strength` | Trusted Shops badge present or ≥ 50 aggregate reviews | +10 |
+
+**`qual.own_domain_shop` had no predicate at all until now (B7).** It existed only as a row in this table with a prose gloss, so M3 could not implement it and it could never fire — a permanent −5 on every company, which makes §6.5's bands stricter than the calibration they were set from. Defined here as the inverse of the soft flag that already covers the same ground, so the two can never disagree: `possible_marketplace_only` is raised when a platform is detected and `catalog.product_url_count < 5`; this awards +5 when the count is ≥ 5. It is computable in **Phase 1**, from a signal §5.3 already writes.
+
+Two consequences to state rather than discover later:
+
+- **When `catalog.product_url_count` is unwritten, the rule does not fire** — no +5, and no `possible_marketplace_only` either. That is the same "checked and absent ≠ never checked" discipline as A5.5, and it is not hypothetical: on the four JTL shops in the verified corpus no product URLs are identifiable at all (findings §4), so all four forgo this +5 for a reason that has nothing to do with their business.
+- **The bands in §6.5 were calibrated with this rule assumed live.** Now that it can actually fire, scores rise by 5 for most qualifying companies — which restores the calibration rather than shifting it, but it does mean §6.5 should not be re-tuned on data gathered before this change.
 
 `qual.ecommerce_platform` is only as good as the §5.3 signatures behind it, and it is the single largest false-positive risk in this table: it is +15 on a string match. As of the first crawl, JTL (4 shops), Shopify (7) and WooCommerce (1) are all **observed** against real homepage HTML (M1.9, M1.10). **Shopware is only half-observed:** the SW6 signature has never matched a real shop, and Shopware 5 is knowingly undetected (M1.11). A Shopware 5 shop therefore scores 15 points lower than an identical Shopware 6 one, for no reason that has anything to do with the business.
 
@@ -863,7 +872,7 @@ Non-negotiable, implemented as code, not as discipline.
    WHERE started_at > datetime('now','-30 days');
    ```
 
-   Abort if this exceeds `MONTHLY_CEILING_USD` (default `$25`). This is the control that actually bounds spend. The per-run ceiling below does not: `run.est_cost_usd` resets on every invocation, so ten aborted-and-retried runs cost ten times the per-run limit. v0.2 claimed runaway spend was impossible; without this check it was not.
+   Abort if this exceeds `MONTHLY_CEILING_USD` (**default `$45`** — raised from `$25` by M1.23; the arithmetic is below). This is the control that actually bounds spend. The per-run ceiling below does not: `run.est_cost_usd` resets on every invocation, so ten aborted-and-retried runs cost ten times the per-run limit. v0.2 claimed runaway spend was impossible; without this check it was not.
 
 3. **Per-run ceiling with pre-call reservation.** Before every LLM call, the *estimated* cost is added to `run.est_cost_usd` and checked against the per-run ceiling (default `$5.00`). After the response, the estimate is reconciled to actual usage. A crash between call and write can only over-count, never under-count — the failure mode is a conservatively aborted run, not silent overspend.
 
@@ -879,7 +888,33 @@ Non-negotiable, implemented as code, not as discipline.
 
 9. Every API key from environment variables. `.env` in `.gitignore`. No keys in the repo, ever.
 
-**Expected steady-state: $20–35/month at ~500 discovered companies/month.** Revised upward from v0.2's $15 for two reasons: the corrected advance threshold (D1) admits more companies to Phase 2, and the corrected AI-visibility token estimate (D4) is roughly ten times v0.2's. The `$25` default ceiling in control 2 is deliberately close to this figure — it should bite occasionally, which is how you find out the model is wrong.
+### 7.1 Steady-state cost, and why the ceiling moved to $45 (M1.23)
+
+M1.22's per-company gate admits roughly **95%** of discovered companies today, because no company in the verified corpus banks `qual.owner_operated` in Phase 1 and everything else clears an effective threshold of 5 (§5.4). At ~500 discovered companies/month that is ~475 advancing, and the per-advancing-company cost is:
+
+| item | basis | cost |
+|---|---|---|
+| AI-visibility searches | 2 queries × $0.01/search (§5.5c, not batch-discounted) | $0.020 |
+| AI-visibility tokens | ~30k input tokens on Haiku 4.5, live (§5.5c) | $0.030–0.040 |
+| Impressum + homepage extraction | ~30k tokens, Batch API (50% off) | $0.015 |
+| PageSpeed Insights | free tier | $0.000 |
+| **total per advancing company** | | **$0.065–0.075** |
+
+```
+475 advancing × $0.065  =  $30.88 / month
+475 advancing × $0.075  =  $35.63 / month
+```
+
+**So the old $25 default would abort every month, not occasionally.** A ceiling that trips on correct, expected behaviour teaches its operator to raise it without reading it, which is worse than having no ceiling.
+
+**Decision: raise the default to `$45` rather than cut the AI-visibility default to one query.** Both were considered:
+
+- *One query instead of two* would give ~$0.04–0.045 per company and ~$21/month, comfortably under `$25`. It is rejected because **§6.2's predicate for `opp.ai_invisible` is `ai.queries_checked >= 2`**: at one query the rule can never fire, in either direction. That is not a $9/month saving — it silently removes a **+15** rule, the joint-largest opportunity signal in ruleset v3, and the one the outreach pitch actually rests on ("invisible in AI answers for its own category"). Trading the measurement to fit the budget inverts the point of measuring. If one query is ever wanted, the §6.2 predicate must change in the same commit and §6.5's bands must be re-tuned.
+- *$45* leaves ~25% headroom over the $35.63 worst case. It is a **runaway guard** — a bug, a redirect loop, a pathological catalogue — and no longer a budget. That reframing is the substantive change: the previous text wanted the ceiling "to bite occasionally, which is how you find out the model is wrong", and that job now belongs to the per-run ceiling (control 3, `$5.00`) and to `run.est_cost_usd` reconciliation, both of which sit closer to the spend and fire without aborting a month.
+
+**Expected steady-state: $31–36/month at ~500 discovered companies/month**, up from v0.3's $20–35 and v0.2's $15. The increase is not drift; it is three corrected errors compounding — D4's ten-times token estimate, the confirmed per-search charge (§5.5c), and M1.22's finding that no safe gate can be as tight as D1 assumed.
+
+**This figure falls if `qual.owner_operated` becomes Phase-1-identifiable** (§10.2). Every sole trader recognised in Phase 1 banks +15, raising that company's effective threshold from 5 to 20 — the single largest lever on this number.
 
 ## 8. Compliance requirements
 
@@ -934,13 +969,21 @@ The export function asserts the presence of `ai.query_text`, `ai.checked_at` and
 
 Neither is a coding task. Both are decisions about what a signal is allowed to assert when it did not find something, which is the same question `A5.5` and the `blog_last_post is NULL` branch already answer with "write nothing rather than write zero".
 
-### 10.2 M3 scoring quality — not gate blockers
+### 10.2 The Phase-2 cost lever — not a correctness blocker
 
-- **Should `qual.owner_operated` admit an `Inh.`/`Inhaber` marker?** On the verified corpus the rule's predicate (`legal_form ∈ {e.K., Einzelunternehmen, GbR}`) matches **none** of the twelve, while five are plainly owner-operated sole traders whose form is simply unstated — `Lampenflut.de Inh. Dominik Lindemeier`, `NAVUCKO Nataša Vučković`, `Benjamin Luzolo BLACKPOLISH`, `Christian Riedel OPULENT Wohnen`, `Kay Link`. A personal name standing where a company name would be is a judgement rather than a regex, and twelve shops is not a sample to settle it on.
+**Should `qual.owner_operated` admit an `Inh.`/`Inhaber` marker, or a personal name standing where a company name would be?**
 
-  **This no longer blocks the gate.** Under §5.4's per-company gate the arithmetic is safe whether or not sole traders are identifiable in Phase 1: a company that cannot bank the rule simply carries it in `remaining_upside` and is admitted more readily. Getting the predicate right changes how well companies are *ranked* and how much Phase 2 costs — not whether a recoverable lead is discarded. Settle it on a larger corpus.
+This is **the primary lever on Phase-2 spend**, not a ranking refinement, and §7.1 is where its effect shows up. §5.4's gate is safe either way — a company that cannot bank the rule simply carries its +15 in `remaining_upside` and is admitted more readily — so nothing recoverable is ever discarded. But that is exactly the mechanism: **every sole trader made Phase-1-identifiable moves one company from an effective threshold of 5 to 20**, and thereby out of Phase 2 unless it earns its way in on other signals.
 
-### 10.3 Undecided, not blocking
+On the verified corpus the predicate (`legal_form ∈ {e.K., Einzelunternehmen, GbR}`) matches **none** of the twelve, while five are plainly owner-operated sole traders whose form is simply unstated — `Lampenflut.de Inh. Dominik Lindemeier`, `NAVUCKO Nataša Vučković`, `Benjamin Luzolo BLACKPOLISH`, `Christian Riedel OPULENT Wohnen`, `Kay Link`. That is 5 of 12 (~42%) whose effective threshold is 5 when it arguably should be 20, and it is why §7.1's steady-state reads $31–36/month rather than something lower.
+
+It stays out of §10.1 because it does not block correctness, and it is not settled here because a personal name standing where a company name would be is a judgement rather than a regex, and twelve shops is not the sample to decide it on. **Settle it on a larger corpus, and re-derive §7.1 when it is settled.**
+
+### 10.3 Tracked so it stops disappearing
+
+- **B7 — `qual.own_domain_shop` (+5).** Raised at Task 0, then untracked through three reviews: it appeared only as a row in §6.1 with a prose gloss and no predicate anywhere, so it was invisible to every subsequent pass. **Now defined** as `catalog.product_url_count >= 5` (§6.1). Recorded here rather than closed silently, because "a rule that cannot fire" is a defect class that hides in exactly this way — a table row reads as implemented. The remaining question is whether the threshold should be 5 or higher; 5 is chosen only because §6.4's `possible_marketplace_only` already uses it and two thresholds for one distinction is worse than a debatable one.
+
+### 10.4 Undecided, not blocking
 
 - Ollama for local extraction instead of Haiku — saves ~$10/month at Phase-2 volumes, costs German-language extraction quality and the substring-verification simplicity. Currently: use Haiku.
 - Whether to store artifact bodies compressed (gzip) — likely yes above a few hundred companies.
