@@ -52,6 +52,22 @@ Rulings on the questions M1 parked (`docs/m1-handoff.md` §7) and on one defect 
 | M1.7 | Failure-artifact and robots-exclusion policy existed only in code | Both written into the spec: failure rows update in place, and "required paths" is defined for the two paths that are not knowable up front. | §5.2 |
 | M1.8 | Apex and www were separate politeness budgets for one server, so an apex→www redirect ran at 2 req/s | The politeness key strips `www.` and keeps the port; other subdomains stay separate, recorded as accepted. The robots.txt key stays origin-based, so each name is still asked for its own file. | §5.2 |
 
+### Amendments after seed verification — 2026-08-15
+
+Two defects in §5.3's `platform.detected` signature list, found by grepping the homepage HTML of all 13 shops in `seeds/candidates.csv` before the first crawl. Both were **assumed** signatures that real German shops do not emit as written; the replacements are **observed** in that HTML. Applied on `first-crawl`.
+
+| # | Defect | Resolution | Section |
+|---|---|---|---|
+| M1.9 | **JTL was undetectable.** The signature `jtl-shop` is emitted by **none** of the four confirmed JTL shops in the seed list. As written, `platform.detected` misses every JTL shop — a systematic blind spot across a major German SME platform, and one that fails silently: the signal is simply never written, so `qual.ecommerce_platform` (+15) never fires and nothing errors. | Signature becomes any of `jtl-nav-wrapper`, `jtl-validate`, `jtl_token`, `jtlPackFormTranslations` — the JTL 5 markers observed in the seed HTML. `jtl-shop` is removed. | §5.3 |
+| M1.10 | **Shopware was too loose.** "`/bundles/storefront/`, `sw-` attributes" was implemented against the bare string `shopware`, which false-positived `germanelectronic.de` — a JTL shop that merely mentions the word. A loose match here awards `qual.ecommerce_platform` (+15) on a mention, and assigns the wrong platform to a shop that also loses its +15 under M1.9. | Anchor on `/bundles/storefront/` alone. The loose `sw-` attribute fallback is dropped: `sw-` is too short to be evidence of anything. | §5.3 |
+| M1.11 | **The anchored Shopware signature is Shopware 6 only.** Confirmed in the first crawl (`docs/first-crawl-findings.md`): `smile-store.de` is a Shopware **5** shop and matches no signature at all under M1.10 — `/bundles/storefront/` is a SW6 path. Recording the hole rather than papering over it, because an undetected platform is exactly the M1.9 failure mode. | **Open, deliberately.** SW5 markers `engine/Shopware` and `/themes/Frontend/` were observed, but on **one shop only** (n=1). One observation is not a signature; it goes into §5.3 when a second Shopware 5 shop confirms it. Until then Shopware 5 is knowingly undetected. | §5.3 |
+
+M1.9 and M1.10 are the same class of error as M1.4 (`/p/`): a pattern admitted on plausibility rather than observation. The rule stands — **a signature goes into this list on evidence, not on convention**, and M1.11 is that rule applied to a hole this crawl opened rather than closed.
+
+On the strength of the M1.9 markers, since "observed" is not one bit: across the four JTL shops, `jtl-validate` and `jtl_token` appear on **4 of 4**, `jtl-nav-wrapper` on 3, `jtlPackFormTranslations` on 2. The any-of union covers all four. The discarded `jtl-shop` string does occur on 3 of the 4 — but only inside an operator-removable "powered by JTL-Shop" footer credit, capitalised as `JTL-Shop`, which is both why a case-sensitive match found nothing and why the string must not be reinstated case-insensitively: `opulent-wohnen.com` has removed the credit and would still be missed.
+
+Signatures for platforms not represented in the seed list remain unverified and are marked as such in §6.1 below. Shopify (7 shops) and WooCommerce (1) *are* represented and both matched — `cdn.shopify.com` on 7 of 7, `woocommerce` on 1 of 1.
+
 Remaining findings (A1–A4, B1, B3.2–B3.3, B5–B7, C1–C4) are still open and are not required by M0 or M1.
 
 ## Changelog v0.1 → v0.2 (retained for the record)
@@ -529,7 +545,7 @@ Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, pa
 
 | Signal key | Method | Reliability note |
 |---|---|---|
-| `platform.detected` | HTML signature match: Shopware (incl. SW6 `/bundles/storefront/`, `sw-` attributes), `cdn.shopify.com`, `wp-content` + `woocommerce`, `jtl-shop` | Good |
+| `platform.detected` | HTML signature match on **anchored strings only** — Shopware: `/bundles/storefront/`; Shopify: `cdn.shopify.com`; WooCommerce: `wp-content` **and** `woocommerce`; JTL: any of `jtl-nav-wrapper`, `jtl-validate`, `jtl_token`, `jtlPackFormTranslations` | Signatures **observed**, not assumed — see M1.9/M1.10. The bare string `shopware` and bare `sw-` attributes are **not** signatures; `jtl-shop` is **not** a signature and never was one in the wild. |
 | `content.blog_exists` | Blog/magazin/ratgeber/news path found in sitemap **or** homepage nav links | Good |
 | `content.blog_last_post` | **Authoritative:** newest date parsed from the blog index HTML — JSON-LD `datePublished`, `<time datetime>`, or German visible-date patterns (`12. März 2023`). Sitemap `<lastmod>` is a hint only and is never used alone. | Sitemap lastmod is regenerated on deploys by Shopware/WP and systematically lies fresh; this rule exists because of that. |
 | `content.blog_post_count` | Count of post links on the blog index (paginated: first page count × page count if pagination is visible), cross-checked against sitemap URL count under the blog path | Sitemap counts include tag/category noise; index count wins on conflict |
@@ -671,6 +687,8 @@ Recomputes the full score including Phase-2 signals. Writes a `phase=2` score ro
 | `qual.own_brand` | Sells own-brand/manufactured products, not pure reselling | +10 |
 | `qual.own_domain_shop` | Sells on own domain, not marketplace-only | +5 |
 | `qual.product_strength` | Trusted Shops badge present or ≥ 50 aggregate reviews | +10 |
+
+`qual.ecommerce_platform` is only as good as the §5.3 signatures behind it, and it is the single largest false-positive risk in this table: it is +15 on a string match. As of the first crawl, JTL (4 shops), Shopify (7) and WooCommerce (1) are all **observed** against real homepage HTML (M1.9, M1.10). **Shopware is only half-observed:** the SW6 signature has never matched a real shop, and Shopware 5 is knowingly undetected (M1.11). A Shopware 5 shop therefore scores 15 points lower than an identical Shopware 6 one, for no reason that has anything to do with the business.
 
 ### 6.2 Opportunity (how weak is their content marketing?)
 
