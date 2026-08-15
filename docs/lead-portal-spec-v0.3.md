@@ -78,6 +78,12 @@ One defect, found by reading `run 1`'s artifact rows (`docs/first-crawl-findings
 
 | M1.18 | **A seeded domain that has moved blinds every `same_site`-anchored parser.** `doonails.de` → `www.doonails.com` and `germanelectronic.de` → `lampenflut.de`: the site's own URLs test as off-site, so five sitemap shards were never expanded and a footer Impressum link was discarded, both silently. Loosening `same_site` is not available — it is what kept us off `propellerdiscount.de`'s placeholder `yoursite.com`. | Adopt the final host as the site identity, **once**, when the homepage redirect resolves and only then, into a new nullable `company.site_domain` (migration 002). `company.domain` keeps the seeded value: it is `UNIQUE`, it is the human key, and it names `data/artifacts/{domain}/`, which a rewrite would orphan silently. Adoption always raises `domain_moved` (§6.4). Collisions resolve as below and never merge automatically. | §5.1, §5.2, §6.4, §4 |
 
+| M1.19 | **M1's done-when says "1 req/s observed" and nothing observed it.** `artifact` rows are written when a response *lands*, so gaps between them measure the server's latency variance rather than our spacing — reading them that way appeared to show ten violations in the first crawl and showed nothing of the kind. | `net.RequestLog` records every issued request — issue time on both clocks, politeness key, authority, requested and final URL, status — from inside `Fetcher.get`, below which no request can be issued. `portal audit-politeness` reports measured min-gap per key and max hosts in flight, and **exits non-zero on a breach**, so it is an acceptance check rather than something to read. Gaps are computed from `time.monotonic`, so a wall-clock change mid-run cannot manufacture or hide a violation. | §5.2 |
+| M1.20 | **`portal fetch` ran against a database older than the code**, and died inside a worker thread on `no such column: site_domain` — after real requests had already gone out to real hosts. | `fetch` compares `PRAGMA user_version` against the highest migration on disk and refuses before the first request, naming `portal init` as the fix. Migrations stay explicit; this only makes the mismatch loud and early. | §5.2 |
+| M1.21 | **A1 — `PHASE2_MAX_POINTS` derives to 50, not 35.** All three disjuncts of `qual.owner_operated` (+15) read Phase-2-only signals, so `ADVANCE_THRESHOLD` becomes 5, `qual.ecommerce_platform` alone clears it, essentially everything advances, and §7's cost model fails. D1's own startup assertion fires on the first run. | **Extract `company.legal_form` deterministically in `extract-p1`** by regex over the already-fetched Impressum HTML (§5.3). That moves the first disjunct into Phase 1, so the rule leaves the Phase-2-only set: `PHASE2_MAX_POINTS` returns to 35 and `ADVANCE_THRESHOLD` to 20. **⚠️ Needs Tanmay's ratification**, same handling as A5.6/A5.7 — and see the caveat below, which is part of what needs ratifying. | §5.3, §5.4 |
+
+**M1.21 is two decisions, and only the first is settled by the measurement.** The arithmetic fix holds: `legal_form` becomes a Phase-1 signal, the threshold returns to 20. The regex was measured on all 12 stored Impressum pages before this was written — 7 found, 0 false positives, and the 5 misses verified by hand as pages that genuinely state no legal form. But **not one of the 12 satisfies the disjunct's predicate** (`e.K.`/`Einzelunternehmen`/`GbR`), while five of them plainly *are* owner-operated sole traders whose form is simply unstated. So ratifying the extractor does not by itself make `qual.owner_operated` work in Phase 1; it makes it derivable and, on this corpus, uniformly false. Whether the predicate should also admit an `Inh.`/`Inhaber` marker — or a personal name standing where a company name would be, which is a judgement rather than a regex — is the second decision, and it is not one to take from a 12-shop sample.
+
 **M1.18's collision rule, since it is the part that can go wrong quietly.** A row whose **`domain`** equals the contested host **always wins, whatever the ids** — a seeded identity cannot be taken from a row by something that merely redirected onto it. Id ordering breaks ties only between two rows both claiming the host as `site_domain`, and there the lower id wins *regardless of which worker got there first*, so the outcome does not depend on thread scheduling; a higher-id row that adopted earlier has its claim withdrawn. Exactly one row ever claims a host. The loser is excluded with `duplicate_site` and its `site_domain` cleared; the winner gets a `duplicate_site` review flag so the merge target is visible. Because `site_domain` is a separate column and `company.domain` is never written after insert, **a `UNIQUE` violation is structurally impossible** — the collision is resolved deliberately, with a recorded reason, rather than surfacing as an `IntegrityError` from inside a worker thread.
 
 One consequence of adopting only from the homepage: `allowed()` must consult the robots policy of the **authority each URL is on**, not the seeded one. After a move, every later request goes to a host the seeded `robots.txt` says nothing about, and the redirect hop has already fetched the target's own rules.
@@ -586,9 +592,27 @@ Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, pa
 | `meta.description_length` | Homepage `<meta name="description">` length | **Informational only, not scored** — platforms auto-generate adequate-length templates |
 | `i18n.hreflang_count` | Count of distinct `hreflang` values | `de-DE`/`de-AT`/`de-CH` variants are not real i18n; count distinct language codes, not locale codes |
 | `perf.lighthouse_performance` | PageSpeed Insights API — **Phase 2 only** (slow: 15–30 s/site) | Cache by `artifact.last_checked_at` age; do not re-run within 30 days |
+| `company.legal_form` | **Regex over the already-fetched Impressum HTML** (A1). Strip `<script>`/`<style>` first, then take the *provider block*: the text after an anchor (`Angaben gemäß § 5`, `Gesetzliche Anbieterkennung`, `Anbieterkennzeichnung`, `Verantwortlich für den Inhalt`, `Diensteanbieter`, `Impressum`) whose following ~400 characters contain a postal-code-and-place. Match longest form first — `GmbH & Co. KG` before both `GmbH` and `KG`. | **Measured 7/12 on the stored corpus, 0 false positives** — see below. Anchoring is load-bearing, not tidiness: a naive first-match-in-page found a cookie-consent vendor's `GmbH` on two shops and a trust-seal `e.V.` on a third. |
 | `agency.footer_credit` | Regex for `realisiert von\|umgesetzt von\|powered by\|Webdesign:` in footer, plus outbound footer links whose anchor/title contains `agentur\|design\|media\|digital` | Under-detects (logo-only credits). Treated as bonus negative signal, never as a gate |
 | `reviews.trusted_shops`, `reviews.count` | Trusted Shops badge script detection; visible aggregate review count in `AggregateRating` JSON-LD | Free product-strength proxy |
 | `catalog.product_sample_url` | The product URL selected by the A5 rule in §5.2. Written by `fetch`, not by an extractor — it records a fetch-time decision. | **Unscored.** Exists so the sample behind `schema.product_present` is auditable |
+
+**Why `legal_form` is extracted here rather than in §5.5b (A1).** `qual.owner_operated` (+15) had all three disjuncts reading Phase-2-only signals, so a correct derivation of `PHASE2_MAX_POINTS` gives **50**, `ADVANCE_THRESHOLD` becomes `55 − 50 = 5`, `qual.ecommerce_platform` alone clears it, essentially every company advances to Phase 2, and §7's cost model fails. D1's own startup assertion fires on the first run. Moving the first disjunct's input into Phase 1 removes the rule from the Phase-2-only set, `PHASE2_MAX_POINTS` returns to **35**, and `ADVANCE_THRESHOLD` to **20**.
+
+The regex is not a cheaper `ImpressumExtract.legal_form`; it is a *different* signal with a *different* reliability, and §5.5b still extracts the full legal identity for advancing companies. Where both exist and disagree, the LLM extraction wins — it reads the whole page, this reads one window.
+
+**What it actually found, on all 12 stored Impressum pages (2026-08-15):**
+
+| result | n | domains |
+|---|---|---|
+| `GmbH` | 4 | bio-fleischer-laden.de, propellerdiscount.de, snocks.com, verpackungskoenig.de |
+| `GmbH & Co. KG` | 2 | smoke2u.de, zecplus.de |
+| `Ltd` | 1 | doonails.de — a **Cyprus** Ltd, which is a lead-quality fact in its own right |
+| no form stated | 5 | blackpolish.de, germanelectronic.de, navucko.com, opulent-wohnen.com, smile-store.de |
+
+**7 of 12, with no false positives.** The five misses were checked by hand and are all correct: each names a natural person and an address with no legal-form token at all (`Benjamin Luzolo BLACKPOLISH`, `NAVUCKO Nataša Vučković`, `Christian Riedel OPULENT Wohnen`, `Kay Link`, `Lampenflut.de Inh. Dominik Lindemeier`). German law does not require a form token from a sole trader, so "absent" is the page being accurate, not the parser failing.
+
+**A consequence that must be ruled on with the rest (see M1.21).** The disjunct is `legal_form ∈ {e.K., Einzelunternehmen, GbR}`, and **not one of the 12 satisfies it** — the seven found are GmbH, GmbH & Co. KG and Ltd. The five that *are* owner-operated sole traders are exactly the five with no token to match. So the arithmetic fix works, and the predicate as written would award `qual.owner_operated` to **zero** of this corpus while the ideal leads sit in the unmatched group. The marker that identifies them is `Inh.`/`Inhaber` (found on `lampenflut.de`) or simply a personal name standing where a company name would be — the latter being a judgement, not a regex.
 
 ### 5.4 score --phase 1
 
@@ -603,6 +627,13 @@ PHASE2_MAX_POINTS = sum of the maximum positive points from all rules
                     Under ruleset v3: qual.own_brand (+10)
                                     + opp.ai_invisible (+15)
                                     + opp.slow_site (+10)  = 35
+
+                    qual.owner_operated (+15) is NOT in this set, and only
+                    because §5.3 extracts company.legal_form deterministically
+                    in Phase 1 (A1). A rule counts as Phase-2-only when *all*
+                    its inputs are; one Phase-1 disjunct is enough to remove it.
+                    Revert that extractor and this becomes 50, the threshold
+                    becomes 5, and the gate stops gating.
 
 ADVANCE_THRESHOLD = B_band_floor − PHASE2_MAX_POINTS
                   = 55 − 35 = 20
@@ -886,6 +917,17 @@ Single page, server-rendered, HTMX for interactions. No SPA.
 The export function asserts the presence of `ai.query_text`, `ai.checked_at` and `ai.model_used` before writing, and raises if any is missing. Briefs for companies that did not reach Phase 2 omit the KI-Sichtbarkeit section entirely rather than rendering it empty.
 
 ## 10. Open decisions
+
+### 10.1 Blockers — M3 may not start until these are addressed
+
+| # | Blocker | Why it blocks |
+|---|---|---|
+| A1 / M1.21 | `qual.owner_operated`'s predicate finds **zero** owner-operated companies in the verified corpus, even with `legal_form` extracted deterministically. The threshold arithmetic is fixed; the predicate is not. | M3 scores. A qualification rule that is uniformly false on real German sole traders — the ideal lead — mis-ranks the entire corpus, and the mis-ranking is invisible because the rule simply never fires. **Awaiting ratification** (§5.3, §5.4). |
+| M1.14 | **`content.blog_exists` under-detects, and a `false` reading is not strong enough to carry `opp.no_blog`'s +25 on its own.** Two shapes in a 13-shop corpus are unreachable by any path vocabulary: a blog on a subdomain (`blog.zecplus.de`) and a blog served as root-level slugs (`lampenflut.de`). | M3 scores, and `opp.no_blog` is the **largest single award in ruleset v3**. Firing it on a shop that publishes weekly is the worst error the model can make: it manufactures the exact opportunity the outreach letter is about. The right instrument is anchor text or `Article` JSON-LD, both of which are M2 territory — so this is recorded here, not fixed in M1. |
+
+Neither is a coding task. Both are decisions about what a signal is allowed to assert when it did not find something, which is the same question `A5.5` and the `blog_last_post is NULL` branch already answer with "write nothing rather than write zero".
+
+### 10.2 Undecided, not blocking
 
 - Ollama for local extraction instead of Haiku — saves ~$10/month at Phase-2 volumes, costs German-language extraction quality and the substring-verification simplicity. Currently: use Haiku.
 - Whether to store artifact bodies compressed (gzip) — likely yes above a few hundred companies.

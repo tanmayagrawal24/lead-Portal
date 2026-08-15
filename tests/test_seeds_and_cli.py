@@ -200,3 +200,38 @@ class TestFetchCli(SeedTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFetchRefusesAStaleSchema(unittest.TestCase):
+    """M1.20. The third crawl died halfway through, inside a worker thread, on
+    `no such column: site_domain` — after real requests had already gone out.
+    A schema older than the code is knowable before the first request."""
+
+    def test_fetch_refuses_and_names_the_fix(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        db_path = root / "portal.db"
+        seed = root / "seed.csv"
+        seed.write_text("domain\nexample.de\n", encoding="utf-8")
+
+        conn = db.connect(db_path)
+        migrate.apply_pending(conn, directory=_only_first_migration(root))
+        conn.close()
+
+        code, output = run_cli("--db", str(db_path), "fetch", "--seed", str(seed))
+
+        self.assertEqual(code, 2)
+        self.assertIn("run `portal init`", output)
+
+
+def _only_first_migration(root: Path) -> Path:
+    """A migrations directory holding 001 alone, so the database ends up at a
+    version the code has since moved past."""
+    directory = root / "migrations"
+    directory.mkdir()
+    first = migrate.discover()[0][1]
+    (directory / first.name).write_text(
+        first.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return directory

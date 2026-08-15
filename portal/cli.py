@@ -10,8 +10,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from portal import __version__, config, db, fetch, migrate, seeds
-from portal.net import MAX_CONCURRENT_HOSTS, Fetcher, HostRateLimiter
+from portal import __version__, audit, config, db, fetch, migrate, seeds
+from portal.net import MAX_CONCURRENT_HOSTS, Fetcher, HostRateLimiter, RequestLog
 
 
 def cmd_init(path: Path) -> int:
@@ -56,6 +56,20 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
 
     conn = db.connect(path)
     try:
+        # Fail here, not in a worker thread. A database at an older schema than
+        # the code produces an OperationalError from inside the pool, after real
+        # requests have already gone out to real hosts — which is how the third
+        # crawl died halfway (M1.20). Migrations stay explicit; this only says so.
+        version = migrate.current_version(conn)
+        highest = migrate.discover()[-1][0]
+        if version < highest:
+            print(
+                f"database at {path} is at migration {version:03d} but the code "
+                f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+                file=sys.stderr,
+            )
+            return 2
+
         company_ids = seeds.upsert(conn, rows, query=str(seed_path))
         targets = [
             (company_id, seed.domain)
@@ -64,7 +78,8 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
         print(
             f"Fetching {len(targets)} domain(s) at {interval}s/host, {max_hosts} hosts max…"
         )
-        fetcher = Fetcher(limiter=HostRateLimiter(interval))
+        log_path = config.request_log_path(path)
+        fetcher = Fetcher(limiter=HostRateLimiter(interval), log=RequestLog(log_path))
         run_id, results = fetch.run(
             conn,
             targets,
@@ -75,6 +90,7 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
     finally:
         conn.close()
 
+    print(f"requests logged to {log_path} — audit with `portal audit-politeness`")
     print(f"\nrun {run_id}:")
     for result in results:
         if result.excluded_reason:
@@ -91,6 +107,22 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
         for note in result.notes:
             print(f"      note: {note}")
     return 0
+
+
+def cmd_audit_politeness(log_path: Path) -> int:
+    """Report measured spacing and host concurrency. Non-zero if §5.2 was broken.
+
+    Exits non-zero on a breach so this is usable as an acceptance check rather
+    than only as something to read.
+    """
+    if not log_path.exists():
+        print(
+            f"no request log at {log_path} — run `portal fetch` first", file=sys.stderr
+        )
+        return 2
+    text, ok = audit.report(log_path)
+    print(text)
+    return 0 if ok else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -126,6 +158,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds between requests to one host (default: 1.0, the §5.2 floor). "
         "Values below the floor are refused.",
     )
+    audit_parser = sub.add_parser(
+        "audit-politeness",
+        help="measure §5.2 spacing and host concurrency from the request log",
+    )
+    audit_parser.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="request log (default: data/requests.jsonl)",
+    )
+
     fetch_parser.add_argument(
         "--max-hosts",
         type=int,
@@ -163,6 +206,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         return cmd_fetch(path, args.seed, interval, args.max_hosts)
+
+    if args.command == "audit-politeness":
+        return cmd_audit_politeness(
+            args.log if args.log is not None else config.request_log_path(path)
+        )
 
     raise AssertionError(f"unhandled command: {args.command}")  # pragma: no cover
 
