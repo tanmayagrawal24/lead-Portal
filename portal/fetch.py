@@ -41,6 +41,7 @@ from portal.urls import (
     default_base,
     homepage_url,
     host_of,
+    normalise_domain,
     origin_of,
     path_of,
     same_site,
@@ -117,11 +118,92 @@ class FetchStage:
         """§6.4 soft flag, using the idiom from §4: DO NOTHING on the uniqueness
         conflict only, so a misspelled reason still raises."""
         with self._db_lock:
+            self._raise_review_flag_locked(company_id, reason)
+
+    def _raise_review_flag_locked(self, company_id: int, reason: str) -> None:
+        """As above, for callers already holding `_db_lock`. `_db_lock` is a
+        plain `Lock`, so nesting the public helpers would deadlock."""
+        self.conn.execute(
+            "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at) "
+            "VALUES (?,?,?,?) ON CONFLICT (company_id, reason) DO NOTHING",
+            (company_id, reason, self.run_id, utc_now()),
+        )
+
+    # ── a seeded domain that has moved (P2, M1.18) ──────────────────────
+
+    def _adopt_moved_site(
+        self, company_id: int, domain: str, final_url: str, result: CompanyResult
+    ) -> str | None:
+        """Adopt the host the homepage actually resolved to, as the site
+        identity for the rest of this company's run.
+
+        Returns the domain to use from here on, or `None` when the company was
+        excluded as a duplicate. `company.domain` is never written: it is the
+        seeded identity, the human key, and the name of the artifacts
+        directory. `site_domain` carries the effective host instead.
+
+        Only ever called for the homepage, and only when the final URL is not
+        `same_site` with the seeded domain — an apex→www hop is not a move.
+        A deeper redirect never adopts: a product page pointing off-site is a
+        marketplace or affiliate link, and adopting from one would let a single
+        stray link walk the whole crawl onto a third party.
+
+        Collision, per §6.4: a row whose *`domain`* is this host always wins,
+        whatever the ids — a seeded identity cannot be taken from a row. Only
+        when two rows both claim it as `site_domain` does the lower id win, and
+        then it wins regardless of which worker got there first, so the outcome
+        does not depend on scheduling.
+        """
+        moved_to = normalise_domain(final_url)
+
+        with self._db_lock:
+            rivals = self.conn.execute(
+                "SELECT id, domain, site_domain FROM company "
+                "WHERE id != ? AND (domain = ? OR site_domain = ?)",
+                (company_id, moved_to, moved_to),
+            ).fetchall()
+
+            owner_id: int | None = None
+            if seeded := [row for row in rivals if row["domain"] == moved_to]:
+                owner_id = int(seeded[0]["id"])
+            elif adopters := [int(row["id"]) for row in rivals]:
+                if (lowest := min(adopters)) < company_id:
+                    owner_id = lowest
+                else:
+                    # This row has the lower id, so it owns the host — even
+                    # though another row got here first. The loser's claim is
+                    # withdrawn so exactly one row ever claims a host; its
+                    # artifacts stay on disk, which costs nothing and keeps the
+                    # record of what was fetched.
+                    for rival in adopters:
+                        self.conn.execute(
+                            "UPDATE company SET site_domain = NULL, excluded = 1, "
+                            "excluded_reason = ? WHERE id = ?",
+                            (
+                                f"duplicate_site: {moved_to} is company #{company_id}",
+                                rival,
+                            ),
+                        )
+
+            if owner_id is not None:
+                reason = f"duplicate_site: {moved_to} is company #{owner_id}"
+                self.conn.execute(
+                    "UPDATE company SET excluded = 1, excluded_reason = ? WHERE id = ?",
+                    (reason, company_id),
+                )
+                self._raise_review_flag_locked(owner_id, "duplicate_site")
+                result.excluded_reason = reason
+                return None
+
             self.conn.execute(
-                "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at) "
-                "VALUES (?,?,?,?) ON CONFLICT (company_id, reason) DO NOTHING",
-                (company_id, reason, self.run_id, utc_now()),
+                "UPDATE company SET site_domain = ? WHERE id = ?",
+                (moved_to, company_id),
             )
+            self._raise_review_flag_locked(company_id, "domain_moved")
+
+        result.review_flags.append("domain_moved")
+        result.notes.append(f"site moved: {domain} now serves {moved_to}; adopted")
+        return moved_to
 
     def _write_sample_signal(
         self, company_id: int, url: str, evidence_url: str
@@ -293,7 +375,16 @@ class FetchStage:
             return False
 
         def allowed(url: str) -> bool:
-            return policy.allows(url)
+            """The policy of the authority the URL is on, not the seeded one.
+
+            After a move is adopted (M1.18) every later request goes to a host
+            the seeded robots.txt says nothing about; checking `lampenflut.de`
+            URLs against `germanelectronic.de`'s rules would be applying the
+            wrong file. `policies` already holds the target's own rules — the
+            redirect hop fetched them — so this reads them rather than the
+            policy that happened to come first.
+            """
+            return policies.get(authority_of(url), policy).allows(url)
 
         def get(
             kind: str, url: str, accept: Callable[[Response], str | None] | None = None
@@ -320,21 +411,35 @@ class FetchStage:
         homepage = get("homepage", homepage_url(base))
         homepage_html = homepage.text() if homepage and homepage.ok else ""
 
+        # 2b. Did the homepage land on a different registrable domain? (M1.18)
+        #
+        # `site` is the identity every later same-site test uses; `domain` stays
+        # the seeded value, because `get` records artifacts under it and the
+        # bodies on disk are keyed to the company, not to whichever host was
+        # serving when they were fetched.
+        site = domain
+        if homepage is not None and homepage.ok and not same_site(homepage.url, domain):
+            adopted = self._adopt_moved_site(company_id, domain, homepage.url, result)
+            if adopted is None:
+                return result  # excluded as a duplicate of another company
+            site = adopted
+            base = origin_of(homepage.url)
+
         # 3. sitemaps, expanding indexes.
-        page_urls, product_sitemap_urls = self._walk_sitemaps(domain, base, policy, get)
+        page_urls, product_sitemap_urls = self._walk_sitemaps(site, base, policy, get)
 
         # 4. Impressum, two-step.
-        self._discover_impressum(company_id, domain, base, homepage_html, result, get)
+        self._discover_impressum(company_id, site, base, homepage_html, result, get)
 
         # 5. blog index, if a blog path is found.
         blog_path = impressum_mod.find_blog_path(
-            page_urls, homepage_html, homepage_url(base), domain
+            page_urls, homepage_html, homepage_url(base), site
         )
         if blog_path:
             # An observed URL, not a synthesised one (M1.15): the bare path
             # prefix 404'd on all seven shops that have a blog.
             observed = impressum_mod.find_blog_index_url(
-                blog_path, page_urls, homepage_html, homepage_url(base), domain
+                blog_path, page_urls, homepage_html, homepage_url(base), site
             )
             if observed is None:
                 result.notes.append(f"blog path {blog_path} found but no URL under it")
@@ -348,7 +453,7 @@ class FetchStage:
         # 6. one sample product page (A5).
         self._sample_product_page(
             company_id,
-            domain,
+            site,
             base,
             page_urls,
             product_sitemap_urls,

@@ -76,6 +76,12 @@ One defect, found by reading `run 1`'s artifact rows (`docs/first-crawl-findings
 | M1.15 | **The blog index was synthesised, not observed**, so M1.14 found seven blogs and then failed to fetch all seven: `base + "/blogs"` 404s on Shopify, where the index is `/blogs/<handle>`, and `/magazin` 404s on `smile-store.de`, which serves `/magazin/<kategorie>/<artikel>`. Without this, M1.14 buys nothing but seven wasted 404 requests per run. | Fetch the **shallowest observed URL** under the blog path — homepage nav links preferred over sitemap URLs at equal depth, code-point minimum breaking ties. The synthesised URL survives only as a fallback when nothing was observed. The path prefix remains what A5 filter 4 excludes candidates under; it is a good filter and a bad address. | §5.2, §5.3 |
 | M1.16 | **Reviving Tier 1 (M1.13) made it select a locale storefront root.** Shopify lists `/de-at` inside that locale's *product* sitemap, and Tier 1 waives the path-pattern requirement because membership is the evidence — so `ekomia.de`, `navucko.com` and `snocks.com` would each have sampled `/de-at`, `/en`, `/de-ch`: listing pages, feeding `schema.product_present` a wrong +10. Caught before it reached a run, by comparing Tier 1's would-be choice against Tier 2's on the stored crawl output. | The existing "the homepage is never a product page" guard extends to locale roots (`^/[a-z]{2}(-[a-z]{2})?$`): a multi-locale shop has more than one homepage. With the guard, Tier 1 and Tier 2 agree on all six shops where both can run. | §5.2 |
 
+| M1.18 | **A seeded domain that has moved blinds every `same_site`-anchored parser.** `doonails.de` → `www.doonails.com` and `germanelectronic.de` → `lampenflut.de`: the site's own URLs test as off-site, so five sitemap shards were never expanded and a footer Impressum link was discarded, both silently. Loosening `same_site` is not available — it is what kept us off `propellerdiscount.de`'s placeholder `yoursite.com`. | Adopt the final host as the site identity, **once**, when the homepage redirect resolves and only then, into a new nullable `company.site_domain` (migration 002). `company.domain` keeps the seeded value: it is `UNIQUE`, it is the human key, and it names `data/artifacts/{domain}/`, which a rewrite would orphan silently. Adoption always raises `domain_moved` (§6.4). Collisions resolve as below and never merge automatically. | §5.1, §5.2, §6.4, §4 |
+
+**M1.18's collision rule, since it is the part that can go wrong quietly.** A row whose **`domain`** equals the contested host **always wins, whatever the ids** — a seeded identity cannot be taken from a row by something that merely redirected onto it. Id ordering breaks ties only between two rows both claiming the host as `site_domain`, and there the lower id wins *regardless of which worker got there first*, so the outcome does not depend on thread scheduling; a higher-id row that adopted earlier has its claim withdrawn. Exactly one row ever claims a host. The loser is excluded with `duplicate_site` and its `site_domain` cleared; the winner gets a `duplicate_site` review flag so the merge target is visible. Because `site_domain` is a separate column and `company.domain` is never written after insert, **a `UNIQUE` violation is structurally impossible** — the collision is resolved deliberately, with a recorded reason, rather than surfacing as an `IntegrityError` from inside a worker thread.
+
+One consequence of adopting only from the homepage: `allowed()` must consult the robots policy of the **authority each URL is on**, not the seeded one. After a move, every later request goes to a host the seeded `robots.txt` says nothing about, and the redirect hop has already fetched the target's own rules.
+
 | M1.17 | **The homepage was stored as an Impressum.** `snocks.com` in `run 2`: with its real Impressum robots-disallowed (M1.12 now refuses it correctly), probing ran and `/imprint` redirected to `/#gbaid979323` — the homepage. It was stored as the `impressum` artifact, carrying the **homepage's own content hash**, which is how it was caught. §5.5b would have handed the homepage to the Impressum extraction and got a confident answer about the wrong page. | An Impressum request whose **final** URL is the site root is not an Impressum. The request is still recorded — it happened — but as a failure row (`soft_redirect_to_homepage: …`) with no body, because `artifact` is the interface M2 reads by kind. Absence then routes to `no_impressum` review, which is what §5.2's two-step does with an absence anyway. | §5.2 |
 
 **M1.14's limits, stated rather than implied.** Adding `blogs` fixes the shape a vocabulary can fix. Two others in the same 13-shop corpus it cannot:
@@ -767,18 +773,28 @@ Never delete, never silently drop. Two tiers:
 
 **Hard (`excluded = 1`, reason recorded):**
 
+*Rejections — "not a viable lead":*
+
 - `robots_disallowed` — only when required paths (§5.2) are disallowed
 - `competitor` — site is itself a marketing/web agency
 - `too_large` — requires **two** independent indicators from: Konzern structure, > 250 employees stated, > 5 named Geschäftsführer, "Vorstand" **together with** register type AG and multi-location footprint. A lone "Vorstand" mention never excludes (small AGs and Vereine have one).
 - `unreachable` — after 2 attempts on different days
 
+*Merged away — "the same lead as #N", a distinct class (M1.18):*
+
+- `duplicate_site` — this company's site resolves to a host another company row already owns. Recorded as `excluded_reason = 'duplicate_site: <host> is company #<id>'`.
+
+**These two classes must not be presented alike.** A rejection means we looked and this is not a prospect; a merge-away means the prospect is real and lives under another row — the company is not gone, its evidence is somewhere else. A UI that lists them together tells the reader a live lead was rejected. The discriminator is the stable `duplicate_site:` prefix on `excluded_reason`, and it must stay stable for exactly that reason; the referenced `#<id>` is the row to follow. Everything else about a merged-away row — artifacts, signals, review flags — is left in place and never merged automatically, because choosing which legal name, contact, score and outreach history survives is a decision with a letter at the end of it.
+
 **Soft (one `review_flag` row per reason, surfaced in a dedicated UI filter, human decides):**
 
-These three are independent and can all apply to one company, which is why they are rows rather than a shared column. Raising one sets `company.needs_review` by trigger; resolving the last open one clears it.
+These are independent and can all apply to one company, which is why they are rows rather than a shared column. Raising one sets `company.needs_review` by trigger; resolving the last open one clears it.
 
 - `no_impressum` — after the two-step discovery in §5.2 fails. For DE/AT this usually means not a real trading business, but it can be a footer-parsing miss, so a human glances before it dies. For **CH** companies this is always soft: the Swiss disclosure duty (UWG) is structured differently from §5 DDG and legitimate Swiss shops may present the information under "Kontakt".
 - `possible_marketplace_only` — shop platform detected but < 5 product URLs on own domain
 - `blog_date_unparseable` — the blog index exists but no post date could be parsed (§6.2)
+- `domain_moved` — the seeded domain now serves a different registrable domain and the new host was adopted (§5.1, §5.2). Whether the shop behind the new host is still the lead that was intended is a judgement about the lead list, not one the crawler may make: `germanelectronic.de` now serves `lampenflut.de`, a different brand with a different catalogue.
+- `duplicate_site` — raised on the company that **owns** a host another row tried to adopt, so a merge target is visible rather than silently accumulating duplicates pointed at it. Distinct from the exclusion of the same name, which sits on the row that lost.
 
 **Resolution is sticky.** Once a reason has been resolved for a company, that same reason is never raised for that company again — a later run that re-detects the condition writes nothing. This is a policy decision, not an artefact of the schema, and it is what `uq_review_flag` plus `ON CONFLICT DO NOTHING` implement.
 
