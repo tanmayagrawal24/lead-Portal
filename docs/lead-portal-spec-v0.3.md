@@ -10,7 +10,7 @@
 
 | # | Defect | Section |
 |---|---|---|
-| D1 | Phase-1 gate discards recoverable A-band leads | §5.4 |
+| D1 | Phase-1 gate discards recoverable A-band leads | §5.4 — **superseded by M1.22.** D1's fix was a global `PHASE2_MAX_POINTS`; that constant cannot be derived correctly, because a rule belongs in the bound when Phase 2 can still *award* it, not when all its inputs are Phase-2-only. §5.4 is now a per-company gate. |
 | D2 | Blog ladder rungs overlap; `thin_blog` predicate undefined | §6.2 |
 | D3 | Cost ceiling is per-run, so monthly spend is unbounded; batch reconciliation undefined | §4, §5.7, §7 |
 | D4 | AI-visibility token estimate understated ~10×; per-search billing unaccounted | §5.5c |
@@ -80,9 +80,12 @@ One defect, found by reading `run 1`'s artifact rows (`docs/first-crawl-findings
 
 | M1.19 | **M1's done-when says "1 req/s observed" and nothing observed it.** `artifact` rows are written when a response *lands*, so gaps between them measure the server's latency variance rather than our spacing — reading them that way appeared to show ten violations in the first crawl and showed nothing of the kind. | `net.RequestLog` records every issued request — issue time on both clocks, politeness key, authority, requested and final URL, status — from inside `Fetcher.get`, below which no request can be issued. `portal audit-politeness` reports measured min-gap per key and max hosts in flight, and **exits non-zero on a breach**, so it is an acceptance check rather than something to read. Gaps are computed from `time.monotonic`, so a wall-clock change mid-run cannot manufacture or hide a violation. | §5.2 |
 | M1.20 | **`portal fetch` ran against a database older than the code**, and died inside a worker thread on `no such column: site_domain` — after real requests had already gone out to real hosts. | `fetch` compares `PRAGMA user_version` against the highest migration on disk and refuses before the first request, naming `portal init` as the fix. Migrations stay explicit; this only makes the mismatch loud and early. | §5.2 |
-| M1.21 | **A1 — `PHASE2_MAX_POINTS` derives to 50, not 35.** All three disjuncts of `qual.owner_operated` (+15) read Phase-2-only signals, so `ADVANCE_THRESHOLD` becomes 5, `qual.ecommerce_platform` alone clears it, essentially everything advances, and §7's cost model fails. D1's own startup assertion fires on the first run. | **Extract `company.legal_form` deterministically in `extract-p1`** by regex over the already-fetched Impressum HTML (§5.3). That moves the first disjunct into Phase 1, so the rule leaves the Phase-2-only set: `PHASE2_MAX_POINTS` returns to 35 and `ADVANCE_THRESHOLD` to 20. **⚠️ Needs Tanmay's ratification**, same handling as A5.6/A5.7 — and see the caveat below, which is part of what needs ratifying. | §5.3, §5.4 |
+| M1.21 | **A1 — the Phase-2 bound is under-counted.** `qual.owner_operated` (+15) was omitted from `PHASE2_MAX_POINTS`, giving 35 where a correct derivation gives 50, `ADVANCE_THRESHOLD = 5`, and a gate that `qual.ecommerce_platform` clears on its own. | Two parts. **(a)** Extract `company.legal_form` deterministically in `extract-p1` (§5.3) — a real Phase-1 signal, 7/12 with 0 false positives on the verified corpus. **(b)** Rewrite the gate itself: see M1.22. **⚠️ Needs Tanmay's ratification** (scoring-model change), same handling as A5.6/A5.7. | §5.3, §5.4 |
+| M1.22 | **A global `PHASE2_MAX_POINTS` cannot be derived correctly at all**, so extracting `legal_form` does not rescue it. A rule belongs in the bound when Phase 2 can still **award** it — not when all its inputs are Phase-2-only. `qual.owner_operated` has three disjuncts; §5.3 decides the first in Phase 1, but the other two are LLM extractions, so a company failing the legal-form test can still win the full +15 in Phase 2. The rule stays Phase-2-reachable, the constant stays 50, the threshold stays 5. | **§5.4 is rewritten, not amended.** The gate becomes per-company: `advance(c)` iff `phase1_total(c) + remaining_upside(c) >= B_band_floor`, where `remaining_upside(c)` sums the maximum positive points of every rule Phase 2 can still influence for `c` and that Phase 1 has not already awarded. Safe by construction and strictly tighter than any safe global constant — 20 for a company that banked `owner_operated`, 5 for one that did not. Each rule declares its Phase-2 reachability; startup asserts every rule declares it. D1 stays in the changelog as superseded. **⚠️ Needs Tanmay's ratification.** | §5.4 |
 
-**M1.21 is two decisions, and only the first is settled by the measurement.** The arithmetic fix holds: `legal_form` becomes a Phase-1 signal, the threshold returns to 20. The regex was measured on all 12 stored Impressum pages before this was written — 7 found, 0 false positives, and the 5 misses verified by hand as pages that genuinely state no legal form. But **not one of the 12 satisfies the disjunct's predicate** (`e.K.`/`Einzelunternehmen`/`GbR`), while five of them plainly *are* owner-operated sole traders whose form is simply unstated. So ratifying the extractor does not by itself make `qual.owner_operated` work in Phase 1; it makes it derivable and, on this corpus, uniformly false. Whether the predicate should also admit an `Inh.`/`Inhaber` marker — or a personal name standing where a company name would be, which is a judgement rather than a regex — is the second decision, and it is not one to take from a 12-shop sample.
+**The measurement is what makes M1.22 unavoidable rather than tidy.** The five shops with no legal-form token are exactly the five sole traders — the companies *most* likely to win `qual.owner_operated` in Phase 2 on "owner named on site". The +15 that must stay inside the bound sits on the best leads in the corpus, so dropping it to make the arithmetic come out at 35 would discard precisely the companies the tool exists to find.
+
+**A correction to what this entry said in its first form.** It claimed that moving one disjunct into Phase 1 removed the rule from the Phase-2-only set and returned the threshold to 20. That was wrong: it confused "Phase 1 can decide this rule for *some* companies" with "Phase 2 can no longer award it". The legal-form extractor is kept — 7/12 with 0 false positives is a real Phase-1 signal, the provider-block anchoring is load-bearing (a naive first-match found a cookie vendor's `GmbH` on two shops and a trust-seal `e.V.` on a third), and `doonails.de` being a **Cyprus** Ltd is a lead-quality fact worth having. It simply does not do the job A1 needed doing.
 
 **M1.18's collision rule, since it is the part that can go wrong quietly.** A row whose **`domain`** equals the contested host **always wins, whatever the ids** — a seeded identity cannot be taken from a row by something that merely redirected onto it. Id ordering breaks ties only between two rows both claiming the host as `site_domain`, and there the lower id wins *regardless of which worker got there first*, so the outcome does not depend on thread scheduling; a higher-id row that adopted earlier has its claim withdrawn. Exactly one row ever claims a host. The loser is excluded with `duplicate_site` and its `site_domain` cleared; the winner gets a `duplicate_site` review flag so the merge target is visible. Because `site_domain` is a separate column and `company.domain` is never written after insert, **a `UNIQUE` violation is structurally impossible** — the collision is resolved deliberately, with a recorded reason, rather than surfacing as an `IntegrityError` from inside a worker thread.
 
@@ -165,7 +168,7 @@ Explicitly out of scope. Do not implement these, and do not let scope creep add 
                   ┌──────────────┐
                   │  score  P1   │ ──▶ provisional band + gate decision
                   └──────────────┘
-                         │  phase1_total >= ADVANCE_THRESHOLD
+                         │  phase1_total + remaining_upside >= B floor
                          ▼
                   ┌──────────────┐     PageSpeed API
                   │  extract P2  │ ──▶ Impressum + homepage extraction (Anthropic SDK, Batch)
@@ -597,7 +600,9 @@ Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, pa
 | `reviews.trusted_shops`, `reviews.count` | Trusted Shops badge script detection; visible aggregate review count in `AggregateRating` JSON-LD | Free product-strength proxy |
 | `catalog.product_sample_url` | The product URL selected by the A5 rule in §5.2. Written by `fetch`, not by an extractor — it records a fetch-time decision. | **Unscored.** Exists so the sample behind `schema.product_present` is auditable |
 
-**Why `legal_form` is extracted here rather than in §5.5b (A1).** `qual.owner_operated` (+15) had all three disjuncts reading Phase-2-only signals, so a correct derivation of `PHASE2_MAX_POINTS` gives **50**, `ADVANCE_THRESHOLD` becomes `55 − 50 = 5`, `qual.ecommerce_platform` alone clears it, essentially every company advances to Phase 2, and §7's cost model fails. D1's own startup assertion fires on the first run. Moving the first disjunct's input into Phase 1 removes the rule from the Phase-2-only set, `PHASE2_MAX_POINTS` returns to **35**, and `ADVANCE_THRESHOLD` to **20**.
+**Why `legal_form` is extracted here rather than in §5.5b (A1).** It makes `qual.owner_operated`'s first disjunct decidable in Phase 1, which is worth having on its own: a company whose Impressum says `e.K.` banks the +15 before any LLM is called, and its `remaining_upside` under §5.4's gate drops from 50 to 35 accordingly.
+
+**It does not, by itself, fix the gate** — the claim first written here, that this returns `PHASE2_MAX_POINTS` to 35, was wrong. The other two disjuncts are LLM extractions, so Phase 2 can still award the rule to a company Phase 1 could not; the +15 stays reachable and stays in the bound. See M1.22, which replaces the global constant with a per-company gate.
 
 The regex is not a cheaper `ImpressumExtract.legal_form`; it is a *different* signal with a *different* reliability, and §5.5b still extracts the full legal identity for advancing companies. Where both exist and disagree, the LLM extraction wins — it reads the whole page, this reads one window.
 
@@ -618,36 +623,38 @@ The regex is not a cheaper `ImpressumExtract.legal_form`; it is a *different* si
 
 Pure function over `company_profile`. Costs nothing.
 
-**The Phase-2 advance gate is not the B band.** Phase 2 can add points that Phase 1 cannot observe, so gating on the Phase-1 band would permanently discard companies whose final score would have been A. A company scoring 54 in Phase 1 with +35 available in Phase 2 is an 89 — a clear A that would never be looked at.
+**The Phase-2 advance gate is not the B band.** Phase 2 can add points Phase 1 cannot observe, so gating on the Phase-1 band would permanently discard companies whose final score would have been A. A company scoring 54 in Phase 1 with +35 still available is an 89 — a clear A that would never be looked at.
+
+**The gate is per-company, not a global constant (M1.22).** This *replaces* D1's `PHASE2_MAX_POINTS`; it is not an amendment to it. D1 remains in the changelog as superseded.
 
 ```
-PHASE2_MAX_POINTS = sum of the maximum positive points from all rules
-                    whose inputs are Phase-2-only signals.
-                    Computed from the ruleset at startup — never hardcoded.
-                    Under ruleset v3: qual.own_brand (+10)
-                                    + opp.ai_invisible (+15)
-                                    + opp.slow_site (+10)  = 35
+remaining_upside(c) = sum of the maximum positive points of every rule that
+                      Phase 2 can still influence for c, and that Phase 1 has
+                      not already awarded to c.
 
-                    qual.owner_operated (+15) is NOT in this set, and only
-                    because §5.3 extracts company.legal_form deterministically
-                    in Phase 1 (A1). A rule counts as Phase-2-only when *all*
-                    its inputs are; one Phase-1 disjunct is enough to remove it.
-                    Revert that extractor and this becomes 50, the threshold
-                    becomes 5, and the gate stops gating.
-
-ADVANCE_THRESHOLD = B_band_floor − PHASE2_MAX_POINTS
-                  = 55 − 35 = 20
+advance(c)          if phase1_total(c) + remaining_upside(c) >= B_band_floor
 ```
 
-Companies with `phase1_total >= ADVANCE_THRESHOLD` advance to Phase 2. Everything below stops, and its `phase=1` score row is final unless manually promoted in the UI.
+**Why a global constant cannot work here.** A rule belongs in the bound if Phase 2 can still *add* its points — not if all its inputs are Phase-2-only. `qual.owner_operated` (+15) has three disjuncts, and §5.3 now decides the first one in Phase 1 (`company.legal_form`). The other two — ≤ 2 natural-person Geschäftsführer, owner named on site — are LLM extractions, so a company that fails the legal-form test **can still win the full +15 in Phase 2**. The rule stays Phase-2-reachable, the bound must still contain it, and any global constant is therefore stuck at 50, giving `ADVANCE_THRESHOLD = 5` — at which `qual.ecommerce_platform` alone clears the gate and the gate stops gating.
 
-A ruleset change that adds a Phase-2 rule automatically lowers the threshold. Assert at startup that `PHASE2_MAX_POINTS` was derived from the live ruleset and not from a stale constant — fail loudly if the two disagree.
+The first-crawl measurement makes this sharper rather than softer. The five shops with no legal-form token are exactly the five sole traders (§5.3) — the companies *most* likely to win the rule in Phase 2 on "owner named". **The +15 that has to stay inside the bound sits on the best leads**, which is precisely why it cannot be dropped from a global constant to make the arithmetic pleasant.
 
-**Cost consequence, stated honestly:** this admits substantially more companies to Phase 2 than a band-B gate would. The §7 estimate is revised accordingly. The two-phase split still saves money — it excludes the clear no-hopers — but it is no longer a 60–70% reduction. Expect 55–70% of discovered companies to advance.
+**Why per-company is strictly better than any safe global constant.** It is safe by construction — no company whose final score could reach B is discarded, since `remaining_upside` bounds what Phase 2 can add for *that* company — and it is tighter, because a company that has already been awarded a rule in Phase 1 cannot be awarded it again:
+
+| company | won `qual.owner_operated` in Phase 1? | `remaining_upside` | effective threshold |
+|---|---|---|---|
+| legal form is `e.K.` | yes, +15 already banked | 35 (`own_brand` 10 + `ai_invisible` 15 + `slow_site` 10) | 20 |
+| legal form is `GmbH`, or absent | no — Phase 2 may still award it | 50 (35 + `owner_operated` 15) | 5 |
+
+A global constant must use the worst case for every company; this uses each company's own.
+
+**Each rule declares whether Phase 2 can still change its outcome**, and the declaration is part of the ruleset rather than inferred from the signal names — inference is what produced the wrong answer in the first place. **Assert at startup that every rule carries the declaration**, and fail loudly on any that does not, so adding a rule cannot silently widen or narrow the gate. A new Phase-2-reachable rule automatically raises `remaining_upside` for the companies it applies to.
+
+**Cost consequence, stated honestly and now worse than D1 claimed.** Under D1's arithmetic the threshold was 20; under a correct per-company gate it is 20 only for companies that already banked `owner_operated`, and 5 for the rest — and on the verified corpus *none* of the twelve banks it (§5.3), so in practice nearly everything advances today. The two-phase split still excludes clear no-hopers, but the saving is smaller than §7 assumes and shrinks further the worse `legal_form` coverage is. **The honest reading: the gate's value now depends on the `qual.owner_operated` predicate (§10.1), not on the gate's arithmetic.**
 
 **Score direction:** Phase 2 can also *lower* a score (`neg.has_agency` may fire on `HomepageExtract.agency_credit` where the footer regex missed it). The gate concerns maximum upside only; a Phase-2 score below its Phase-1 predecessor is expected and correct.
 
-Record the gate decision per company as a signal (`gate.phase2_admitted`, `value_num` 0/1) so a company that stopped just under the line is auditable rather than invisible.
+Record per company, as signals, both the decision and the number behind it — `gate.phase2_admitted` (`value_num` 0/1) and `gate.remaining_upside` (`value_num`). A company that stopped just under the line must be auditable, and with a per-company gate "just under the line" now means something different for each company, so the threshold it was actually judged against has to be recorded rather than reconstructed.
 
 ### 5.5 extract-p2 — paid signals, advancing companies only
 
@@ -866,7 +873,7 @@ Non-negotiable, implemented as code, not as discipline.
 
 6. **Content-hash short-circuit.** Unchanged page → no LLM call. Extraction keyed to `artifact.content_hash`, effective across runs *and* within a resumed run.
 
-7. **Two-phase gating** (§5.4) — restricts paid signals to companies above `ADVANCE_THRESHOLD`.
+7. **Two-phase gating** (§5.4) — restricts paid signals to companies whose Phase-1 total plus their own `remaining_upside` could still reach the B floor. Per-company since M1.22, so the effective threshold varies (20 for a company that already banked `qual.owner_operated`, 5 for one that has not). **This saves less than the flat-threshold model assumed**, and on the verified corpus, where no company banks that rule, it currently admits nearly everything — see §5.4.
 
 8. **Web search accounting.** `run.web_searches` counts searches issued, read from `usage.server_tool_use.web_search_requests` on each response. The per-search charge is **$10 per 1,000 searches**, billed separately from tokens and not discounted by the Batch API (§5.5c). Include it in the pre-call reservation at `$0.01 × planned_queries` per company.
 
@@ -922,12 +929,18 @@ The export function asserts the presence of `ai.query_text`, `ai.checked_at` and
 
 | # | Blocker | Why it blocks |
 |---|---|---|
-| A1 / M1.21 | `qual.owner_operated`'s predicate finds **zero** owner-operated companies in the verified corpus, even with `legal_form` extracted deterministically. The threshold arithmetic is fixed; the predicate is not. | M3 scores. A qualification rule that is uniformly false on real German sole traders — the ideal lead — mis-ranks the entire corpus, and the mis-ranking is invisible because the rule simply never fires. **Awaiting ratification** (§5.3, §5.4). |
+| A1 / M1.21–M1.22 | The Phase-2 advance gate. A global `PHASE2_MAX_POINTS` cannot be derived correctly, so §5.4 is rewritten as a per-company gate. | M3 scores, and the gate decides what Phase 2 costs. **Awaiting ratification** — it is a scoring-model change (§5.4). |
 | M1.14 | **`content.blog_exists` under-detects, and a `false` reading is not strong enough to carry `opp.no_blog`'s +25 on its own.** Two shapes in a 13-shop corpus are unreachable by any path vocabulary: a blog on a subdomain (`blog.zecplus.de`) and a blog served as root-level slugs (`lampenflut.de`). | M3 scores, and `opp.no_blog` is the **largest single award in ruleset v3**. Firing it on a shop that publishes weekly is the worst error the model can make: it manufactures the exact opportunity the outreach letter is about. The right instrument is anchor text or `Article` JSON-LD, both of which are M2 territory — so this is recorded here, not fixed in M1. |
 
 Neither is a coding task. Both are decisions about what a signal is allowed to assert when it did not find something, which is the same question `A5.5` and the `blog_last_post is NULL` branch already answer with "write nothing rather than write zero".
 
-### 10.2 Undecided, not blocking
+### 10.2 M3 scoring quality — not gate blockers
+
+- **Should `qual.owner_operated` admit an `Inh.`/`Inhaber` marker?** On the verified corpus the rule's predicate (`legal_form ∈ {e.K., Einzelunternehmen, GbR}`) matches **none** of the twelve, while five are plainly owner-operated sole traders whose form is simply unstated — `Lampenflut.de Inh. Dominik Lindemeier`, `NAVUCKO Nataša Vučković`, `Benjamin Luzolo BLACKPOLISH`, `Christian Riedel OPULENT Wohnen`, `Kay Link`. A personal name standing where a company name would be is a judgement rather than a regex, and twelve shops is not a sample to settle it on.
+
+  **This no longer blocks the gate.** Under §5.4's per-company gate the arithmetic is safe whether or not sole traders are identifiable in Phase 1: a company that cannot bank the rule simply carries it in `remaining_upside` and is admitted more readily. Getting the predicate right changes how well companies are *ranked* and how much Phase 2 costs — not whether a recoverable lead is discarded. Settle it on a larger corpus.
+
+### 10.3 Undecided, not blocking
 
 - Ollama for local extraction instead of Haiku — saves ~$10/month at Phase-2 volumes, costs German-language extraction quality and the substring-verification simplicity. Currently: use Haiku.
 - Whether to store artifact bodies compressed (gzip) — likely yes above a few hundred companies.
