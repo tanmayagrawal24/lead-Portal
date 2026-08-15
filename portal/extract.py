@@ -430,14 +430,17 @@ class ExtractStage:
         # source is reliably the newest post, so both are lower bounds, and the
         # later of two lower bounds is the better one and never the worse.
         dated: list[tuple[date, str]] = []
+        index_dated = article_dated = False
         if read.newest_post is not None:
             dated.append((read.newest_post, index.url))
+            index_dated = True
         article_html = self._body(article) if article is not None else ""
         if article is not None:
             if (
                 published := parsers.newest_post_date(article_html, self.today)
             ) is not None:
                 dated.append((published, article.url))
+                article_dated = True
             # A6: the markup lives on the post too. `Article`/`BlogPosting` is
             # never on the listing — `schema.article_present` was `0` on every
             # blog index in the corpus, a wrong "checked and absent" for the
@@ -458,6 +461,31 @@ class ExtractStage:
         if dated:
             newest, evidence = max(dated)
             self._write(result, "content.blog_last_post", evidence, day=newest)
+            # The interim guard (§6.2). Both sources are lower bounds, but they
+            # are not lower bounds of the same kind: the index's date is a
+            # *maximum* over the posts it lists, while a sampled article's is
+            # one post's and has nothing behind it. Where the index carries no
+            # date at all, the value is a floor with no ceiling — it can show a
+            # blog is at least this fresh, and it cannot show one is stale.
+            #
+            # So the basis travels with the date, exactly as A5's tier travels
+            # with `catalog.product_url_count`. §6.2 reads it to decide whether
+            # `opp.blog_stale` and `opp.blog_slowing` may fire at all. It is
+            # written as an *enabling* fact rather than a suppressing one so
+            # that a run predating this guard — where the signal is simply
+            # absent — fails to the safe side, which is A5.5's discipline.
+            basis = (
+                "both"
+                if index_dated and article_dated
+                else ("index" if index_dated else "article")
+            )
+            self._write(result, "content.blog_last_post_basis", evidence, text=basis)
+            if basis == "article":
+                result.notes.append(
+                    "blog_last_post is sample-only (the index carries no date): "
+                    "a lower bound with no maximum behind it, so §6.2's staleness "
+                    "rungs must not fire on it"
+                )
         else:
             # §6.2's NULL branch: a blog whose dates cannot be parsed is an
             # unknown, not a stale blog. The flag is raised by `score`, not

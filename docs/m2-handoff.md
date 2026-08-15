@@ -174,7 +174,7 @@ P0 held again: `snocks.com` and `smoke2u.de` both produced `redirect refused by 
 
 ### The remaining gap, stated rather than closed
 
-Even the later of the two dates is a **lower bound**, not the last post date. `opp.blog_stale` awards +25 for *not* publishing, so an under-estimate of freshness fires it wrongly — the expensive direction. The fix available is to select the sample by the newest `<lastmod>` in the blog shard while still reading `datePublished` off the page: lastmod as the *selector*, never as the *value*, so its freshness bias cannot reach the signal. **That changes A6's ratified ordering, so it is in §10.5 rather than in this branch.**
+Even the later of the two dates is a **lower bound**, not the last post date. `opp.blog_stale` awards +20 for *not* publishing (+25 is `opp.no_blog`), so an under-estimate of freshness fires it wrongly — the expensive direction. The fix available is to select the sample by the newest `<lastmod>` in the blog shard while still reading `datePublished` off the page: lastmod as the *selector*, never as the *value*, so its freshness bias cannot reach the signal. **That changes A6's ratified ordering, so it is in §10.5 rather than in this branch.**
 
 ---
 

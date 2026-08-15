@@ -498,6 +498,60 @@ class TestBlogArticleSample(ExtractTestCase):
         self.assertNotIn("content.blog_last_post", result.signals)
         self.assertIn("no parseable post date", " ".join(result.notes))
 
+    def test_two_sources_record_a_basis_of_both(self) -> None:
+        """§6.2's interim guard needs to know what the date rests on, so the
+        basis travels with it the way A5's tier travels with the count."""
+        company_id = self.stocked()  # index dates 2024-02-01
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/erster",
+            BLOG_ARTICLE,  # 2025-06-30
+        )
+        result = self.extract(company_id)
+        self.assertEqual(result.signals["content.blog_last_post_basis"], "both")
+
+    def test_an_index_date_alone_records_a_basis_of_index(self) -> None:
+        result = self.extract(self.stocked())
+        self.assertEqual(result.signals["content.blog_last_post_basis"], "index")
+
+    def test_a_sample_only_date_is_marked_as_such(self) -> None:
+        """The whole point of the guard. An index with no date at all leaves
+        the sampled article's date a lower bound with **no maximum behind
+        it** — it can show a blog is at least this fresh and can never show one
+        is stale, so §6.2 must not let it carry `opp.blog_stale` (+20) or
+        `opp.blog_slowing` (+10). Observed on doonails.de and snocks.com."""
+        company_id = self.stocked(
+            index_html='<html><body><a href="/blogs/news/erster">Ein Beitrag</a></body></html>'
+        )
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/erster",
+            BLOG_ARTICLE,  # 2025-06-30
+        )
+        result = self.extract(company_id)
+
+        self.assertEqual(str(result.signals["content.blog_last_post"]), "2025-06-30")
+        self.assertEqual(result.signals["content.blog_last_post_basis"], "article")
+        self.assertIn("sample-only", " ".join(result.notes))
+
+    def test_no_date_records_no_basis(self) -> None:
+        """The basis is an enabling fact, never a suppressing one: absent a
+        date there is nothing to qualify, and absent the signal §6.2 fires in
+        neither direction — which is what makes a pre-guard run safe."""
+        company_id = self.stocked(
+            index_html='<html><body><a href="/blogs/news/x">Ein Beitrag</a></body></html>'
+        )
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/x",
+            "<html></html>",
+        )
+        result = self.extract(company_id)
+        self.assertNotIn("content.blog_last_post_basis", result.signals)
+
     def test_no_blog_index_writes_zero_and_says_why(self) -> None:
         """§10.1: this instrument under-detects — a blog on a subdomain or on
         root-level slugs is invisible to it — so the note records that the `0`
