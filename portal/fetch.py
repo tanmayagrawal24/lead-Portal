@@ -316,7 +316,17 @@ class FetchStage:
             page_urls, homepage_html, homepage_url(base), domain
         )
         if blog_path:
-            get("blog_index", impressum_mod.blog_index_url(base, blog_path))
+            # An observed URL, not a synthesised one (M1.15): the bare path
+            # prefix 404'd on all seven shops that have a blog.
+            observed = impressum_mod.find_blog_index_url(
+                blog_path, page_urls, homepage_html, homepage_url(base), domain
+            )
+            if observed is None:
+                result.notes.append(f"blog path {blog_path} found but no URL under it")
+            get(
+                "blog_index",
+                observed or impressum_mod.blog_index_url(base, blog_path),
+            )
         else:
             result.notes.append("no blog path found")
 

@@ -104,6 +104,32 @@ class TestFilters(unittest.TestCase):
                 sampling.is_product_candidate(url, DOMAIN, require_pattern=False), url
             )
 
+    def test_a_locale_storefront_root_is_never_a_product(self) -> None:
+        """A multi-locale shop has more than one homepage, and Shopify lists
+        each locale root inside that locale's *product* sitemap. Reviving Tier 1
+        (M1.13) made this reachable: without the guard, ekomia.de, navucko.com
+        and snocks.com would each have sampled `/de-at`, `/en` and `/de-ch` —
+        listing pages feeding `schema.product_present` a wrong +10, which is the
+        exact error M1.4 dropped `/p/` over.
+        """
+        for path in ("/de-at", "/en", "/fr-ch", "/de-at/", "/NL-BE"):
+            self.assertFalse(
+                sampling.is_product_candidate(
+                    f"https://example.de{path}", DOMAIN, require_pattern=False
+                ),
+                path,
+            )
+
+    def test_the_guard_does_not_swallow_real_products_under_a_locale(self) -> None:
+        """The anti-vacuity case: only the bare locale root is rejected."""
+        for path in ("/de-at/products/alma", "/en/products/x", "/de-at/schallbuerste"):
+            self.assertTrue(
+                sampling.is_product_candidate(
+                    f"https://example.de{path}", DOMAIN, require_pattern=False
+                ),
+                path,
+            )
+
 
 class TestOrdering(unittest.TestCase):
     def test_picks_the_code_point_minimum(self) -> None:

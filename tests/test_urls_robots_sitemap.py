@@ -352,6 +352,42 @@ class TestBlogPathDetection(unittest.TestCase):
                 path,
             )
 
+    def test_the_index_url_is_observed_rather_than_synthesised(self) -> None:
+        """M1.15. `/blogs` is not a page on Shopify; `/blogs/news` is. All seven
+        blog-index fetches in `run 2` 404'd on the synthesised bare path."""
+        pages = [
+            "https://x.de/blogs/news/zweiter-artikel",
+            "https://x.de/blogs/rezepte",
+            "https://x.de/blogs/news",
+        ]
+        self.assertEqual(
+            impressum.find_blog_index_url("/blogs", pages, "", "https://x.de/", "x.de"),
+            "https://x.de/blogs/news",
+            "shallowest wins, code-point minimum breaks the tie",
+        )
+
+    def test_a_nav_link_beats_a_sitemap_url_at_the_same_depth(self) -> None:
+        """A link a human put in the navigation is likelier to be the index
+        than whichever article happens to sort first."""
+        html = (
+            '<html><body><nav><a href="/blogs/magazin">Magazin</a></nav></body></html>'
+        )
+        pages = ["https://x.de/blogs/aaa-artikel"]
+        self.assertEqual(
+            impressum.find_blog_index_url(
+                "/blogs", pages, html, "https://x.de/", "x.de"
+            ),
+            "https://x.de/blogs/magazin",
+        )
+
+    def test_no_observed_url_falls_back_to_the_synthesised_one(self) -> None:
+        self.assertIsNone(
+            impressum.find_blog_index_url("/blogs", [], "", "https://x.de/", "x.de")
+        )
+        self.assertEqual(
+            impressum.blog_index_url("https://x.de", "/blogs"), "https://x.de/blogs"
+        )
+
     def test_a_segment_that_merely_starts_with_a_blog_word_is_not_a_blog(self) -> None:
         """The alternation is anchored by `(?:/|$)`, so adding `blogs` cannot
         widen `blog` into a prefix match."""
