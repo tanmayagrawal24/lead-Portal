@@ -61,7 +61,8 @@ class TestApplyPending(TempDbTestCase):
     def test_applies_then_is_a_no_op(self) -> None:
         conn = self.open_db()
 
-        self.assertEqual(migrate.apply_pending(conn), [1])
+        expected = [number for number, _path in migrate.discover()]
+        self.assertEqual(migrate.apply_pending(conn), expected)
         version = migrate.current_version(conn)
         inventory = db.object_inventory(conn)
 
@@ -122,7 +123,7 @@ class TestInitCommand(TempDbTestCase):
         conn = self.open_db()
         version = migrate.current_version(conn)
         inventory = db.object_inventory(conn)
-        self.assertEqual(version, 1)
+        self.assertEqual(version, migrate.discover()[-1][0])
 
         self.assertEqual(run_cli("--db", str(self.db_path), "init"), 0)
         self.assertEqual(migrate.current_version(conn), version)

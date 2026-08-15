@@ -28,7 +28,18 @@ IMPRESSUM_PROBE_PATHS = (
 )
 
 #: §5.3 `content.blog_exists` vocabulary. Used here only to decide what to fetch.
-BLOG_SEGMENTS = ("blog", "magazin", "ratgeber", "news", "journal", "tipps")
+#:
+#: `blogs` is Shopify's, and its absence made every Shopify blog invisible
+#: (M1.14): five shops in the first crawl reported "no blog path found" while
+#: publishing actively, one of them with 670 blog URLs. Listed before `blog` for
+#: readability only — the alternation is followed by `(?:/|$)`, so `/blogs/`
+#: could never have matched `blog` whichever way round they sit.
+#:
+#: Observed in that crawl: `blogs` on 5 Shopify shops, `magazin` on Shopware 5.
+#: The rest are still convention. Two real blogs remain undetectable by *any*
+#: entry in this tuple, because the vocabulary is the wrong instrument for them
+#: — see M1.14.
+BLOG_SEGMENTS = ("blogs", "blog", "magazin", "ratgeber", "news", "journal", "tipps")
 
 _BLOG_PATH = re.compile(
     r"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?(" + "|".join(BLOG_SEGMENTS) + r")(?:/|$)",
@@ -100,5 +111,45 @@ def find_blog_path(
     return None
 
 
+def find_blog_index_url(
+    blog_path: str,
+    sitemap_urls: list[str],
+    homepage_html: str,
+    base_url: str,
+    domain: str,
+) -> str | None:
+    """The shallowest URL actually *observed* under `blog_path` (M1.15).
+
+    Synthesising `base + blog_path` was wrong on every shop that has a blog:
+    all seven blog-index fetches in `run 2` returned 404. `/blogs` is not a
+    page on Shopify — `/blogs/news` is — and `smile-store.de` serves articles
+    at `/magazin/<kategorie>/<artikel>` with nothing at the bare segment. The
+    path prefix is a good filter and a bad address.
+
+    Shallowest wins because a blog index sits above its articles; ties break on
+    the code-point minimum, for the same reproducibility reason as A5.3.
+    Homepage nav links are preferred over sitemap URLs at equal depth: a link a
+    human put in the navigation is far likelier to be the index than an
+    arbitrary article that happens to sort first.
+    """
+    prefix = blog_path.rstrip("/") + "/"
+
+    def under(url: str) -> bool:
+        path = path_of(url)
+        return same_site(url, domain) and (
+            path.rstrip("/") == blog_path.rstrip("/") or path.startswith(prefix)
+        )
+
+    def depth(url: str) -> int:
+        return len([s for s in path_of(url).strip("/").split("/") if s])
+
+    nav = [url for url, _text in links(homepage_html, base_url) if under(url)]
+    observed = [(depth(u), 0, u) for u in nav] + [
+        (depth(u), 1, u) for u in sitemap_urls if under(u)
+    ]
+    return min(observed)[2] if observed else None
+
+
 def blog_index_url(base: str, blog_path: str) -> str:
+    """Fallback only: a synthesised index for when nothing was observed."""
     return f"{base}{blog_path}"

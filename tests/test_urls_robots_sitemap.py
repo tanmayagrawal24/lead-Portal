@@ -5,7 +5,7 @@ from __future__ import annotations
 import gzip
 import unittest
 
-from portal import robots, sitemap, urls
+from portal import impressum, robots, sitemap, urls
 
 
 class TestNormaliseDomain(unittest.TestCase):
@@ -293,13 +293,111 @@ class TestSitemapParsing(unittest.TestCase):
         ):
             self.assertTrue(sitemap.is_product_sitemap(url), url)
 
+    def test_a_query_string_does_not_defeat_detection(self) -> None:
+        """M1.13, and the exact URLs that made Tier 1 dead code.
+
+        Shopify serves its product sitemap with `?from=…&to=…`, so the `.xml`
+        the patterns anchor on with `$` is not at the end of the URL. Matching
+        the whole URL meant zero of 143 real sitemaps were recognised in the
+        first crawl, on all seven Shopify shops.
+        """
+        for url in (
+            "https://snocks.com/sitemap_products_1.xml?from=1932497715270&to=110104",
+            "https://ekomia.de/de-at/sitemap_products_1.xml?from=199692405&to=1215",
+            "https://example.de/product-sitemap1.xml?paged=2",
+        ):
+            self.assertTrue(sitemap.is_product_sitemap(url), url)
+
     def test_content_sitemaps_are_not_product_sitemaps(self) -> None:
         for url in (
             "https://example.de/sitemap-www.example.de-content-1.xml.gz",
             "https://example.de/sitemap.xml",
             "https://example.de/post-sitemap.xml",
+            # Shopify's sibling shards, which carry the same query shape.
+            "https://example.de/sitemap_collections_1.xml?from=1&to=2",
+            "https://example.de/sitemap_blogs_1.xml",
+            # The query is addressing, never identity: matching it would let any
+            # sitemap claim to be a product sitemap.
+            "https://example.de/sitemap.xml?products=1",
+            "https://example.de/sitemap.xml?f=/sitemap_products_1.xml",
         ):
             self.assertFalse(sitemap.is_product_sitemap(url), url)
+
+
+class TestBlogPathDetection(unittest.TestCase):
+    """§5.3's blog vocabulary, against the paths real shops actually serve."""
+
+    def test_shopify_plural_blogs_is_detected(self) -> None:
+        """M1.14. Five shops in the first crawl published actively under
+        `/blogs/` and every one reported "no blog path found"."""
+        for path in (
+            "/blogs/news",
+            "/blogs/news/blackpolish-is-live",
+            "/blogs/rezepte",
+            "/nl-be/blogs/ekomia-magazine",  # locale-prefixed, as Shopify serves it
+        ):
+            self.assertTrue(
+                impressum.find_blog_path(
+                    [f"https://x.de{path}"], "", "https://x.de/", "x.de"
+                ),
+                path,
+            )
+
+    def test_the_shapes_already_covered_still_are(self) -> None:
+        for path in ("/blog", "/magazin/zahnpflege", "/ratgeber/", "/de/news"):
+            self.assertTrue(
+                impressum.find_blog_path(
+                    [f"https://x.de{path}"], "", "https://x.de/", "x.de"
+                ),
+                path,
+            )
+
+    def test_the_index_url_is_observed_rather_than_synthesised(self) -> None:
+        """M1.15. `/blogs` is not a page on Shopify; `/blogs/news` is. All seven
+        blog-index fetches in `run 2` 404'd on the synthesised bare path."""
+        pages = [
+            "https://x.de/blogs/news/zweiter-artikel",
+            "https://x.de/blogs/rezepte",
+            "https://x.de/blogs/news",
+        ]
+        self.assertEqual(
+            impressum.find_blog_index_url("/blogs", pages, "", "https://x.de/", "x.de"),
+            "https://x.de/blogs/news",
+            "shallowest wins, code-point minimum breaks the tie",
+        )
+
+    def test_a_nav_link_beats_a_sitemap_url_at_the_same_depth(self) -> None:
+        """A link a human put in the navigation is likelier to be the index
+        than whichever article happens to sort first."""
+        html = (
+            '<html><body><nav><a href="/blogs/magazin">Magazin</a></nav></body></html>'
+        )
+        pages = ["https://x.de/blogs/aaa-artikel"]
+        self.assertEqual(
+            impressum.find_blog_index_url(
+                "/blogs", pages, html, "https://x.de/", "x.de"
+            ),
+            "https://x.de/blogs/magazin",
+        )
+
+    def test_no_observed_url_falls_back_to_the_synthesised_one(self) -> None:
+        self.assertIsNone(
+            impressum.find_blog_index_url("/blogs", [], "", "https://x.de/", "x.de")
+        )
+        self.assertEqual(
+            impressum.blog_index_url("https://x.de", "/blogs"), "https://x.de/blogs"
+        )
+
+    def test_a_segment_that_merely_starts_with_a_blog_word_is_not_a_blog(self) -> None:
+        """The alternation is anchored by `(?:/|$)`, so adding `blogs` cannot
+        widen `blog` into a prefix match."""
+        for path in ("/blogsammlung", "/newsletter", "/magazinhalter-stahl"):
+            self.assertIsNone(
+                impressum.find_blog_path(
+                    [f"https://x.de{path}"], "", "https://x.de/", "x.de"
+                ),
+                path,
+            )
 
 
 if __name__ == "__main__":

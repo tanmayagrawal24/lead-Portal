@@ -438,6 +438,67 @@ class TestSameHostRedirectsAreRobotsChecked(FetchTestCase):
         allowed and its target genuinely is not."""
         self._assert_never_fetched("/Impressum", "/Impressum")
 
+    def test_a_probe_that_lands_on_the_homepage_is_not_an_impressum(self) -> None:
+        """M1.17, from `run 2`. With the real Impressum robots-disallowed,
+        snocks.com's `/imprint` probe 302'd to `/#gbaid979323` — the homepage —
+        and it was stored as the Impressum, with the homepage's own content
+        hash. A soft redirect to the root means "no such page"."""
+
+        def build(base: str) -> Site:
+            site = shopfixtures.flat_shop(base, with_impressum=False)
+            site.add(
+                "/robots.txt",
+                "User-agent: *\nDisallow: /policies/\n",
+                content_type="text/plain",
+            )
+            site.add(
+                "/",
+                shopfixtures.homepage(
+                    footer_impressum=False,
+                    extra_links='<footer><a href="/policies/legal-notice">'
+                    "Impressum</a></footer>",
+                ),
+            )
+            site.add("/policies/legal-notice", shopfixtures.IMPRESSUM_HTML)
+            for probe in ("/impressum", "/impressum/", "/imprint", "/legal"):
+                site.add_redirect(probe, f"{base}/")
+            return site
+
+        server = self.serve(build)
+        result = self.run_fetch(server)
+
+        impressum_rows = [
+            row
+            for row in self.artifact_rows(result.company_id)
+            if row["kind"] == "impressum"
+        ]
+        self.assertTrue(impressum_rows, "the probes themselves must still be recorded")
+        for row in impressum_rows:
+            self.assertIsNone(
+                row["body_path"],
+                "the homepage must never be stored as an Impressum body",
+            )
+        self.assertTrue(
+            any(
+                "soft_redirect_to_homepage" in (row["error"] or "")
+                for row in impressum_rows
+            ),
+            "the rejection must be recorded with its reason, not silently dropped",
+        )
+
+        homepage_hash = next(
+            row["content_hash"]
+            for row in self.artifact_rows(result.company_id)
+            if row["kind"] == "homepage"
+        )
+        self.assertNotIn(
+            homepage_hash,
+            [row["content_hash"] for row in impressum_rows],
+            "the giveaway in run 2: the impressum row carried the homepage's hash",
+        )
+        self.assertIn("no_impressum", self.review_flags(result.company_id))
+        self.assertIn("landed on the homepage", " ".join(result.notes))
+
     def test_an_allowed_same_host_hop_is_still_followed(self) -> None:
         """The anti-vacuity case. If the new check refused same-host hops
         wholesale the two tests above would pass for the wrong reason, and every
@@ -455,6 +516,163 @@ class TestSameHostRedirectsAreRobotsChecked(FetchTestCase):
             "a hop robots permits must still be followed",
         )
         self.assertEqual([], self.review_flags(result.company_id))
+
+
+class TestAMovedRegistrableDomain(FetchTestCase):
+    """M1.18. Two of thirteen seeded domains had moved, and every parser
+    anchored on `same_site(url, company.domain)` went quiet without erroring:
+    doonails.de's five sitemap shards were never expanded, and
+    germanelectronic.de's footer Impressum link was discarded as off-site."""
+
+    def _moved_site(self, new_base: str):
+        """A seeded host that redirects everything to another registrable one."""
+
+        def build(_base: str) -> Site:
+            site = Site()
+            site.add(
+                "/robots.txt", "User-agent: *\nAllow: /\n", content_type="text/plain"
+            )
+            site.add_redirect("/", f"{new_base}/")
+            return site
+
+        return build
+
+    def test_the_new_host_is_adopted_and_the_seeded_domain_is_kept(self) -> None:
+        new = self.serve(shopfixtures.shopware_shop, address="127.0.0.2")
+        server = self.serve(self._moved_site(new.base))
+        result = self.run_fetch(server, domain="seeded.de")
+
+        row = self.conn.execute(
+            "SELECT domain, site_domain, excluded FROM company WHERE id = ?",
+            (result.company_id,),
+        ).fetchone()
+        self.assertEqual(row["domain"], "seeded.de", "the seeded identity must survive")
+        self.assertEqual(row["site_domain"], new.address)
+        self.assertEqual(row["excluded"], 0)
+        self.assertIn("domain_moved", self.review_flags(result.company_id))
+
+    def test_adoption_unblocks_the_parsers_that_were_going_quiet(self) -> None:
+        """The point of the change: sitemaps expand and the Impressum link is
+        followed on the new host, rather than being discarded as off-site."""
+        new = self.serve(shopfixtures.shopware_shop, address="127.0.0.2")
+        server = self.serve(self._moved_site(new.base))
+        result = self.run_fetch(server, domain="seeded.de")
+
+        self.assertIn("sitemap", result.kinds)
+        self.assertIn("impressum", result.kinds)
+        self.assertIn("product_page", result.kinds)
+        assert result.product_sample is not None
+        self.assertTrue(
+            result.product_sample.startswith(new.base), result.product_sample
+        )
+
+    def test_artifacts_stay_under_the_seeded_domain_directory(self) -> None:
+        """One company's evidence stays in one place across a move, and nothing
+        already on disk orphans."""
+        new = self.serve(shopfixtures.shopware_shop, address="127.0.0.2")
+        server = self.serve(self._moved_site(new.base))
+        result = self.run_fetch(server, domain="seeded.de")
+
+        for row in self.artifact_rows(result.company_id):
+            if row["body_path"]:
+                self.assertTrue(
+                    row["body_path"].startswith("seeded.de/"), row["body_path"]
+                )
+
+    def test_a_seeded_row_owning_the_host_always_wins_whatever_the_ids(self) -> None:
+        """§6.4's rule: a seeded identity cannot be taken from a row. The rival
+        here has the HIGHER id, so an id-ordering rule alone would get it
+        wrong."""
+        new = self.serve(shopfixtures.shopware_shop, address="127.0.0.2")
+        server = self.serve(self._moved_site(new.base))
+
+        mover = self.add_company("seeded.de")
+        owner = self.add_company(new.address)  # higher id, but seeded as the host
+        _run_id, results = fetch.run(
+            self.conn,
+            [(mover, "seeded.de")],
+            self.artifacts,
+            fetcher=self.fetcher,
+            max_hosts=1,
+            base_url=lambda _d: server.base,
+        )
+
+        assert results[0].excluded_reason is not None
+        self.assertIn(
+            f"duplicate_site: {new.address} is company #{owner}",
+            results[0].excluded_reason,
+        )
+        moved = self.conn.execute(
+            "SELECT excluded, site_domain FROM company WHERE id = ?", (mover,)
+        ).fetchone()
+        self.assertEqual(moved["excluded"], 1)
+        self.assertIsNone(moved["site_domain"], "a loser must not claim the host")
+        self.assertIn("duplicate_site", self.review_flags(owner))
+
+    def test_between_two_adopters_the_lower_id_owns_it(self) -> None:
+        """And it wins regardless of which worker got there first: here the
+        HIGHER id adopts first, and is withdrawn when the lower id arrives."""
+        new = self.serve(shopfixtures.shopware_shop, address="127.0.0.2")
+        server = self.serve(self._moved_site(new.base))
+
+        lower = self.add_company("first.de")
+        higher = self.add_company("second.de")
+        self.conn.execute(
+            "UPDATE company SET site_domain = ? WHERE id = ?", (new.address, higher)
+        )
+
+        _run_id, results = fetch.run(
+            self.conn,
+            [(lower, "first.de")],
+            self.artifacts,
+            fetcher=self.fetcher,
+            max_hosts=1,
+            base_url=lambda _d: server.base,
+        )
+
+        self.assertIsNone(results[0].excluded_reason, "the lower id owns the host")
+        rows = {
+            row["id"]: row
+            for row in self.conn.execute(
+                "SELECT id, excluded, site_domain FROM company"
+            )
+        }
+        self.assertEqual(rows[lower]["site_domain"], new.address)
+        self.assertEqual(rows[higher]["excluded"], 1)
+        self.assertIsNone(
+            rows[higher]["site_domain"], "exactly one row may claim a host"
+        )
+
+    def test_an_apex_to_www_redirect_is_not_a_move(self) -> None:
+        """Five of thirteen domains do this. Adopting there would churn
+        identity for nothing."""
+        server = FixtureServer(Site())
+        server.site.add(
+            "/robots.txt", "User-agent: *\nAllow: /\n", content_type="text/plain"
+        )
+        server.site.add_redirect(
+            "/",
+            f"http://www.localhost:{server.port}/",
+            only_from_host=f"localhost:{server.port}",
+        )
+        server.site.routes.update(shopfixtures.shopware_shop(server.base).routes)
+        with server:
+            company_id = self.add_company("localhost")
+            _run_id, results = fetch.run(
+                self.conn,
+                [(company_id, "localhost")],
+                self.artifacts,
+                fetcher=self.fetcher,
+                max_hosts=1,
+                base_url=lambda _d: f"http://localhost:{server.port}",
+            )
+
+        row = self.conn.execute(
+            "SELECT site_domain FROM company WHERE id = ?", (company_id,)
+        ).fetchone()
+        self.assertIsNone(row["site_domain"])
+        self.assertNotIn("domain_moved", self.review_flags(company_id))
+        self.assertEqual(results[0].excluded_reason, None)
 
 
 class TestApexToWwwWithinTheSeededSite(FetchTestCase):

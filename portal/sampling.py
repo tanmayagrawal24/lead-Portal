@@ -30,6 +30,16 @@ CATEGORY_PATH_PATTERNS = ("/kategorie/", "/collections/", "/c/", "/categories/")
 
 _TRAILING_SLASHES = re.compile(r"/+$")
 
+#: A locale storefront root: `/de-at`, `/en`, `/fr-ch`. Shopify lists it inside
+#: the *product* sitemap of each locale, so Tier 1 — which trusts membership
+#: rather than the path (`require_pattern=False`) — would otherwise select it as
+#: a product. It is a storefront home page: real listing, no product.
+#:
+#: Observed on ekomia.de (`/de-at`), navucko.com (`/en`) and snocks.com
+#: (`/de-ch`) once M1.13 revived Tier 1 — a listing page reaching
+#: `schema.product_present` is precisely the +10 error M1.4 dropped `/p/` over.
+_LOCALE_ROOT = re.compile(r"^/[a-z]{2}(-[a-z]{2})?$", re.IGNORECASE)
+
 
 def _segment_after_pattern(path: str, pattern: str) -> str:
     """The path remainder after `pattern`, with trailing slashes removed."""
@@ -74,8 +84,13 @@ def is_product_candidate(
             return False
         if not any(_segment_after_pattern(path, p) for p in matched):
             return False
-    elif _TRAILING_SLASHES.sub("", path) in ("", "/"):
-        return False  # the homepage is never a product page
+    else:
+        # The homepage is never a product page — and a multi-locale shop has
+        # more than one homepage. `/de-at` is the German-Austrian storefront
+        # root, not a product, however it got into a product sitemap.
+        bare = _TRAILING_SLASHES.sub("", path)
+        if bare in ("", "/") or _LOCALE_ROOT.match(bare):
+            return False
 
     return True
 

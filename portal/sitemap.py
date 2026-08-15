@@ -19,6 +19,8 @@ import gzip
 import re
 from xml.etree import ElementTree
 
+from portal.urls import path_of
+
 #: Cap on shards followed per company, so a hostile or broken sitemap index
 #: cannot turn one company into thousands of requests.
 MAX_SHARDS = 50
@@ -56,7 +58,16 @@ def decompress(body: bytes, url: str) -> bytes:
 
 
 def is_product_sitemap(url: str) -> bool:
-    return any(pattern.search(url) for pattern in _PRODUCT_SITEMAP_PATTERNS)
+    """Tier 1 detection, matched against the **path** (M1.13).
+
+    Matching the whole URL is what made Tier 1 dead code: the patterns anchor
+    on `$`, and Shopify serves its product sitemap as
+    `sitemap_products_1.xml?from=…&to=…`, so the `.xml` is not at the end of
+    the URL and every one of the seven Shopify shops in the first crawl fell
+    through to Tier 2. The filename convention was right all along; the input
+    was wrong. Query strings are addressing, not identity.
+    """
+    return any(pattern.search(path_of(url)) for pattern in _PRODUCT_SITEMAP_PATTERNS)
 
 
 def parse(body: bytes, url: str) -> tuple[list[str], list[str]]:
