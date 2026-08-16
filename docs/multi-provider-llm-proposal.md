@@ -177,13 +177,23 @@ that forced hand-written Impressum fixtures does not apply.
    **Recommend abort for v1** — a fallback multiplies both the cost model and the evidence
    story, and on a prepaid key "A ran dry so we spent B's balance" is a surprise, not a
    feature.
+
+   **Correction to the reasoning, not the conclusion (Unit 2, verified 2026-08-16).** This
+   was drafted as though Anthropic's `fallbacks` parameter were a cross-provider mechanism
+   we would be declining to use. It is not, and never was. It routes only to **other
+   Anthropic models**, drawn from the requested model's `allowed_fallback_models`, and it
+   triggers on **policy refusals only** — not rate limits, not overloads, not billing. It
+   would not have rescued a dry key at any layer, so **abort costs us nothing that existed**.
+   It is also rejected outright on the Batches API, which is where §5.5b's spend lives.
+   Recording this because "we gave up X for good reasons" and "X was never on the table"
+   are different claims, and only the second one is true.
 4. **Multi-model AI-visibility (§3)** — separate change, separate ratification.
 
 ## 9. Build order
 
 | Step | Deliverable |
 |---|---|
-| 1 | Protocol + Anthropic implementation, extracted from existing code. **No behaviour change; existing tests prove it.** |
+| 1 | Protocol + Anthropic implementation, ~~extracted from existing code. **No behaviour change; existing tests prove it.**~~ **Corrected on execution: there is no existing code to extract.** Every LLM call site is M5's, and M5 is not built — `grep -ri anthropic portal/` matches only prose. So step 1 is not a refactor whose safety net is the existing suite; it is new code with no caller, and it needs its own tests and its own way of being run. That is a better position, not a worse one — the Protocol is being designed against the API rather than reverse-engineered from one implementation of it — but the stated safety argument was false and would have been leaned on. |
 | 2 | Price table as dated data, per (provider, model, batch), asserted at startup |
 | 3 | Prepaid failure handling (§6) — balance status, partial reconciliation |
 | 4 | Second and third provider implementations, extractions only |

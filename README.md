@@ -20,7 +20,12 @@ Localhost only. Single operator, no auth, no deployment.
   with every abstention recorded as a component and the §5.4 per-company gate.
 - **M4 complete** — `portal serve`: the §9 review page.
 
-Phase 2 (`enrich-p2`, M5) is not built.
+- **LLM provider layer** (proposal v2 build steps 1–3) — `portal/llm.py` and
+  `portal/llm_anthropic.py`: prices as dated data, per-model limits as declared
+  data, and the batch failure taxonomy including the prepaid-balance case. No
+  caller yet; inspect it with `portal llm-prices`.
+
+Phase 2 (`extract-p2`, M5) is not built.
 
 ## Setup
 
@@ -67,6 +72,20 @@ off — and the states that have no other outlet are rendered as themselves:
 
 Read-only except flag resolution. Binds to `127.0.0.1` by default and should
 stay there: §1 is a single-operator tool with no authentication.
+
+```bash
+portal llm-prices               # what a call costs, and as of when
+portal llm-prices --reserve 40  # a real §7 control 4 reservation (needs a key)
+```
+
+`portal llm-prices` prints the two tables the LLM layer is built on — token
+prices with their as-of dates, and the per-model facts an interface must not
+generalise away (Haiku 4.5 rejects `output_config.effort`, caps output at 64K
+rather than 128K, and will not cache a prompt under 4096 tokens). It touches no
+database and makes no paid call. `--reserve` performs a real `count_tokens`
+measurement and therefore needs `ANTHROPIC_API_KEY`; without one it says so
+rather than substituting a heuristic, because a fallback estimate is how an
+unmeasured number gets into the cost ledger looking measured.
 
 The database defaults to `data/portal.db`. Override with the `PORTAL_DB`
 environment variable or `--db`. Secrets come from the environment only; `.env`

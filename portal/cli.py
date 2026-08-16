@@ -19,6 +19,8 @@ from portal import (
     extract,
     fetch,
     impressum_audit,
+    llm,
+    llm_anthropic,
     migrate,
     ruleset,
     score,
@@ -327,6 +329,120 @@ def cmd_audit_impressum_candidates(path: Path, show_values: bool) -> int:
     return 0
 
 
+def cmd_llm_prices(reserve_kb: float | None) -> int:
+    """§7 controls 4, 10 and 11, made readable before any of them spends anything.
+
+    Prints the two declared tables — prices with their as-of dates, and the
+    per-model limits M1.50 says an interface must not generalise away — plus the
+    §7.1 arithmetic derived from them. It touches no database and issues no paid
+    call, so it can be run at any time to answer "what does this tool currently
+    believe a call costs, and as of when".
+
+    `--reserve KB` performs a real §7 control 4 reservation over a page of that
+    size, which means a real `count_tokens` call and therefore a key. Without
+    one it says so rather than substituting a heuristic (M1.52).
+    """
+    print("LLM prices — dated data, asserted at import (§7 control 10, M1.52)\n")
+    header = f"  {'provider/model':28} {'mode':6} {'in $/MTok':>10} {'out $/MTok':>11}  as-of"
+    print(header)
+    for row in llm.PRICES:
+        mode = "batch" if row.batch else "live"
+        print(
+            f"  {row.provider + '/' + row.model:28} {mode:6} "
+            f"{row.input_per_mtok:10.2f} {row.output_per_mtok:11.2f}  "
+            f"{row.as_of.isoformat()}  ({row.source})"
+        )
+    print(
+        f"\n  web search: ${llm.WEB_SEARCH_PER_SEARCH_USD:.2f}/search, "
+        f"as-of {llm.WEB_SEARCH_PRICE_AS_OF.isoformat()} — "
+        "not discounted by the Batch API (§7 control 8)"
+    )
+
+    print("\nModel limits — declared, never inferred (M1.50)\n")
+    for lim in llm.LIMITS:
+        print(f"  {lim.provider}/{lim.model}  (verified {lim.verified_on.isoformat()})")
+        print(
+            f"    context {lim.context_tokens:,} tokens; max output "
+            f"{lim.max_output_tokens:,}"
+            + (
+                "  ← below the 128K ceiling every other current model has"
+                if lim.max_output_tokens < 128_000
+                else ""
+            )
+        )
+        print(
+            f"    prompt-cache minimum {lim.cache_min_tokens:,} tokens — below it the "
+            "write silently does not happen"
+        )
+        print(
+            f"    thinking: {lim.thinking.value}; output_config.effort "
+            f"{'accepted' if lim.supports_effort else 'ERRORS on this model'}"
+        )
+        print(
+            f"    structured outputs: {'yes' if lim.supports_structured_outputs else 'no'}"
+            f"; batch API: {'yes' if lim.supports_batch else 'no'}"
+            f"; web search tool: {lim.web_search_tool or 'none'}"
+        )
+
+    est = llm.estimate_cost(
+        input_tokens=30_000,
+        output_tokens=0,
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        batch=True,
+    )
+    print(
+        f"\n§7.1 check — 30k batch input tokens on {est.price.model}: "
+        f"${est.total_usd:.4f} per advancing company"
+    )
+    print(
+        "  (the spec's extraction row reads $0.015; this is arithmetic over the "
+        "table above, not a second copy of that number)"
+    )
+
+    print(
+        f"\nPrepaid balance: assumed to surface at "
+        f"{llm.ASSUMED_BALANCE_FAILURE_POINT.value}-time (M1.53). UNVERIFIED — it "
+        f"needs a live key. Both seams exist."
+    )
+
+    if reserve_kb is None:
+        return 0
+
+    print(f"\n§7 control 4 reservation over a {reserve_kb:g} KB page:")
+    provider = llm_anthropic.AnthropicProvider()
+    # A page of the given size, capped as §5.5b caps every real input at 60 KB.
+    body = "Impressum. " * int(reserve_kb * 1024 / 11)
+    request = llm.BatchRequest(
+        custom_id="reservation-probe",
+        system="Return null for any field not present on the page.",
+        user_text=body[:61440],
+        json_schema={"type": "object", "properties": {}},
+        max_tokens=2048,
+    )
+    try:
+        estimate = llm.reserve_batch(
+            [request],
+            provider=provider.name,
+            model=provider.model,
+            count_tokens=provider.token_counter(),
+        )
+    except llm_anthropic.MissingKeyError as exc:
+        print(f"  cannot measure: {exc}")
+        print(
+            "  §7 control 4 takes its input from count_tokens, which is a network "
+            "call. There is no offline substitute and a heuristic is refused "
+            "(M1.52) — a fallback estimate is how an unmeasured number enters the "
+            "ledger looking measured."
+        )
+        return 2
+    print(
+        f"  measured {estimate.input_tokens:,} input tokens + "
+        f"{estimate.output_tokens:,} reserved output = ${estimate.total_usd:.4f}"
+    )
+    return 0
+
+
 def cmd_serve(path: Path, host: str, port: int) -> int:
     """§9's page. Refuses rather than starting against a database with no schema
     — an empty table is indistinguishable from a corpus nothing has scored."""
@@ -444,6 +560,21 @@ def build_parser() -> argparse.ArgumentParser:
         "(A2 item 10). Writes nothing. Do not paste the output anywhere.",
     )
 
+    prices_parser = sub.add_parser(
+        "llm-prices",
+        help="the declared price and model-limit tables with their as-of dates; "
+        "no database, no paid call",
+    )
+    prices_parser.add_argument(
+        "--reserve",
+        type=float,
+        default=None,
+        metavar="KB",
+        help="perform a real §7 control 4 reservation over a page of this size. "
+        "Needs ANTHROPIC_API_KEY: count_tokens is a network call and there is no "
+        "offline substitute (M1.52).",
+    )
+
     fetch_parser.add_argument(
         "--max-hosts",
         type=int,
@@ -501,6 +632,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "audit-impressum-candidates":
         return cmd_audit_impressum_candidates(path, args.show_values)
+
+    if args.command == "llm-prices":
+        return cmd_llm_prices(args.reserve)
 
     raise AssertionError(f"unhandled command: {args.command}")  # pragma: no cover
 

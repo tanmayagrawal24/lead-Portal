@@ -34,7 +34,7 @@ Vertical slices. Each milestone ends with something that runs and produces visib
 | **M3** | `portal score --phase 1` — ruleset v3, blog ladder chain, `ADVANCE_THRESHOLD` | Re-running produces identical scores; every `score_component.reason` is a complete German sentence |
 | **M4** | `portal serve` — read-only list, row expansion, filters | Table renders; expanding a row shows every component with its evidence link |
 | **M5** | `portal extract-p2` (Impressum + homepage), `portal reconcile`, batch handling, substring verification | A batch survives process restart and reconciles; unverified names land with `confidence=0` and render red |
-| **M6** | AI-visibility check | **Blocked on the pricing confirmation in D4.** Do not implement until the web search rate is verified and the reservation model updated |
+| **M6** | AI-visibility check | **Unblocked 2026-08-16 (M1.54) — not started.** Both conditions are met: the per-search rate is confirmed at $10/1,000 (§5.5c) and Claude Haiku 4.5 **does** support web search, via the basic `web_search_20250305` variant. Price one thing in before scheduling: the newer `web_search_20260209` (dynamic filtering — results are filtered by code execution *before* reaching context) needs Opus 4.6+ / Sonnet 4.6+, so on Haiku raw results land in context in full and **tokens per search exceed what the per-search fee implies** |
 | **M7** | Brief export, outreach logging, `portal purge`, `portal forget` | Export fails loudly when `ai.*` basis fields are missing; `forget --domain X` leaves zero rows anywhere |
 | **M8** | `portal discover` — Places API | Field mask is exactly `displayName`, `websiteUri`, `formattedAddress`; quota cap confirmed in Cloud Console first |
 
