@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import unittest
+from pathlib import Path
 
 from portal import impressum, robots, sitemap, urls
 
@@ -387,6 +388,97 @@ class TestShardSemantics(unittest.TestCase):
             sitemap.shard_words("https://example.de/area/sitemap_index.xml.gz"),
             frozenset(),
         )
+
+
+class TestHelpersAgainstClassify(unittest.TestCase):
+    """M1.55 — do the zero-caller helpers still agree with the live path?
+
+    The external audit found `is_product_sitemap` and `is_blog_sitemap` have no
+    production callers: `classify` (M1.27) is what `fetch` and `extract` use, and
+    the helpers survive only in the assertions above. The question asked before
+    deleting them was not *should they go* but **do those assertions still agree
+    with the code that runs** — a green suite defending an obsolete definition of
+    "product sitemap" is this project's signature failure wearing a disguise.
+
+    Measured: **25 of 26 URLs agree; one disagrees.** This class is that
+    measurement, committed rather than transcribed (M1.48's standing rule), so
+    the disagreement cannot quietly widen or quietly heal while M1.55 is open.
+    Nothing is deleted until it is ruled on.
+    """
+
+    #: A single shard with no page URLs and no blog path: the closest analogue
+    #: of the name-only judgement the helpers make. `classify`'s index-level
+    #: evidence rules cannot apply to one shard, which is the point — that is
+    #: exactly the information the helpers never had either.
+    @staticmethod
+    def solo(url: str) -> str | None:
+        return sitemap.classify([(url, [])])[url]
+
+    def test_every_convention_but_one_is_subsumed_by_the_word_reading(self) -> None:
+        """Patterns 1–3 of `_PRODUCT_SITEMAP_PATTERNS` add nothing `shard_kind`
+        does not already reach: the platform filename carries the word."""
+        for url in (
+            "https://example.de/sitemap-www.example.de-product-1.xml.gz",  # Shopware
+            "https://example.de/sitemap_products_1.xml",  # Shopify
+            "https://example.de/product-sitemap1.xml",  # WooCommerce
+            "https://snocks.com/sitemap_products_1.xml?from=1932497715270&to=110104",
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/articles-0-sitemap.xml",
+        ):
+            self.assertTrue(sitemap.is_product_sitemap(url), url)
+            self.assertEqual(self.solo(url), "product", url)
+
+    def test_the_negatives_agree_everywhere(self) -> None:
+        for url in (
+            "https://example.de/sitemap-www.example.de-content-1.xml.gz",
+            "https://example.de/sitemap.xml",
+            "https://example.de/sitemap_collections_1.xml?from=1&to=2",
+            "https://example.de/sitemap.xml?products=1",
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/categories-0-sitemap.xml",
+            "https://verpackungskoenig.de/export/sitemap_0.xml.gz",
+        ):
+            self.assertFalse(sitemap.is_product_sitemap(url), url)
+            self.assertNotEqual(self.solo(url), "product", url)
+
+    def test_the_blog_verdicts_agree_everywhere(self) -> None:
+        for url in (
+            "https://www.smile-store.de/PixupSitemap/sitemap/area/blogs-0-sitemap.xml",
+            "https://example.de/magazin-sitemap.xml",
+            "https://example.de/sitemap-ratgeber-1.xml",
+        ):
+            self.assertTrue(sitemap.is_blog_sitemap(url), url)
+            self.assertEqual(self.solo(url), "blog", url)
+
+    def test_the_one_disagreement_is_the_jtl_path_form(self) -> None:
+        """**M1.55, unruled.** `/sitemap/product/N` names its contents in a
+        *parent* path segment, and `shard_words` reads only the last one — so
+        the helper says product (via the convention list) and the live path says
+        nothing at all.
+
+        Two facts decide how much this matters, and both are measured elsewhere:
+        the shape appears on **0 of 307** stored sitemap artifacts, and the four
+        JTL shops in the corpus serve `/export/sitemap_0.xml.gz` instead — an
+        undifferentiated shard that names nothing, which is a different problem
+        (§10.3). So this is §10.4's case: a pattern carried forward on
+        convention rather than observation. It is pinned here, not fixed and not
+        deleted, because the direction of the error is the safe one — `None`
+        withholds a count, and §10.3's three-state rule then reports *not
+        measurable* rather than a wrong number (M1.4).
+        """
+        url = "https://example.de/sitemap/product/1"
+        self.assertTrue(sitemap.is_product_sitemap(url))
+        self.assertIsNone(self.solo(url))
+        self.assertEqual(sitemap.shard_words(url), frozenset())
+
+    def test_the_helpers_still_have_no_production_callers(self) -> None:
+        """Pins the audit's own finding, so "dead" cannot silently become "live"
+        without someone reading this test."""
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(Path(sitemap.__file__).parent.glob("*.py"))
+            if path.name != "sitemap.py"
+        )
+        self.assertNotIn("is_product_sitemap", source)
+        self.assertNotIn("is_blog_sitemap", source)
 
 
 class TestShardClassificationByContent(unittest.TestCase):

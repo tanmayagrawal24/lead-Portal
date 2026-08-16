@@ -22,6 +22,8 @@ No Node, no Docker, no build step, no ORM, no migration framework, no LLM orches
 
 **Adding any dependency beyond this list requires asking first.** The dependency list is a design decision, not an accident.
 
+**`anthropic` and `pydantic` are live as of `f1f9732` onward (M1.58).** An external audit recommended deferring or dropping both as unused; that was accurate against an earlier tree and is wrong now. `portal/llm_anthropic.py` imports `anthropic` — lazily, inside the function that needs a key, so the module imports and tests without one — and §5.5b's `ImpressumExtract` / `HomepageExtract` are `pydantic` models. Recorded here rather than left to be re-raised.
+
 ## Build order
 
 Vertical slices. Each milestone ends with something that runs and produces visible output. Do not build ahead.
@@ -60,6 +62,7 @@ Include at least one adversarial fixture per parser: a blog index with unparseab
 - `score_component.reason` is German and letter-ready. `"Letzter Blogbeitrag: März 2023."` — not `blog_stale=true`.
 - Secrets from environment only. `.env` gitignored. Never log a key, never log a full API response containing one.
 - Type hints throughout. `ruff` for lint and format, default config.
+- **Comments are normative or historical, and it should be obvious which (M1.58).** *Normative*: what the code must do and why — a constraint a future editor would otherwise break. *Historical*: what was measured, when, on how many shops, and what the wrong answer cost. An external audit recommended periodic comment and documentation pruning; **that is refused.** The historical narrative in `fetch.py`, `extract.py`, `sitemap.py` and the migrations *is* the amendment-table discipline that has produced 58 numbered defects each carrying its measurement, and every one of the last four was found by reading a claim back against its evidence rather than by a test. Pruning it for density would delete the instrument that finds the next M1.43. The split is what makes the volume navigable; the volume itself is the asset.
 
 ## Stop and ask
 

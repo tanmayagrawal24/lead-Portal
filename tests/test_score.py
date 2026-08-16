@@ -104,6 +104,35 @@ class TestRulesetIsData(unittest.TestCase):
         upside = sum(r.upside for r in ruleset.RULES if r.phase2_reachable)
         self.assertEqual(upside, 50)
 
+    def test_the_dormant_rules_are_exactly_the_ones_10_6_names(self) -> None:
+        """M1.57. §10.6 lists which rules cannot fire until Phase 2, and a prose
+        list that can drift from the thing it describes is M1.42's shape — which
+        this project does not get to write in a section about avoiding it.
+
+        So the spec's list is pinned against the ruleset here. Adding or removing
+        a Phase-2-reachable rule fails this test and names §10.6 as the thing to
+        update, which is the whole point: the third re-discovery of "is this dead
+        code?" (M1.21, B7, the external audit) is meant to be the last."""
+        self.assertEqual(
+            {r.id for r in ruleset.RULES if r.phase2_reachable},
+            {
+                "qual.owner_operated",
+                "qual.own_brand",
+                "opp.ai_invisible",
+                "opp.slow_site",
+                "neg.has_agency",
+            },
+        )
+
+    def test_own_brand_is_the_only_rule_with_no_phase_1_input(self) -> None:
+        """§10.6's sharpest row, and the one the auditor read as dead code.
+        `assert_declared` carries a named exemption for exactly this rule; the
+        exemption is the documentation, and this is what stops a second rule
+        quietly acquiring it."""
+        self.assertEqual(
+            {r.id for r in ruleset.RULES if not r.reads}, {"qual.own_brand"}
+        )
+
 
 class TestAbsentInputs(unittest.TestCase):
     """The audit table, as assertions. Each of these is a rule declining to

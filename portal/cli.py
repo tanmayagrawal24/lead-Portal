@@ -1,12 +1,16 @@
 """Command-line entry point.
 
 Each pipeline stage is its own subcommand, independently re-runnable (§5).
-Only `init` exists so far; the rest arrive with their milestones.
+Built so far: `init`, `fetch`, `extract-p1`, `score`, `serve`, plus the
+inspection commands `diff-signals`, `audit-politeness`,
+`audit-impressum-candidates` and `llm-prices`. `extract-p2` and `reconcile`
+arrive with M5; `discover` with M8.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import sys
 from pathlib import Path
 
@@ -443,12 +447,71 @@ def cmd_llm_prices(reserve_kb: float | None) -> int:
     return 0
 
 
-def cmd_serve(path: Path, host: str, port: int) -> int:
+#: Hostnames that resolve to the loopback interface and are spelled, not numeric.
+#: `ipaddress` cannot answer for these, and a name lookup would make the guard
+#: depend on whatever the machine's resolver currently believes — which is the
+#: one thing a security check must not do.
+_LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost"})
+
+
+def is_loopback_bind(host: str) -> bool:
+    """Does this bind address reach only this machine?
+
+    Everything else — including the wildcards `0.0.0.0`, `::` and the empty
+    string — is treated as public. A wildcard binds every interface the machine
+    has, so it is the *most* exposed address rather than an unspecified one, and
+    reading "unspecified" as "probably fine" is how this class of mistake is
+    usually made.
+    """
+    name = host.strip().lower()
+    if not name:
+        return False
+    if name in _LOOPBACK_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(name.strip("[]")).is_loopback
+    except ValueError:
+        # A hostname we cannot classify without a resolver. Refuse rather than
+        # resolve: an unknown name is not evidence of a loopback interface.
+        return False
+
+
+def cmd_serve(path: Path, host: str, port: int, allow_public_bind: bool = False) -> int:
     """§9's page. Refuses rather than starting against a database with no schema
-    — an empty table is indistinguishable from a corpus nothing has scored."""
+    — an empty table is indistinguishable from a corpus nothing has scored.
+
+    **And refuses a non-loopback bind unless it is asked for in words.** §1 says
+    single operator, §8 says the data is third-party personal data, and until now
+    both said it only in prose: `--host 0.0.0.0` printed a warning in `--help`
+    that nobody reads at the moment they type it, and then published an
+    unauthenticated database holding other people's Impressum details. The
+    warning was text; this makes the code say it. Nothing about the default
+    changes — the guard is invisible unless you leave loopback.
+
+    Timing is deliberate: this lands **before M5**, which is when the database
+    starts holding LLM-extracted personal data rather than page bytes.
+    """
     if not path.exists():
         print(f"no database at {path} — run `portal init` first", file=sys.stderr)
         return 2
+    if not is_loopback_bind(host) and not allow_public_bind:
+        print(
+            f"refusing to bind {host!r}: that is not a loopback address, and this "
+            f"tool has no authentication of any kind (§1). Binding it publishes a "
+            f"database of third-party personal data (§8) to everything that can "
+            f"reach this host.\n"
+            f"If that is genuinely what you want, say so: "
+            f"--host {host} --allow-public-bind",
+            file=sys.stderr,
+        )
+        return 2
+    if not is_loopback_bind(host):
+        # Asked for explicitly, and still worth saying out loud on the way past.
+        print(
+            f"WARNING: binding {host} — the database is served without "
+            f"authentication to anything that can reach this host.",
+            file=sys.stderr,
+        )
     print(f"lead portal on http://{host}:{port}  (database: {path})")
     return serve_mod.serve(host, port, path)
 
@@ -535,6 +598,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument(
         "--port", type=int, default=8000, help="port (default: 8000)"
+    )
+    serve_parser.add_argument(
+        "--allow-public-bind",
+        action="store_true",
+        help="permit a non-loopback --host. Required, because binding one "
+        "publishes an unauthenticated database of third-party personal data "
+        "(§1, §8). Without this flag a non-loopback address is refused.",
     )
 
     audit_parser = sub.add_parser(
@@ -623,7 +693,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_diff_signals(path, args.from_run, args.to_run, args.stage, args.list)
 
     if args.command == "serve":
-        return cmd_serve(path, args.host, args.port)
+        return cmd_serve(path, args.host, args.port, args.allow_public_bind)
 
     if args.command == "audit-politeness":
         return cmd_audit_politeness(

@@ -70,8 +70,11 @@ off — and the states that have no other outlet are rendered as themselves:
   panel names the reason and its rationale — a block a human cannot see is a
   block that gets worked around by hand.
 
-Read-only except flag resolution. Binds to `127.0.0.1` by default and should
-stay there: §1 is a single-operator tool with no authentication.
+Read-only except flag resolution. **Binds to `127.0.0.1` and refuses to bind
+anything else** unless `--allow-public-bind` is passed explicitly (M1.56): §1 is
+a single-operator tool with no authentication, and §8's rows are third-party
+personal data. Every loopback spelling works with no flag; `0.0.0.0` and `::`
+count as public, because a wildcard binds every interface the machine has.
 
 ```bash
 portal llm-prices               # what a call costs, and as of when
