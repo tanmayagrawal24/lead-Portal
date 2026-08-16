@@ -25,6 +25,7 @@ between an absence and an ignorance:
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -46,6 +47,18 @@ class ExtractResult:
 
 @dataclass(frozen=True)
 class _Artifact:
+    """One stored document. **Provenance travels on this object, not beside it**
+    (M1.42).
+
+    `id` is here so `_write` can take the artifact a value was read off and
+    derive both `evidence_url` and `signal.artifact_id` from it. Passing a URL
+    string instead is what let `catalog.product_url_count` cite a sitemap index
+    holding none of the URLs it counted, on 8 of 8 shops in the corpus: the
+    citation was a second expression describing what the first one had done, and
+    a second expression can be wrong.
+    """
+
+    id: int
     kind: str
     url: str
     body_path: str | None
@@ -77,12 +90,12 @@ class ExtractStage:
 
     def _artifacts(self, company_id: int) -> list[_Artifact]:
         rows = self.conn.execute(
-            "SELECT kind, url, body_path, http_status FROM artifact "
+            "SELECT id, kind, url, body_path, http_status FROM artifact "
             "WHERE company_id = ? ORDER BY id",
             (company_id,),
         ).fetchall()
         return [
-            _Artifact(r["kind"], r["url"], r["body_path"], r["http_status"])
+            _Artifact(r["id"], r["kind"], r["url"], r["body_path"], r["http_status"])
             for r in rows
         ]
 
@@ -103,7 +116,7 @@ class ExtractStage:
         self,
         result: ExtractResult,
         key: str,
-        evidence_url: str,
+        source: _Artifact,
         *,
         num: float | None = None,
         text: str | None = None,
@@ -114,13 +127,21 @@ class ExtractStage:
         `ON CONFLICT ... DO NOTHING` on the uniqueness target only — never
         `INSERT OR IGNORE`, which would also swallow a CHECK violation on
         `method` and turn a typo into a signal that silently never existed.
+
+        **`source` is the artifact the value was read off, not a URL** (M1.42).
+        Both provenance columns come out of it in one expression, so
+        `evidence_url` and `artifact_id` cannot name different documents and
+        neither can name a document the value did not come from. The parameter
+        has no string form on purpose: a caller that cannot name an artifact has
+        not established where its number came from, and §1's guarantee is
+        exactly that it can.
         """
         self.conn.execute(
             """
             INSERT INTO signal
                 (company_id, run_id, key, value_num, value_text, value_date,
-                 method, evidence_url, observed_at)
-            VALUES (?,?,?,?,?,?,'deterministic',?,?)
+                 method, evidence_url, artifact_id, observed_at)
+            VALUES (?,?,?,?,?,?,'deterministic',?,?,?)
             ON CONFLICT (run_id, company_id, key, evidence_url) DO NOTHING
             """,
             (
@@ -130,7 +151,8 @@ class ExtractStage:
                 num,
                 text,
                 day.isoformat() if day else None,
-                evidence_url,
+                source.url,
+                source.id,
                 utc_now(),
             ),
         )
@@ -181,7 +203,7 @@ class ExtractStage:
             return result
 
         homepage_html = self._body(homepage)
-        self._homepage_signals(result, homepage.url, homepage_html)
+        self._homepage_signals(result, homepage, homepage_html)
 
         impressum = first("impressum")
         if impressum is not None:
@@ -189,18 +211,20 @@ class ExtractStage:
         else:
             result.notes.append("no impressum on disk — legal_form not extracted")
 
-        located = self._catalog_and_blog(
-            result, site, artifacts, homepage_html, homepage.url
-        )
-        self._blog_signals(result, artifacts, located, homepage_html, homepage.url)
-        self._product_schema(result, artifacts, homepage_html)
+        located = self._catalog_and_blog(result, site, artifacts, homepage)
+        self._blog_signals(result, artifacts, located, homepage)
+        self._product_schema(result, artifacts, homepage)
         return result
 
     # ── homepage ────────────────────────────────────────────────────────
 
-    def _homepage_signals(self, result: ExtractResult, url: str, html: str) -> None:
+    def _homepage_signals(
+        self, result: ExtractResult, page: _Artifact, html: str
+    ) -> None:
+        """Everything read off the homepage cites the homepage artifact `html`
+        came out of — `page`, not a URL reconstructed from the seeded domain."""
         if platform := parsers.detect_platform(html):
-            self._write(result, "platform.detected", url, text=platform)
+            self._write(result, "platform.detected", page, text=platform)
         else:
             # Not "no platform": Shopware 5 emits none of the §5.3 signatures
             # (M1.11), and a real SW5 shop lands here. Recorded so a missing
@@ -210,7 +234,7 @@ class ExtractStage:
             )
 
         if (length := parsers.meta_description_length(html)) is not None:
-            self._write(result, "meta.description_length", url, num=length)
+            self._write(result, "meta.description_length", page, num=length)
         # `0`, not silence, when a fetched homepage declares no alternates at
         # all (M3 audit §6). `opp.de_only` (+5) awards points for *being*
         # monolingual, and the parser returns `None` for "no hreflang links" —
@@ -223,20 +247,20 @@ class ExtractStage:
         self._write(
             result,
             "i18n.hreflang_count",
-            url,
+            page,
             num=parsers.hreflang_language_count(html) or 0,
         )
         if credit := parsers.footer_agency_credit(html, result.domain):
-            self._write(result, "agency.footer_credit", url, text=credit)
+            self._write(result, "agency.footer_credit", page, text=credit)
 
         self._write(
             result,
             "reviews.trusted_shops",
-            url,
+            page,
             num=1 if parsers.has_trusted_shops(html) else 0,
         )
         if (reviews := parsers.aggregate_review_count(html)) is not None:
-            self._write(result, "reviews.count", url, num=reviews)
+            self._write(result, "reviews.count", page, num=reviews)
 
     def _legal_form(self, result: ExtractResult, url: str, html: str) -> None:
         """A1: writes `company.legal_form`, a column rather than a signal.
@@ -262,8 +286,7 @@ class ExtractStage:
         result: ExtractResult,
         domain: str,
         artifacts: list[_Artifact],
-        homepage_html: str,
-        homepage_url: str,
+        homepage: _Artifact,
     ) -> impressum_mod.BlogLocation | None:
         """`catalog.product_url_count`, plus the blog location the count excludes.
 
@@ -271,8 +294,19 @@ class ExtractStage:
         matching any product pattern is *not* a site with no products — on JTL
         every product is a root-level slug indistinguishable from a category
         (findings §4) — so the count is left unwritten and the reason recorded.
+
+        **Every URL carries the shard it was read off, from here down** (M1.42).
+        The count used to be evidenced by `sitemaps[0]` — the first sitemap row
+        by id, which on all 8 shops with a count was the *index*: a document
+        listing other sitemaps and no pages at all. So the citation named a page
+        in which the number could not be checked, and on `smile-store.de` it
+        named `/shop/en/sitemap.xml`, the English subshop, while the 194 came
+        from the primary-locale shard *after* M1.25's filter dropped `/shop/en/`
+        as a translation. Pairing each URL with its shard makes the citation
+        fall out of the same comprehension as the value.
         """
         sitemaps = [a for a in artifacts if a.kind == "sitemap" and a.body_path]
+        shard_artifact = {a.url: a for a in sitemaps}
         shards = [
             (
                 artifact.url,
@@ -283,15 +317,18 @@ class ExtractStage:
         page_urls = [url for _shard, pages in shards for url in pages]
 
         located = impressum_mod.locate_blog(
-            page_urls, homepage_html, homepage_url, domain
+            page_urls, self._body(homepage), homepage.url, domain
         )
         blog_path = located.path if located else None
         # M1.27: a shard named `articles` is decided on its contents and its
         # siblings, so classification waits until every shard has been read and
         # the blog path is known.
         kinds = sitemap.classify(shards, blog_path)
-        product_sitemap_urls = [
-            url for shard, pages in shards if kinds[shard] == "product" for url in pages
+        product_sitemap_pairs = [
+            (shard, url)
+            for shard, pages in shards
+            if kinds[shard] == "product"
+            for url in pages
         ]
         # A shard the shop itself labels as content is not catalogue, whatever
         # its URLs look like. It stays in `page_urls` regardless: dropping it
@@ -299,25 +336,36 @@ class ExtractStage:
         # turned `snocks.com` — 107 blog URLs, a post from July — into
         # `blog_exists = 0`, which is `opp.no_blog`'s +25 against a shop that
         # publishes weekly.
-        catalogue_urls = [
-            url for shard, pages in shards if kinds[shard] != "blog" for url in pages
+        catalogue_pairs = [
+            (shard, url)
+            for shard, pages in shards
+            if kinds[shard] != "blog"
+            for url in pages
         ]
 
-        evidence = sitemaps[0].url if sitemaps else ""
+        homepage_html = self._body(homepage)
         locales = parsers.hreflang_prefixes(homepage_html, domain)
 
-        def candidates(urls: list[str], require_pattern: bool) -> set[str]:
-            """Filtered to one locale, because a translation is not a product."""
+        def candidates(
+            pairs: list[tuple[str, str]], require_pattern: bool
+        ) -> dict[str, str]:
+            """Surviving URLs, each mapped to the shard it was read off.
+
+            A dict rather than a set because the count and its citation must
+            come out of the same filter: `len()` is the number and the values
+            are where the number is verifiable. Filtered to one locale, because
+            a translation is not a product.
+            """
             found = {
-                url
-                for url in urls
+                url: shard
+                for shard, url in pairs
                 if sampling.is_product_candidate(
                     url, domain, blog_path=blog_path, require_pattern=require_pattern
                 )
             }
             primary = {
-                url
-                for url in found
+                url: shard
+                for url, shard in found.items()
                 if not sampling.is_secondary_locale(
                     url, locales.primary, locales.secondary
                 )
@@ -342,12 +390,12 @@ class ExtractStage:
         # made `smile-store.de` report 6 products against a catalogue of 194:
         # the shard holding all of them sat unread in the index while a
         # `/detail/` pattern scraped six stragglers off the rest of the site.
-        if counted := candidates(product_sitemap_urls, require_pattern=False):
+        if counted := candidates(product_sitemap_pairs, require_pattern=False):
             # Tier 1's own membership is the evidence, so the path need not
             # match a pattern — SEO-rewritten catalogues would otherwise count
             # as empty.
             tier = "product_sitemap"
-        elif counted := candidates(catalogue_urls, require_pattern=True):
+        elif counted := candidates(catalogue_pairs, require_pattern=True):
             tier = "sitemap_path_pattern"
         else:
             tier = ""
@@ -356,10 +404,19 @@ class ExtractStage:
             # The tier travels with the number: a count of 6 from a path
             # pattern and a count of 6 from a product sitemap are different
             # claims, and only one of them is the shop's own statement.
+            #
+            # And so does the shard. One `evidence_url` cannot name a set, so it
+            # names the shard that contributed the most of the counted URLs —
+            # the document where the largest checkable part of the number
+            # actually is. On all 8 shops in the corpus the locale filter leaves
+            # a single contributing shard, so "most" is "all"; the tie-break is
+            # the code-point minimum, for the same reason A5's is (§5.2).
+            contributed = Counter(counted.values())
+            top = min(contributed.items(), key=lambda kv: (-kv[1], kv[0]))[0]
             self._write(
                 result,
                 "catalog.product_url_count",
-                evidence,
+                shard_artifact[top],
                 num=len(counted),
                 text=tier,
             )
@@ -370,11 +427,25 @@ class ExtractStage:
             return located
 
         # §10.3: the instrument does not apply. Not a zero, and not silence.
+        #
+        # The citation is the largest shard searched, and the reason states the
+        # extent — because this claim is about *every* shard and one URL cannot
+        # name them all. Citing the index instead, as this did, pointed the
+        # reader at a document with no URLs in it at all: nothing to see, and no
+        # way to tell whether 12 URLs were searched or 12,000.
+        searched, _pages = min(shards, key=lambda shard: (-len(shard[1]), shard[0]))
         reason = (
-            "no product sitemap and no URL matching a product pattern; on this "
+            "no product sitemap and no URL matching a product pattern in "
+            f"{len(page_urls)} URLs across {len(shards)} sitemap shards; on this "
             "platform products are root-level slugs indistinguishable from categories"
         )
-        self._write(result, "catalog.not_measurable", evidence, num=1, text=reason)
+        self._write(
+            result,
+            "catalog.not_measurable",
+            shard_artifact[searched],
+            num=1,
+            text=reason,
+        )
         self._raise_review_flag(result, "catalog_not_measurable")
         result.notes.append(
             f"catalog not measurable: {len(page_urls)} URLs, none identifiable as products"
@@ -388,8 +459,7 @@ class ExtractStage:
         result: ExtractResult,
         artifacts: list[_Artifact],
         located: impressum_mod.BlogLocation | None,
-        homepage_html: str,
-        homepage_url: str,
+        homepage: _Artifact,
     ) -> None:
         index = next(
             (
@@ -400,11 +470,11 @@ class ExtractStage:
             None,
         )
         if index is None:
-            self._no_blog_index(result, artifacts, located, homepage_html, homepage_url)
+            self._no_blog_index(result, artifacts, located, homepage)
             return
 
         html = self._body(index)
-        self._write(result, "content.blog_exists", index.url, num=1)
+        self._write(result, "content.blog_exists", index, num=1)
         read = parsers.read_blog_index(
             html,
             located.path if located else None,
@@ -431,17 +501,20 @@ class ExtractStage:
         # article is four months *newer* than anything the index dates. Neither
         # source is reliably the newest post, so both are lower bounds, and the
         # later of two lower bounds is the better one and never the worse.
-        dated: list[tuple[date, str]] = []
+        # The artifact travels in the tuple, not its URL: `max` then hands back
+        # the document the winning date was parsed out of, and the citation is
+        # the same object the value came from rather than a second lookup.
+        dated: list[tuple[date, _Artifact]] = []
         index_dated = article_dated = False
         if read.newest_post is not None:
-            dated.append((read.newest_post, index.url))
+            dated.append((read.newest_post, index))
             index_dated = True
         article_html = self._body(article) if article is not None else ""
         if article is not None:
             if (
                 published := parsers.newest_post_date(article_html, self.today)
             ) is not None:
-                dated.append((published, article.url))
+                dated.append((published, article))
                 article_dated = True
             # A6: the markup lives on the post too. `Article`/`BlogPosting` is
             # never on the listing — `schema.article_present` was `0` on every
@@ -450,7 +523,7 @@ class ExtractStage:
             self._write(
                 result,
                 "schema.article_present",
-                article.url,
+                article,
                 num=1 if parsers.has_article_schema(article_html) else 0,
             )
         else:
@@ -461,7 +534,10 @@ class ExtractStage:
             )
 
         if dated:
-            newest, evidence = max(dated)
+            # Keyed on the date alone: `_Artifact` is not orderable, and on a
+            # tie the index — appended first — is the citation to keep, since a
+            # tie is precisely the case where its maximum does bound the value.
+            newest, evidence = max(dated, key=lambda pair: pair[0])
             self._write(result, "content.blog_last_post", evidence, day=newest)
             # The interim guard (§6.2). Both sources are lower bounds, but they
             # are not lower bounds of the same kind: the index's date is a
@@ -513,9 +589,7 @@ class ExtractStage:
             result.notes.append("no parseable post date on the index or the sample")
 
         if read.post_count is not None:
-            self._write(
-                result, "content.blog_post_count", index.url, num=read.post_count
-            )
+            self._write(result, "content.blog_post_count", index, num=read.post_count)
 
         # §6.3's `neg.active_content` (−25) asks for four posts in six months and
         # had no data path at all until M3 measured for one: `blog_last_post` is
@@ -530,7 +604,7 @@ class ExtractStage:
         self._write(
             result,
             "content.blog_post_dates",
-            index.url,
+            index,
             num=len(read.post_dates),
             text=",".join(day.isoformat() for day in read.post_dates),
         )
@@ -540,8 +614,7 @@ class ExtractStage:
         result: ExtractResult,
         artifacts: list[_Artifact],
         located: impressum_mod.BlogLocation | None,
-        homepage_html: str,
-        homepage_url: str,
+        homepage: _Artifact,
     ) -> None:
         """No blog index on disk. **What may be claimed about that is M1.14.**
 
@@ -571,13 +644,22 @@ class ExtractStage:
         subdomain is undetectable by construction, so an exhaustive search is
         always "we looked everywhere we can look" and never "it is not there".
         The `1` licenses the award; it does not certify the absence.
+
+        **All three signals cite the homepage** (M1.42). They used to cite the
+        empty string, which `docs/implementation-brief.md` forbids outright, and
+        the homepage is not a placeholder standing in for a missing citation: it
+        is the document the search actually read. Both §5.3 instruments run off
+        it — `impressum.links` parses its anchors, and the sitemap inventory is
+        the walk it seeded. A person reading a `no blog` verdict needs to see
+        the page we looked at, and that page is this one.
         """
+        homepage_html = self._body(homepage)
         if located is not None:
             where = located.url or located.path
             self._write(
                 result,
                 "content.blog_search_exhaustive",
-                "",
+                homepage,
                 num=0,
                 text=(
                     f"transient: blog located by {located.basis} at {where}, "
@@ -590,10 +672,10 @@ class ExtractStage:
             )
             return
 
-        self._write(result, "content.blog_exists", "", num=0)
+        self._write(result, "content.blog_exists", homepage, num=0)
 
         enumerated = any(a.kind == "sitemap" and a.body_path for a in artifacts)
-        parsed = bool(impressum_mod.links(homepage_html, homepage_url))
+        parsed = bool(impressum_mod.links(homepage_html, homepage.url))
         missing = [
             what
             for what, ok in (("sitemap", enumerated), ("homepage links", parsed))
@@ -603,7 +685,7 @@ class ExtractStage:
             self._write(
                 result,
                 "content.blog_search_exhaustive",
-                "",
+                homepage,
                 num=0,
                 text="limit: no " + " and no ".join(missing),
             )
@@ -615,7 +697,7 @@ class ExtractStage:
             self._write(
                 result,
                 "content.blog_search_exhaustive",
-                "",
+                homepage,
                 num=1,
                 text="sitemap enumerated and homepage links parsed",
             )
@@ -623,13 +705,21 @@ class ExtractStage:
     # ── product schema (A5.5/A5.6) ──────────────────────────────────────
 
     def _product_schema(
-        self, result: ExtractResult, artifacts: list[_Artifact], homepage_html: str
+        self, result: ExtractResult, artifacts: list[_Artifact], homepage: _Artifact
     ) -> None:
         """Written **only** from a product page fetched with HTTP 200.
 
         The guard is the whole point: absent the page, `opp.no_product_schema`
         must fire in neither direction. A `0` here against a shop whose product
         pages were never retrieved is worth +10 to it, wrongly.
+
+        **The citation follows whichever page decided the value** (M1.42). Two
+        pages are read and either can produce the `1`, so citing the product
+        page unconditionally would let a `1` decided by the homepage send a
+        reader to a page that does not contain the markup. It has not happened
+        in the corpus — on all 9 shops with the signal the product page carries
+        it and no homepage does — but `opp.no_product_schema` is +10, and a
+        latent desync is the one M1.40 was.
         """
         sample = next(
             (
@@ -644,12 +734,21 @@ class ExtractStage:
                 "no product page fetched — schema.product_present stays unwritten (A5.5)"
             )
             return
-        html = self._body(sample)
-        present = parsers.has_product_schema(html) or parsers.has_product_schema(
-            homepage_html
-        )
+        if parsers.has_product_schema(self._body(sample)):
+            found: _Artifact | None = sample
+        elif parsers.has_product_schema(self._body(homepage)):
+            found = homepage
+            result.notes.append(
+                "Product markup is on the homepage, not on the sampled product "
+                f"page — schema.product_present cites {path_of(homepage.url)}"
+            )
+        else:
+            found = None
         self._write(
-            result, "schema.product_present", sample.url, num=1 if present else 0
+            result,
+            "schema.product_present",
+            found or sample,
+            num=1 if found else 0,
         )
 
 

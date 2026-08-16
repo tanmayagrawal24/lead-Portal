@@ -787,5 +787,183 @@ class TestStageContract(ExtractTestCase):
                 self.assertIsNotNone(row["evidence_url"])
 
 
+#: Sitemap index → two shards, one of which holds the products. The index is the
+#: **first** artifact row, so it is what `sitemaps[0]` used to cite.
+SITEMAP_INDEX = """<?xml version="1.0"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://muster.de/sitemap_pages_1.xml</loc></sitemap>
+  <sitemap><loc>https://muster.de/sitemap_products_1.xml</loc></sitemap>
+</sitemapindex>"""
+
+SITEMAP_PAGES = """<?xml version="1.0"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://muster.de/ueber-uns</loc></url>
+</urlset>"""
+
+SITEMAP_PRODUCTS = """<?xml version="1.0"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://muster.de/products/alpha</loc></url>
+  <url><loc>https://muster.de/products/beta</loc></url>
+  <url><loc>https://muster.de/products/gamma</loc></url>
+</urlset>"""
+
+
+class TestSignalProvenance(ExtractTestCase):
+    """M1.42. **A provenance field must be produced by the code path that
+    produced the value it describes**, which is the general form of M1.40.
+
+    `content.blog_last_post_basis` was a claim *about* a value, computed by a
+    different expression than the value, so the two could disagree — and did, on
+    3 of 13. The audit found the same shape in `evidence_url`, where it matters
+    more: §1's guarantee is that every number traces to a stored artifact and
+    §8's export asserts on it, so a desynced citation puts the wrong page in a
+    letter as proof.
+    """
+
+    def _index_and_shards(self, company_id: int) -> None:
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP_INDEX
+        )
+        self.artifact(
+            company_id,
+            "sitemap",
+            "https://muster.de/sitemap_pages_1.xml",
+            SITEMAP_PAGES,
+        )
+        self.artifact(
+            company_id,
+            "sitemap",
+            "https://muster.de/sitemap_products_1.xml",
+            SITEMAP_PRODUCTS,
+        )
+
+    def test_every_signal_names_a_stored_artifact_of_this_company(self) -> None:
+        """The invariant, stated once. No empty string, no synthesised URL, and
+        `artifact_id` agreeing with `evidence_url` on every row."""
+        company_id = self.company()
+        self._index_and_shards(company_id)
+        self.artifact(
+            company_id, "blog_index", "https://muster.de/blogs/news", BLOG_INDEX
+        )
+        self.artifact(
+            company_id, "product_page", "https://muster.de/products/alpha", PRODUCT_PAGE
+        )
+        self.extract(company_id)
+
+        rows = self.conn.execute(
+            "SELECT s.key, s.evidence_url, s.artifact_id, a.url AS artifact_url "
+            "FROM signal s LEFT JOIN artifact a "
+            "  ON a.id = s.artifact_id AND a.company_id = s.company_id "
+            "WHERE s.company_id = ?",
+            (company_id,),
+        ).fetchall()
+        self.assertTrue(rows)
+        for row in rows:
+            with self.subTest(signal=row["key"]):
+                self.assertNotEqual(row["evidence_url"], "")
+                self.assertIsNotNone(row["artifact_id"])
+                # The two columns are one fact. They can only disagree if they
+                # were computed by two expressions, which is the bug.
+                self.assertEqual(row["artifact_url"], row["evidence_url"])
+
+    def test_catalogue_count_cites_the_shard_it_counted_not_the_index(self) -> None:
+        """The corpus failure: 8 of 8 shops cited a document holding **zero** of
+        the URLs counted, because the citation was `sitemaps[0]` — the index."""
+        company_id = self.company()
+        self._index_and_shards(company_id)
+        self.extract(company_id)
+
+        row = self.signals(company_id)["catalog.product_url_count"]
+        self.assertEqual(row["value_num"], 3)
+        self.assertEqual(
+            row["evidence_url"], "https://muster.de/sitemap_products_1.xml"
+        )
+        # And not merely "some shard": the cited document must actually contain
+        # the URLs. That is the property the old citation failed.
+        body = (self.artifacts / "muster.de").glob("sitemap-*.xml")
+        cited = next(
+            path for path in body if "products/gamma" in path.read_text("utf-8")
+        )
+        self.assertIn("products/gamma", cited.read_text("utf-8"))
+
+    def test_not_measurable_cites_the_largest_shard_searched(self) -> None:
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP_INDEX
+        )
+        self.artifact(
+            company_id,
+            "sitemap",
+            "https://muster.de/sitemap_pages_1.xml",
+            SITEMAP_ROOT_SLUGS,
+        )
+        self.extract(company_id)
+
+        row = self.signals(company_id)["catalog.not_measurable"]
+        self.assertEqual(row["evidence_url"], "https://muster.de/sitemap_pages_1.xml")
+        # The claim is about every shard, so the extent is recorded with it —
+        # citing the index said nothing about whether 3 URLs were searched or
+        # 3,000.
+        self.assertIn("3 URLs across 2 sitemap shards", row["value_text"])
+
+    def test_blog_absence_signals_cite_the_homepage_not_an_empty_string(self) -> None:
+        """370 rows carried `evidence_url = ''`, which the implementation brief
+        forbids. For the blog-absence signals there was always a real citation
+        available: both §5.3 instruments read the homepage."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id,
+            "sitemap",
+            "https://muster.de/sitemap_pages_1.xml",
+            SITEMAP_PAGES,
+        )
+        self.extract(company_id)
+
+        signals = self.signals(company_id)
+        for key in ("content.blog_exists", "content.blog_search_exhaustive"):
+            with self.subTest(signal=key):
+                self.assertEqual(signals[key]["evidence_url"], "https://muster.de/")
+                self.assertIsNotNone(signals[key]["artifact_id"])
+        self.assertEqual(signals["content.blog_exists"]["value_num"], 0)
+
+    def test_product_schema_cites_the_page_that_carries_the_markup(self) -> None:
+        """Latent in the corpus, fatal in a letter: the value is decided by
+        either of two pages and the citation followed only one of them."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", PRODUCT_PAGE)
+        self.artifact(
+            company_id,
+            "product_page",
+            "https://muster.de/products/alpha",
+            "<html><body>kein Markup</body></html>",
+        )
+        result = self.extract(company_id)
+
+        row = self.signals(company_id)["schema.product_present"]
+        self.assertEqual(row["value_num"], 1)
+        self.assertEqual(row["evidence_url"], "https://muster.de/")
+        self.assertTrue(any("on the homepage" in note for note in result.notes))
+
+    def test_absent_markup_still_cites_the_product_page(self) -> None:
+        """A `0` is a statement about the sampled product page (A5.5), so it
+        cites that page even though the homepage was read too."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id,
+            "product_page",
+            "https://muster.de/products/alpha",
+            "<html><body>kein Markup</body></html>",
+        )
+        self.extract(company_id)
+
+        row = self.signals(company_id)["schema.product_present"]
+        self.assertEqual(row["value_num"], 0)
+        self.assertEqual(row["evidence_url"], "https://muster.de/products/alpha")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from portal import db, fetch, migrate, net
+from portal import db, fetch, migrate, net, sitemap
 from portal.artifacts import ArtifactStore
 from portal.net import Fetcher, HostRateLimiter
 from tests import shopfixtures
@@ -933,6 +933,14 @@ class TestProductSampleSelection(FetchTestCase):
             self.assertNotIn(fragment, result.product_sample)
 
     def test_the_choice_is_recorded_as_a_signal_with_real_evidence(self) -> None:
+        """ "Real evidence" means a stored document that **lists the chosen URL**
+        (M1.42), not a string beginning `http`.
+
+        The weaker assertion is what this test used to make, and it passed for
+        as long as the evidence was `f"{base}/sitemap.xml"` — a URL that on 2 of
+        13 real shops was never fetched, and on 2 more named the seeded host
+        while the shop served from `www.` or another TLD entirely.
+        """
         server = self.serve(shopfixtures.shopware_shop)
         result = self.run_fetch(server)
 
@@ -940,7 +948,15 @@ class TestProductSampleSelection(FetchTestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["value_text"], result.product_sample)
         self.assertEqual(row["method"], "deterministic")
-        self.assertTrue(row["evidence_url"].startswith("http"))
+
+        cited = self.conn.execute(
+            "SELECT url, body_path FROM artifact WHERE id = ?", (row["artifact_id"],)
+        ).fetchone()
+        self.assertIsNotNone(cited, "evidence names no artifact row")
+        self.assertEqual(cited["url"], row["evidence_url"])
+        body = (self.artifacts / cited["body_path"]).read_bytes()
+        _children, listed = sitemap.parse(body, cited["url"])
+        self.assertIn(result.product_sample, listed)
 
     def test_zero_candidates_fetches_no_product_page_and_writes_no_signal(self) -> None:
         """§5.2/A5.5: never a 0 — the absence of the signal is the point."""

@@ -208,20 +208,26 @@ class FetchStage:
         return moved_to
 
     def _write_sample_signal(
-        self, company_id: int, url: str, evidence_url: str, key: str
+        self, company_id: int, url: str, source: StoredArtifact, key: str
     ) -> None:
         """A sample URL, recorded because it is a *fetch-time decision*.
 
         Two keys use this: `catalog.product_sample_url` (A5) and
         `content.blog_sample_url` (A6). Both are unscored and both exist so the
         evidence behind a scored signal is auditable rather than inferred.
+
+        `source` is the stored document the candidate was **listed in**, not a
+        URL (M1.42) — the same discipline `extract._write` now holds, and for
+        the same reason: `evidence_url` and `artifact_id` come out of one object
+        and so cannot name two different pages, or a page that was never stored.
         """
         with self._db_lock:
             self.conn.execute(
                 """
                 INSERT INTO signal
-                    (company_id, run_id, key, value_text, method, evidence_url, observed_at)
-                VALUES (?,?,?,?,?,?,?)
+                    (company_id, run_id, key, value_text, method, evidence_url,
+                     artifact_id, observed_at)
+                VALUES (?,?,?,?,?,?,?,?)
                 ON CONFLICT (run_id, company_id, key, evidence_url) DO NOTHING
                 """,
                 (
@@ -230,7 +236,8 @@ class FetchStage:
                     key,
                     url,
                     "deterministic",
-                    evidence_url,
+                    source.url,
+                    source.artifact_id,
                     utc_now(),
                 ),
             )
@@ -409,6 +416,13 @@ class FetchStage:
             rules = policy_for(url)
             return authority_of(url) not in unfetchable and rules.allows(url)
 
+        #: Every document this company yielded, by the URL asked for **and** the
+        #: URL it landed on. `_write_sample_signal` resolves its citation
+        #: through here rather than assembling one, so a sample's provenance
+        #: names a row in `artifact` and not a string that resembles one
+        #: (M1.42).
+        stored: dict[str, StoredArtifact] = {}
+
         def get(
             kind: str, url: str, accept: Callable[[Response], str | None] | None = None
         ) -> Response | None:
@@ -420,14 +434,21 @@ class FetchStage:
             recorded, but `artifact` is the interface M2 reads by kind, so a
             homepage must not sit in it as an `impressum`.
             """
+
+            def keep(response: Response) -> StoredArtifact:
+                record = self._record(company_id, domain, kind, response)
+                result.artifacts.append(record)
+                stored[url] = record
+                stored[record.url] = record
+                return record
+
             if not allowed(url):
-                skipped = Response(url=url, error=robots_mod.disallowed_reason(url))
-                result.artifacts.append(self._record(company_id, domain, kind, skipped))
+                keep(Response(url=url, error=robots_mod.disallowed_reason(url)))
                 return None
             response = self.fetcher.get(url, hop_allowed=hop_allowed)
             if response.ok and accept is not None and (why := accept(response)):
                 response = Response(url=url, status=response.status, error=why)
-            result.artifacts.append(self._record(company_id, domain, kind, response))
+            keep(response)
             return response
 
         # 2. homepage.
@@ -451,6 +472,24 @@ class FetchStage:
         # 3. sitemaps, expanding indexes.
         shards = self._walk_sitemaps(site, base, policy, get)
         page_urls = [url for _shard, pages in shards for url in pages]
+
+        # Which document each candidate URL was listed in, built by the same
+        # walk that builds the candidate lists (M1.42). A5 and A6 choose from
+        # flattened lists, and flattening used to throw the source away — so
+        # `catalog.product_sample_url` cited `f"{base}/sitemap.xml"`, a string
+        # that on `smile-store.de` and `zecplus.de` names no artifact at all,
+        # and on `doonails.de` named the seeded host while the shop serves from
+        # `www.doonails.com`. That is M1.18's blinding in a provenance field.
+        #
+        # One map serves both samplers, and `setdefault` is what makes that
+        # sound rather than convenient: sitemap URLs are inserted first, and
+        # each sampler's homepage/index tier is reached **only** when no sitemap
+        # URL passed the same candidacy filter — so a URL resolved here is
+        # resolved to the list the sampler actually drew it from.
+        source_of: dict[str, str] = {}
+        for shard, pages in shards:
+            for page in pages:
+                source_of.setdefault(page, shard)
 
         # 4. Impressum, two-step.
         self._discover_impressum(company_id, site, base, homepage_html, result, get)
@@ -519,7 +558,14 @@ class FetchStage:
             result.notes.append(f"blog located by {located.basis}: {target}")
             index = get("blog_index", target, accept=not_the_homepage)
             self._sample_blog_article(
-                company_id, index, blog_sitemap_urls, page_urls, result, get
+                company_id,
+                index,
+                blog_sitemap_urls,
+                page_urls,
+                result,
+                get,
+                source_of,
+                stored,
             )
 
         # 6. one sample product page (A5).
@@ -529,10 +575,12 @@ class FetchStage:
             base,
             page_urls,
             product_sitemap_urls,
-            homepage_html,
+            homepage,
             blog_path,
             result,
             get,
+            source_of,
+            stored,
         )
         return result
 
@@ -575,6 +623,8 @@ class FetchStage:
         page_urls: list[str],
         result: CompanyResult,
         get,
+        source_of: dict[str, str],
+        stored: dict[str, StoredArtifact],
     ) -> None:
         """A6: one article under the fetched blog index.
 
@@ -597,6 +647,12 @@ class FetchStage:
         index_links = [
             url for url, _text in impressum_mod.links(index.text(), index.url)
         ]
+        # Tier 3's source. Tiers 1 and 2 read off sitemap shards and are already
+        # in `source_of`; only `index_links` is read off the index itself, so
+        # citing the index unconditionally — as this did — named the right page
+        # for one tier in three (M1.42).
+        for link in index_links:
+            source_of.setdefault(link, index.url)
         chosen, tier = sampling.choose_blog_article(
             blog_sitemap_urls, page_urls, index_links, index.url
         )
@@ -618,9 +674,15 @@ class FetchStage:
 
         result.blog_sample = chosen
         result.blog_sample_tier = tier
-        self._write_sample_signal(
-            company_id, chosen, index.url, "content.blog_sample_url"
-        )
+        if source := _cite(chosen, source_of, stored):
+            self._write_sample_signal(
+                company_id, chosen, source, "content.blog_sample_url"
+            )
+        else:
+            result.notes.append(
+                f"blog sample {chosen} has no stored source document; "
+                "content.blog_sample_url not written (M1.42)"
+            )
 
     def _discover_impressum(
         self,
@@ -679,17 +741,29 @@ class FetchStage:
         base: str,
         page_urls: list[str],
         product_sitemap_urls: list[str],
-        homepage_html: str,
+        homepage: Response | None,
         blog_path: str | None,
         result: CompanyResult,
         get,
+        source_of: dict[str, str],
+        stored: dict[str, StoredArtifact],
     ) -> None:
-        """A5, including Tier 0 reuse with its HTTP-200 fall-through."""
+        """A5, including Tier 0 reuse with its HTTP-200 fall-through.
+
+        Takes the homepage `Response` rather than its HTML, because A5's Tier 3
+        reads candidates off that page and the citation has to be the page as
+        **fetched** — `homepage_url(base)` is a reconstruction, and on
+        `doonails.de` it reconstructs `https://doonails.de/` for a shop serving
+        `https://www.doonails.com/` (M1.42).
+        """
+        homepage_html = homepage.text() if homepage is not None and homepage.ok else ""
         homepage_links = (
-            [url for url, _ in impressum_mod.links(homepage_html, homepage_url(base))]
-            if homepage_html
+            [url for url, _ in impressum_mod.links(homepage_html, homepage.url)]
+            if homepage_html and homepage is not None
             else []
         )
+        for link in homepage_links:
+            source_of.setdefault(link, homepage.url)  # type: ignore[union-attr]
 
         # Tier 0: reuse a stored sample while it still returns 200.
         dead: set[str] = set()
@@ -701,8 +775,10 @@ class FetchStage:
             if response is not None and response.ok:
                 result.product_sample = previous
                 result.product_sample_tier = "reuse"
+                # Tier 0 has no listing document: the evidence *is* the page we
+                # just re-checked, and `get` has this moment's artifact for it.
                 self._write_sample_signal(
-                    company_id, previous, previous, "catalog.product_sample_url"
+                    company_id, previous, stored[previous], "catalog.product_sample_url"
                 )
                 return
             # Discarded, per A5.1 — and excluded, or it is still the code-point
@@ -737,23 +813,29 @@ class FetchStage:
 
         result.product_sample = chosen
         result.product_sample_tier = tier
-        self._write_sample_signal(
-            company_id,
-            chosen,
-            _sample_evidence(base, tier),
-            "catalog.product_sample_url",
-        )
+        if source := _cite(chosen, source_of, stored):
+            self._write_sample_signal(
+                company_id, chosen, source, "catalog.product_sample_url"
+            )
+        else:
+            result.notes.append(
+                f"product sample {chosen} has no stored source document; "
+                "catalog.product_sample_url not written (M1.42)"
+            )
 
 
-def _sample_evidence(base: str, tier: str) -> str:
-    """`evidence_url` for `catalog.product_sample_url`: the source it was read off.
+def _cite(url: str, source_of: dict[str, str], stored: dict[str, StoredArtifact]):
+    """The stored document `url` was listed in, or `None`.
 
-    §5.2 requires a real URL here, never a synthesised one — so this names the
-    document the candidate list came from, not the product page itself.
+    §5.2 requires a real URL here and never a synthesised one. The function this
+    replaced returned `f"{base}/sitemap.xml"` under a docstring saying exactly
+    that, and two of thirteen shops cited a sitemap that was never fetched.
+    Resolving through `stored` makes the requirement structural: a citation that
+    is not a row in `artifact` cannot be produced, and where none exists the
+    caller writes no signal rather than a plausible-looking string.
     """
-    if tier == "homepage_links":
-        return homepage_url(base)
-    return f"{base}/sitemap.xml"
+    source = source_of.get(url)
+    return stored.get(source) if source else None
 
 
 def run(
