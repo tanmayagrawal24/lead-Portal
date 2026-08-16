@@ -298,16 +298,55 @@ M1.42 requires the signal to cite the artifact the value was read from. So
 extract-p2 must **state which snapshot it sends** rather than letting a
 `LIMIT 1` decide.
 
-**Proposed:** the newest 200-with-body artifact of that kind, by `artifact.id`.
-Rationale: `id` is monotonic, so it is the most recent successful fetch; the
+**Proposed:** the newest 200-with-body artifact of that kind, by `artifact.id` —
+`id` is monotonic, so it is the most recent successful fetch, and the
 content-hash short-circuit (§7 control 6) then means an unchanged page is never
-re-sent. Where two URLs exist, the newest still wins — the alternative, preferring
-a particular probe path, would re-open §5.2's ordering for no measured gain.
+re-sent. Where two URLs exist the newest still wins; preferring a particular
+probe path would re-open §5.2's ordering for no measured gain.
 
-I found this while measuring §5 above: parsing the arbitrary `GROUP BY` pick
-versus the newest artifact gave different results on four of the twelve pages
-(HRB 6→4, Amtsgericht 4→2, USt-IdNr 12→10, e-mail 12→10). Which snapshot is read
-changes the answer, so the choice has to be written down.
+That the choice matters at all was measurable: parsing an arbitrary snapshot
+versus the newest gave different results on four of the twelve pages (HRB 6→4,
+Amtsgericht 4→2, USt-IdNr shape 12→10, e-mail shape 12→10).
+
+### And "newest" alone is not sufficient — the corpus has one poisoned row
+
+Checking the recommendation against the data rather than asserting it:
+
+`snocks.com` artifact **265** is stored as `kind='impressum'`, HTTP 200, with a
+body — and its `content_hash` is byte-identical to homepage artifact 82. It is
+the homepage. Its URL is `https://snocks.com/#gbaid979323`, which is M1.17's
+worked example verbatim: the real Impressum is robots-disallowed, probing ran,
+`/imprint` soft-redirected to the front page, and it was filed as the Impressum.
+
+**The guard is correct today** — `path_of('https://snocks.com/#gbaid979323')`
+returns `/` and `not_the_homepage` rejects it. The row was written by run 2 on
+2026-08-15T11:57:40Z, before the fix existed. M1.17 records the bug and the fix;
+**nobody recorded that the row it created is still in the database**, and it is
+the highest `artifact.id` of kind `impressum` for that company.
+
+So the recommendation as first written selects, for `snocks.com`, *the homepage,
+sent to the LLM as an Impressum, to be read for a legal name and directors*. The
+system prompt's "if the page is not an Impressum, return all nulls" is the
+defence, and substring verification is the backstop — but a name in the homepage
+footer would verify, because it is genuinely on the page that was sent. The
+guard would be passing the wrong page rather than catching a hallucination.
+
+Blast radius, measured across every artifact of every kind: **exactly one row.**
+No other non-homepage artifact in the corpus shares a homepage's content hash.
+
+**Revised proposal, two parts:**
+
+1. **Selection excludes any artifact whose `content_hash` matches a `homepage`
+   artifact of the same company.** A structural check, not a URL heuristic — it
+   catches a mis-filed page however it was mis-filed, and it costs one join.
+2. **A one-off repair** of artifact 265 as part of M5, since the row will
+   otherwise keep being the newest Impressum for that company forever. Deleting
+   it is safe: the body is a duplicate of a homepage artifact that still exists,
+   and artifact 171 is a real Impressum for the same company.
+
+This is the M1.42 argument at the level of *which document*, rather than *which
+citation*: it does not matter that the signal will faithfully name artifact 265
+if artifact 265 is the wrong page.
 
 ---
 
@@ -390,7 +429,10 @@ pages are sent either way — so this is a correctness argument, not a cost one.
    from the signal table by `leadlist` instead.
 8. **Precedence: seed > Impressum > Places for address fields; LLM > regex for
    `legal_form`, resolved by `COALESCE` in the view** (§6).
-9. **Newest-artifact-by-id as the extraction input** (§7).
+9. **Newest-artifact-by-id as the extraction input, excluding any artifact whose
+   content hash matches that company's homepage** (§7) — plus the one-off repair
+   of `snocks.com` artifact 265, a pre-M1.17 row that is the homepage filed as an
+   Impressum and is currently that company's newest one.
 10. **Measure the PLZ + Ort candidate before M5** (§8). It is free, it fills two
     dead UI affordances, and it would be the second field after `legal_form` that
     Phase 1 takes off the LLM's plate. Not a blocker for the mapping above.
