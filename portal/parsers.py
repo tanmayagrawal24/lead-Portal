@@ -517,17 +517,31 @@ def _is_post_link(node: Node, blog_path: str, index_path: str | None) -> bool:
 
 def read_blog_index(
     html: str,
-    blog_path: str,
+    blog_path: str | None,
     index_path: str | None = None,
     today: date | None = None,
 ) -> BlogIndex:
-    """Post count, newest date and article schema from a blog index page."""
+    """Post count, newest date and article schema from a blog index page.
+
+    **`blog_path is None` means the posts are not countable, not that there are
+    none** (M1.14). A blog on its own host — `blog.zecplus.de` — has no path
+    prefix that separates its posts from its navigation, and "every same-host
+    link on the page" would write a post count made largely of menus. The date
+    and the schema are read anyway: both are properties of the whole document
+    and neither needs a path to find. This is the module's house rule in its
+    usual place — the parser that cannot measure returns `None`, and §6.2 reads
+    an absent `content.blog_post_count` as *not counted* rather than as *few*.
+    """
     tree = HTMLParser(html)
-    links = {
-        (node.attributes.get("href") or "").split("#")[0].split("?")[0]
-        for node in tree.css("a[href]")
-        if _is_post_link(node, blog_path, index_path)
-    }
+    links = (
+        {
+            (node.attributes.get("href") or "").split("#")[0].split("?")[0]
+            for node in tree.css("a[href]")
+            if _is_post_link(node, blog_path, index_path)
+        }
+        if blog_path
+        else set()
+    )
     return BlogIndex(
         post_count=len(links) or None,
         newest_post=newest_post_date(html, today),

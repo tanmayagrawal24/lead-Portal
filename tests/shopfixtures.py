@@ -47,6 +47,16 @@ def homepage(footer_impressum: bool = True, extra_links: str = "") -> str:
 </body></html>"""
 
 
+def homepage_without_blog_path(blog_base: str) -> str:
+    """The `zecplus.de` shape: no blog vocabulary in any path, and a nav link
+    whose *text* is `Blog` pointing at a host of its own (M1.14)."""
+    return f"""<!doctype html><html lang="de"><head><title>Muster Shop</title></head>
+<body>
+<nav><a href="{blog_base}/">Blog</a><a href="/kategorie/buersten">Bürsten</a></nav>
+<footer><a href="/impressum">Impressum</a><a href="/agb">AGB</a></footer>
+</body></html>"""
+
+
 def urlset(locations: list[str]) -> str:
     entries = "".join(f"<url><loc>{loc}</loc></url>" for loc in locations)
     return (

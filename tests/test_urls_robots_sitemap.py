@@ -561,5 +561,98 @@ class TestBlogPathDetection(unittest.TestCase):
             )
 
 
+class TestBlogAnchorDetection(unittest.TestCase):
+    """M1.14's anchor-text instrument, on the two shapes no path vocabulary
+    reaches and the four shops it must stay silent on."""
+
+    def locate(self, html: str, domain: str = "zecplus.de"):
+        return impressum.locate_blog([], html, f"https://{domain}/", domain)
+
+    def test_a_blog_on_a_subdomain_is_reached(self) -> None:
+        """`zecplus.de`. Its sitemap index lists four shards and none of them
+        mentions `blog.zecplus.de`, so the href must be taken wherever it points
+        — that is the whole reason the instrument works."""
+        located = self.locate('<a href="https://blog.zecplus.de/">Blog</a>')
+        self.assertEqual(located.url, "https://blog.zecplus.de/")
+        self.assertEqual(located.basis, "anchor_text")
+
+    def test_a_blog_on_another_host_contributes_no_path_prefix(self) -> None:
+        """`/` is the only path such a blog has, and §5.2's filter 4 would read
+        it as "every URL on this shop is blog content" and empty the catalogue."""
+        self.assertIsNone(
+            self.locate('<a href="https://blog.zecplus.de/">Blog</a>').path
+        )
+
+    def test_a_root_level_slug_is_reached_and_keeps_its_prefix(self) -> None:
+        """`lampenflut.de`. No sitemap at all and a path no pattern can tell
+        from a category — but the anchor a human clicks says `Licht-Ratgeber`."""
+        located = self.locate(
+            '<a href="/Lampenflut-Licht-Ratgeber">Licht-Ratgeber</a>', "lampenflut.de"
+        )
+        self.assertEqual(located.url, "https://lampenflut.de/Lampenflut-Licht-Ratgeber")
+        self.assertEqual(located.path, "/Lampenflut-Licht-Ratgeber")
+
+    def test_the_full_path_is_the_prefix_not_its_first_segment(self) -> None:
+        """The prefix keeps blog URLs out of the catalogue count, so a
+        `/service/ratgeber` blog must not take all of `/service` with it."""
+        located = self.locate('<a href="/service/ratgeber">Ratgeber</a>', "x.de")
+        self.assertEqual(located.path, "/service/ratgeber")
+
+    def test_the_four_true_negatives_stay_negative(self) -> None:
+        """The other four shops carrying `blog_exists = 0`. Their homepages link
+        no blog vocabulary at all, and `Newsletter` — the commonest footer link
+        in the corpus — must not match on `news`."""
+        for html in (
+            '<a href="/newsletter">Newsletter</a>',
+            '<a href="/kontakt">Kontakt</a><a href="/agb">AGB</a>',
+            '<a href="/magazinhalter-stahl">Magazinhalter Stahl</a>',
+            "",
+        ):
+            self.assertIsNone(self.locate(html, "x.de"), html)
+
+    def test_path_vocabulary_is_consulted_first(self) -> None:
+        """The order is the precision control. Anchor text's two known loose
+        matches — doonails.de's *Tipps & Tricks* → a Shopify page, ekomia.de's
+        *Ratgeber* → a tag listing — sit on shops whose blog a path already
+        finds, so running it second means neither is ever reached."""
+        located = impressum.locate_blog(
+            ["https://x.de/blogs/news"],
+            '<a href="/pages/tips-tricks">Tipps &amp; Tricks</a>',
+            "https://x.de/",
+            "x.de",
+        )
+        self.assertEqual((located.path, located.url), ("/blogs", None))
+        self.assertEqual(located.basis, "path_vocabulary")
+
+    def test_a_blog_link_to_our_own_front_page_is_navigation(self) -> None:
+        self.assertIsNone(self.locate('<a href="/">Blog</a>', "x.de"))
+
+    def test_same_site_links_outrank_foreign_ones(self) -> None:
+        """A footer `News` pointing at a press portal must not outrank the
+        shop's own magazine, however much shallower the foreign URL is."""
+        self.assertEqual(
+            impressum.find_blog_link(
+                '<a href="https://presse.fremd.de/">News</a>'
+                '<a href="/Kunden-Magazin">Magazin</a>',
+                "https://x.de/",
+                "x.de",
+            ),
+            "https://x.de/Kunden-Magazin",
+        )
+
+    def test_shallowest_then_code_point_breaks_a_tie(self) -> None:
+        """An index sits above its posts — the shape `lampenflut.de` shows, where
+        *Licht-Ratgeber* and *Mehr News …* point at the same page."""
+        self.assertEqual(
+            impressum.find_blog_link(
+                '<a href="/Ratgeber-Welt/2024/ein-post">Ratgeber</a>'
+                '<a href="/Ratgeber-Welt">Zum Ratgeber</a>',
+                "https://x.de/",
+                "x.de",
+            ),
+            "https://x.de/Ratgeber-Welt",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -206,8 +206,7 @@ class TestBlogArticleSelection(unittest.TestCase):
             blog_sitemap_urls=urls,
             sitemap_urls=[],
             index_links=[],
-            index_path="/blogs/rezepte",
-            domain="muster.de",
+            index_url="https://muster.de/blogs/rezepte",
         )
         self.assertEqual(chosen, "https://muster.de/blogs/rezepte/bbq-schweinenacken")
         self.assertEqual(tier, "blog_sitemap")
@@ -217,8 +216,7 @@ class TestBlogArticleSelection(unittest.TestCase):
             ["https://muster.de/blogs/rezepte", "https://muster.de/blogs/rezepte/"],
             [],
             [],
-            "/blogs/rezepte",
-            "muster.de",
+            "https://muster.de/blogs/rezepte",
         )
         self.assertIsNone(chosen)
 
@@ -227,8 +225,7 @@ class TestBlogArticleSelection(unittest.TestCase):
             blog_sitemap_urls=[],
             sitemap_urls=["https://muster.de/blogs/news/zweiter"],
             index_links=["https://muster.de/blogs/news/erster"],
-            index_path="/blogs/news",
-            domain="muster.de",
+            index_url="https://muster.de/blogs/news",
         )
         self.assertEqual(
             (chosen, tier),
@@ -244,8 +241,7 @@ class TestBlogArticleSelection(unittest.TestCase):
             ],
             [],
             [],
-            "/blogs/news",
-            "muster.de",
+            "https://muster.de/blogs/news",
         )
         self.assertEqual(chosen, "https://muster.de/blogs/news/Mango")
 
@@ -253,7 +249,7 @@ class TestBlogArticleSelection(unittest.TestCase):
         """A6.1: `content.blog_last_post` and `schema.article_present` then stay
         unwritten. Not a zero, not today's date."""
         chosen, tier = sampling.choose_blog_article(
-            [], [], [], "/blogs/news", "muster.de"
+            [], [], [], "https://muster.de/blogs/news"
         )
         self.assertEqual((chosen, tier), (None, "none"))
 
@@ -265,8 +261,7 @@ class TestBlogArticleSelection(unittest.TestCase):
             ],
             [],
             [],
-            "/blogs/news",
-            "muster.de",
+            "https://muster.de/blogs/news",
         )
         self.assertIsNone(chosen)
 

@@ -341,6 +341,41 @@ class FetchStage:
 
         unfetchable: dict[str, str] = {}  # authority → why we will not fetch it
 
+        def policy_for(url: str) -> robots_mod.RobotsPolicy:
+            """The rules of the authority that answers for `url`, read on first
+            sight of that authority.
+
+            Keyed on authority rather than on the politeness key: apex and www
+            share a budget but not necessarily a robots.txt, so each is asked
+            for its own (§5.2 states this as two questions with two keys). The
+            lookup is memoised, so a chain that keeps landing on one origin
+            costs one robots.txt fetch.
+
+            **Fetching here, rather than only on a redirect hop, is M1.14's
+            doing.** Until anchor text could hand this stage a URL on a host
+            nothing had visited — `blog.zecplus.de` — every request was either
+            on the seeded authority or arrived through a hop, which loaded the
+            file itself. A first request to an unvisited authority used to fall
+            back to the seeded policy, which is `zecplus.de`'s file applied to
+            somebody else's origin: the one thing §5.2 says twice not to do.
+            """
+            authority = authority_of(url)
+            if authority not in policies:
+                probe = self.fetcher.get(
+                    f"{origin_of(url)}/robots.txt", hop_allowed=RobotsExempt
+                )
+                result.artifacts.append(
+                    self._record(company_id, domain, "robots", probe)
+                )
+                policies[authority] = robots_mod.parse(
+                    probe.text() if probe.ok else None
+                )
+                refusal = self._apply_crawl_delay(url, policies[authority])
+                if refusal is not None:
+                    unfetchable[authority] = refusal
+                    result.notes.append(f"{authority} not fetched — {refusal}")
+            return policies[authority]
+
         def hop_allowed(_from_url: str, to_url: str) -> bool:
             """§5.2: "fetch and honour robots.txt before anything else" applies
             to a redirect hop too, because the hop is itself a request.
@@ -352,33 +387,14 @@ class FetchStage:
             being allowed says nothing about the `/policies/legal-notice` it
             redirects to, and it was the unchecked same-host hop that fetched
             two disallowed pages on the first crawl.
-
-            Keyed on authority rather than on the politeness key: apex and www
-            share a budget but not necessarily a robots.txt, so each is asked
-            for its own. Both the lookup and its verdict are memoised, so a
-            chain that keeps landing on one origin costs one robots.txt fetch.
             """
-            authority = authority_of(to_url)
-            if authority not in policies:
-                probe = self.fetcher.get(
-                    f"{origin_of(to_url)}/robots.txt", hop_allowed=RobotsExempt
-                )
-                result.artifacts.append(
-                    self._record(company_id, domain, "robots", probe)
-                )
-                policies[authority] = robots_mod.parse(
-                    probe.text() if probe.ok else None
-                )
-                refusal = self._apply_crawl_delay(to_url, policies[authority])
-                if refusal is not None:
-                    unfetchable[authority] = refusal
-                    result.notes.append(f"redirect not followed — {refusal}")
-            if authority in unfetchable:
+            rules = policy_for(to_url)
+            if authority_of(to_url) in unfetchable:
                 return False
-            if policies[authority].allows(to_url):
+            if rules.allows(to_url):
                 return True
             result.notes.append(
-                f"redirect refused by robots.txt on {authority}: {to_url}"
+                f"redirect refused by robots.txt on {authority_of(to_url)}: {to_url}"
             )
             return False
 
@@ -388,11 +404,10 @@ class FetchStage:
             After a move is adopted (M1.18) every later request goes to a host
             the seeded robots.txt says nothing about; checking `lampenflut.de`
             URLs against `germanelectronic.de`'s rules would be applying the
-            wrong file. `policies` already holds the target's own rules — the
-            redirect hop fetched them — so this reads them rather than the
-            policy that happened to come first.
+            wrong file.
             """
-            return policies.get(authority_of(url), policy).allows(url)
+            rules = policy_for(url)
+            return authority_of(url) not in unfetchable and rules.allows(url)
 
         def get(
             kind: str, url: str, accept: Callable[[Response], str | None] | None = None
@@ -440,10 +455,11 @@ class FetchStage:
         # 4. Impressum, two-step.
         self._discover_impressum(company_id, site, base, homepage_html, result, get)
 
-        # 5. blog index, if a blog path is found — then one article under it (A6).
-        blog_path = impressum_mod.find_blog_path(
+        # 5. blog index, if a blog is located — then one article under it (A6).
+        located = impressum_mod.locate_blog(
             page_urls, homepage_html, homepage_url(base), site
         )
+        blog_path = located.path if located else None
         # M1.27: classification needs the blog path, so it happens here rather
         # than during the walk.
         kinds = sitemap.classify(shards, blog_path)
@@ -454,23 +470,57 @@ class FetchStage:
             url for shard, pages in shards if kinds[shard] == "blog" for url in pages
         ]
 
-        if blog_path:
-            # An observed URL, not a synthesised one (M1.15): the bare path
-            # prefix 404'd on all seven shops that have a blog.
-            observed = impressum_mod.find_blog_index_url(
-                blog_path, page_urls, homepage_html, homepage_url(base), site
-            )
-            if observed is None:
-                result.notes.append(f"blog path {blog_path} found but no URL under it")
-            index = get(
-                "blog_index",
-                observed or impressum_mod.blog_index_url(base, blog_path),
-            )
-            self._sample_blog_article(
-                company_id, site, index, blog_sitemap_urls, page_urls, result, get
-            )
+        def not_the_homepage(response: Response) -> str | None:
+            """A blog-index request that came back on the shop's own front page
+            is not a blog index — M1.17's rule, in the place M1.14 made it worth
+            asking.
+
+            Taking an anchor's href wherever it points turns *where we landed*
+            into a real question, and the answer is host-aware: a root path on
+            the blog's own host is `blog.zecplus.de`, the thing we went looking
+            for, while a root path on the shop's host is the homepage. Stored as
+            a blog index the second would write `content.blog_exists = 1` off
+            the homepage and then let A6 sample the catalogue for articles.
+            """
+            if host_of(response.url) == host_of(base) and not path_of(
+                response.url
+            ).strip("/"):
+                result.notes.append(
+                    f"blog index request landed on the homepage: {response.url}"
+                )
+                return f"soft_redirect_to_homepage: {response.url}"
+            return None
+
+        if located is None:
+            result.notes.append("no blog path and no blog anchor found")
         else:
-            result.notes.append("no blog path found")
+            if located.url is not None:
+                # Anchor text already names the address; there is nothing
+                # shallower to prefer, and the href is the shop's own statement
+                # of where its blog is.
+                target = located.url
+            else:
+                # An observed URL, not a synthesised one (M1.15): the bare path
+                # prefix 404'd on all seven shops that have a blog.
+                observed = impressum_mod.find_blog_index_url(
+                    located.path or "",
+                    page_urls,
+                    homepage_html,
+                    homepage_url(base),
+                    site,
+                )
+                if observed is None:
+                    result.notes.append(
+                        f"blog path {located.path} found but no URL under it"
+                    )
+                target = observed or impressum_mod.blog_index_url(
+                    base, located.path or ""
+                )
+            result.notes.append(f"blog located by {located.basis}: {target}")
+            index = get("blog_index", target, accept=not_the_homepage)
+            self._sample_blog_article(
+                company_id, index, blog_sitemap_urls, page_urls, result, get
+            )
 
         # 6. one sample product page (A5).
         self._sample_product_page(
@@ -520,7 +570,6 @@ class FetchStage:
     def _sample_blog_article(
         self,
         company_id: int,
-        domain: str,
         index: Response | None,
         blog_sitemap_urls: list[str],
         page_urls: list[str],
@@ -538,25 +587,25 @@ class FetchStage:
 
         Anchored on the index's **final** URL, because that is the page whose
         children are articles — see `sampling.is_blog_article_candidate` for why
-        the blog *path* is the wrong anchor.
+        the blog *path* is the wrong anchor, and why the anchor is the whole URL
+        rather than its path.
         """
         if index is None or not index.ok:
             result.notes.append("no blog index fetched; no article sampled (A6.1)")
             return
 
-        index_path = path_of(index.url)
         index_links = [
             url for url, _text in impressum_mod.links(index.text(), index.url)
         ]
         chosen, tier = sampling.choose_blog_article(
-            blog_sitemap_urls, page_urls, index_links, index_path, domain
+            blog_sitemap_urls, page_urls, index_links, index.url
         )
         if chosen is None:
             # A6.1: no candidate means no article, and downstream neither
             # `content.blog_last_post` nor `schema.article_present` is written.
             # Not a zero, not today's date.
             result.notes.append(
-                f"no article candidates under {index_path}; blog date stays unwritten"
+                f"no article candidates under {index.url}; blog date stays unwritten"
             )
             return
 

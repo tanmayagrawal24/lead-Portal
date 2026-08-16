@@ -1,5 +1,22 @@
 # M1.14 — read before M3, requested after the M1.32 guard landed
 
+> **Status: ruled on and closed — see M1.34 in the spec's amendment log.** All six
+> rulings are implemented. Two corrections to what follows, both from the ruling:
+>
+> 1. **§5's exhaustiveness test below is wrong.** "Did we have a sitemap to
+>    search" does not bound the search space, and the counter-example is in this
+>    document's own §3: `zecplus.de` has a sitemap — four shards — and its blog
+>    lives on a host that sitemap never mentions. The correct test is that
+>    **both** instruments ran: a sitemap to enumerate *and* a fetched homepage
+>    with parseable links. Even both is not proof, and §6.2 now says so.
+> 2. **The A7 gap in A5.5 is not a review reason.** The fetch failure is
+>    transient, and flagging it immediately fills the review queue with things
+>    that fix themselves. It retries and is flagged only after N = 3 runs; A7's
+>    table is split into measurement limits and transient failures accordingly.
+>
+> Everything else here was ratified as written. Kept unedited below, because the
+> measurements — especially the two *negative* ones — are the expensive part.
+
 **Status:** analysis. Nothing here is implemented, and one candidate instrument is recommended **against**.
 **Question asked:** with the guard in place, the blog ladder has two independent ways to be wrong about a blog. How do they interact, and what should be done about the one that is left?
 **Measured on:** the stored corpus, 2026-08-15. No requests — every instrument below was tested against homepages already on disk.

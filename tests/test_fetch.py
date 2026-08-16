@@ -371,6 +371,75 @@ class TestCrossHostRedirects(FetchTestCase):
         )
 
 
+class TestBlogOnAnotherHost(FetchTestCase):
+    """M1.14: anchor text takes the href wherever it points, so `fetch` can now
+    make a *first* request to a host nothing has visited."""
+
+    def _shop_linking_its_blog_at(self, other_base: str):
+        def build(base: str) -> Site:
+            site = shopfixtures.shopware_shop(base)
+            # The path vocabulary must find nothing, or it answers first.
+            del site.routes["/magazin"]
+            del site.routes["/magazin/zahnpflege"]
+            site.add("/", shopfixtures.homepage_without_blog_path(other_base))
+            site.add_gzip(
+                "/sitemap-muster-content-1.xml.gz",
+                shopfixtures.urlset([f"{base}/ueber-uns", f"{base}/impressum"]),
+            )
+            return site
+
+        return build
+
+    def _blog_host(self, robots_txt: str = "User-agent: *\nAllow: /\n"):
+        def build(_base: str) -> Site:
+            site = Site()
+            site.add("/robots.txt", robots_txt, content_type="text/plain")
+            site.add(
+                "/",
+                '<!doctype html><html lang="de"><body><h1>Blog</h1>'
+                '<a href="/erster-beitrag">Erster Beitrag</a></body></html>',
+            )
+            site.add("/erster-beitrag", shopfixtures.BLOG_HTML)
+            return site
+
+        return build
+
+    def test_the_blog_host_robots_is_read_before_its_index(self) -> None:
+        """Robots is keyed to the origin (§5.2). Falling back to the seeded
+        policy would apply the shop's robots.txt to somebody else's host, which
+        is the one thing §5.2 says twice not to do."""
+        other = self.serve(self._blog_host(), address="127.0.0.2")
+        server = self.serve(self._shop_linking_its_blog_at(other.base))
+        self.run_fetch(server)
+
+        paths = other.site.paths()
+        self.assertIn("/robots.txt", paths)
+        self.assertLess(paths.index("/robots.txt"), paths.index("/"))
+
+    def test_the_index_is_fetched_and_an_article_sampled_under_it(self) -> None:
+        """The zecplus.de shape end to end. A6 samples it like any other blog —
+        the index is its host's front page, so the anchor is the whole URL."""
+        other = self.serve(self._blog_host(), address="127.0.0.2")
+        server = self.serve(self._shop_linking_its_blog_at(other.base))
+        result = self.run_fetch(server)
+
+        self.assertIn("blog_index", result.kinds)
+        self.assertIn("blog_article", result.kinds)
+        self.assertEqual(result.blog_sample, f"{other.base}/erster-beitrag")
+        self.assertIn("blog located by anchor_text", " ".join(result.notes))
+
+    def test_the_blog_hosts_own_robots_can_refuse_it(self) -> None:
+        other = self.serve(
+            self._blog_host(robots_txt="User-agent: *\nDisallow: /\n"),
+            address="127.0.0.2",
+        )
+        server = self.serve(self._shop_linking_its_blog_at(other.base))
+        result = self.run_fetch(server)
+
+        self.assertEqual(other.site.paths(), ["/robots.txt"])
+        self.assertNotIn("blog_index", result.kinds)
+
+
 class TestSameHostRedirectsAreRobotsChecked(FetchTestCase):
     """M1.12: robots permission does not survive a redirect.
 

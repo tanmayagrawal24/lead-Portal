@@ -114,6 +114,9 @@ class ExtractTestCase(unittest.TestCase):
             )
         }
 
+    def signal_text(self, company_id: int, key: str) -> str:
+        return self.signals(company_id)[key]["value_text"] or ""
+
 
 class TestCatalogueMeasurability(ExtractTestCase):
     """§10.3's three states. This is the part of M2 with points riding on it."""
@@ -552,16 +555,119 @@ class TestBlogArticleSample(ExtractTestCase):
         result = self.extract(company_id)
         self.assertNotIn("content.blog_last_post_basis", result.signals)
 
-    def test_no_blog_index_writes_zero_and_says_why(self) -> None:
-        """§10.1: this instrument under-detects — a blog on a subdomain or on
-        root-level slugs is invisible to it — so the note records that the `0`
-        is vocabulary-limited and §6.2 must not let it carry +25 alone."""
+    def test_no_blog_index_writes_zero_and_qualifies_it(self) -> None:
+        """M1.14: the `0` is written and its licence to fire +25 is written with
+        it. A homepage with no links and no sitemap is a search that ran neither
+        instrument, so `opp.no_blog` must not read this `0` as an absence."""
         company_id = self.company()
         self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
         result = self.extract(company_id)
 
         self.assertEqual(result.signals["content.blog_exists"], 0)
-        self.assertIn("vocabulary-limited", " ".join(result.notes))
+        self.assertEqual(result.signals["content.blog_search_exhaustive"], 0)
+        self.assertIn(
+            "limit: no sitemap and no homepage links",
+            self.signal_text(company_id, "content.blog_search_exhaustive"),
+        )
+
+    def test_both_instruments_running_licenses_the_award(self) -> None:
+        """A sitemap enumerated *and* a homepage that yielded links. Only then
+        may §6.2 read `blog_exists = 0` as an absence and fire +25."""
+        company_id = self.company()
+        self.artifact(
+            company_id,
+            "homepage",
+            "https://muster.de/",
+            '<html><body><a href="/kontakt">Kontakt</a></body></html>',
+        )
+        self.artifact(
+            company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP_ROOT_SLUGS
+        )
+        result = self.extract(company_id)
+
+        self.assertEqual(result.signals["content.blog_exists"], 0)
+        self.assertEqual(result.signals["content.blog_search_exhaustive"], 1)
+
+    def test_a_sitemap_alone_is_not_an_exhaustive_search(self) -> None:
+        """§5 of the M1.14 read proposed "did we have a sitemap to search" and
+        the counter-example was already in the corpus: `zecplus.de` serves four
+        shards and its blog is on a host none of them names. A sitemap makes one
+        instrument available; it does not make the search complete."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", "<html></html>")
+        self.artifact(
+            company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP_ROOT_SLUGS
+        )
+        result = self.extract(company_id)
+
+        self.assertEqual(result.signals["content.blog_exists"], 0)
+        self.assertEqual(result.signals["content.blog_search_exhaustive"], 0)
+        self.assertEqual(
+            self.signal_text(company_id, "content.blog_search_exhaustive"),
+            "limit: no homepage links",
+        )
+
+    def test_a_located_blog_whose_index_failed_writes_no_zero(self) -> None:
+        """A7's transient half. The blog was found and the fetch missed it — a
+        `0` here would award +25 against a shop whose blog we had in hand. The
+        reason is written so the abstention is visible per company, and it
+        retries next run rather than filling the queue on the first miss."""
+        company_id = self.company()
+        self.artifact(
+            company_id,
+            "homepage",
+            "https://muster.de/",
+            '<html><body><a href="https://blog.muster.de/">Blog</a></body></html>',
+        )
+        self.artifact(
+            company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP_ROOT_SLUGS
+        )
+        result = self.extract(company_id)
+
+        self.assertNotIn("content.blog_exists", result.signals)
+        self.assertEqual(result.signals["content.blog_search_exhaustive"], 0)
+        self.assertTrue(
+            self.signal_text(company_id, "content.blog_search_exhaustive").startswith(
+                "transient:"
+            )
+        )
+
+    def test_a_blog_on_a_subdomain_is_detected_and_dated(self) -> None:
+        """M1.14 end to end on `zecplus.de`'s shape: the +25 does not fire, and
+        A6 samples the blog like any other."""
+        company_id = self.company()
+        self.artifact(
+            company_id,
+            "homepage",
+            "https://muster.de/",
+            '<html><body><a href="https://blog.muster.de/">Blog</a></body></html>',
+        )
+        self.artifact(company_id, "blog_index", "https://blog.muster.de/", BLOG_INDEX)
+        self.artifact(
+            company_id, "blog_article", "https://blog.muster.de/erster", BLOG_ARTICLE
+        )
+        result = self.extract(company_id)
+
+        self.assertEqual(result.signals["content.blog_exists"], 1)
+        self.assertEqual(str(result.signals["content.blog_last_post"]), "2025-06-30")
+        self.assertNotIn("content.blog_search_exhaustive", result.signals)
+
+    def test_a_blog_on_a_subdomain_has_no_countable_posts(self) -> None:
+        """No path prefix separates its posts from its navigation, so counting
+        every same-host link would write a number made of menus. `None` means
+        not counted, and §6.2 reads that as unknown rather than as few."""
+        company_id = self.company()
+        self.artifact(
+            company_id,
+            "homepage",
+            "https://muster.de/",
+            '<html><body><a href="https://blog.muster.de/">Blog</a></body></html>',
+        )
+        self.artifact(company_id, "blog_index", "https://blog.muster.de/", BLOG_INDEX)
+        result = self.extract(company_id)
+
+        self.assertEqual(result.signals["content.blog_exists"], 1)
+        self.assertNotIn("content.blog_post_count", result.signals)
 
     def test_an_unparseable_date_is_left_unwritten(self) -> None:
         """§6.2's NULL branch: an undated blog is an unknown, not a stale one."""

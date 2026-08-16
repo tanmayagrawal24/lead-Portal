@@ -125,6 +125,29 @@ class TestObjectsExist(SchemaTestCase):
         self.assertEqual(rows[0]["domain"], "example.de")
         self.assertIsNone(rows[0]["platform"])
 
+    def test_the_profile_exposes_every_guard_the_blog_ladder_reads(self) -> None:
+        """Migration 005. §6.2 reads two qualifiers before it fires anything —
+        M1.32's `basis` and M1.14's `search_exhaustive` — and a guard the read
+        model cannot see is a guard that does not exist. `basis` had been read by
+        the spec since M1.32 and was never given a column; §10.4 already tracks
+        "a rule that cannot fire reads as implemented" as a defect class, and
+        this is that class one layer down."""
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(company_profile)")
+        }
+        self.assertLessEqual(
+            {
+                "blog_exists",
+                "blog_last_post",
+                "blog_last_post_basis",
+                "blog_post_count",
+                "blog_search_exhaustive",
+                "blog_search_limit",
+            },
+            columns,
+        )
+
     def test_needs_review_reason_column_is_gone(self) -> None:
         """B2: the reason moved to review_flag."""
         columns = {
@@ -197,12 +220,13 @@ class TestReviewFlag(SchemaTestCase):
             "duplicate_site",
             "catalog_not_measurable",
             "blog_date_unbounded",
+            "blog_undetectable",
         ):
             self.raise_flag(company_id, run_id, reason)
         count = self.conn.execute(
             "SELECT COUNT(*) FROM review_flag WHERE company_id = ?", (company_id,)
         ).fetchone()[0]
-        self.assertEqual(count, 7)
+        self.assertEqual(count, 8)
 
     def test_a_raise_note_survives_and_is_optional(self) -> None:
         """Migration 004. `blog_date_unbounded` sends a human to open a blog,

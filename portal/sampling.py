@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from portal.urls import has_query, path_of, same_site
+from portal.urls import has_query, host_of, path_of, same_site
 
 #: §5.2 Tier 2 path patterns.
 #:
@@ -138,8 +138,8 @@ def _depth(path: str) -> int:
     return _TRAILING_SLASHES.sub("", path).count("/")
 
 
-def is_blog_article_candidate(url: str, index_path: str, domain: str) -> bool:
-    """A6 filter. **Anchored on the index path, not on the blog path.**
+def is_blog_article_candidate(url: str, index_url: str) -> bool:
+    """A6 filter. **Anchored on the fetched index, not on the blog path.**
 
     This is the whole subtlety. On Shopify the hierarchy is
     `/blogs/<blog-handle>/<article-handle>`, so a URL one level under `/blogs`
@@ -148,24 +148,43 @@ def is_blog_article_candidate(url: str, index_path: str, domain: str) -> bool:
     listing page to an Article parser — M1.16's error in a new place. Anchoring
     on the index M1.15 actually fetched makes the level unambiguous.
 
+    **The anchor is the index's whole URL rather than its path (M1.14).** A blog
+    can be a *host*: `blog.zecplus.de` serves its index at `/`, where a path
+    anchor is empty. Read as a path this said "no article can ever be a
+    candidate", so the shape the anchor-text instrument exists to reach would
+    have been detected and then never sampled. Read as a URL it says what is
+    meant — an article sits on the index's own host, below the index — and the
+    host test is what keeps the apex catalogue out when the index is a
+    subdomain root.
+
+    **The index's host also replaces the `same_site` test**, which used to ask
+    the seeded domain. That question is now the wrong one: a blog the shop links
+    at a host of its own is still the shop's blog, and M1.14 rules that the href
+    is taken wherever it points. Host equality with the index is *stricter* than
+    `same_site` wherever the index is on our own domain — every path-detected
+    blog in the corpus — and is the only test that means anything where it is
+    not. One rule, both shapes: an article is a page below the index, on the
+    index's host.
+
     A secondary-locale filter is deliberately absent: `/de-ch/blogs/lifestyle/x`
     does not start with `/blogs/lifestyle/`, and M1.15 already prefers the
     shallowest index, which is the primary storefront's. The anchoring subsumes
     it (M1.25).
     """
-    if not same_site(url, domain) or has_query(url):
+    if has_query(url) or host_of(url) != host_of(index_url):
         return False
     path = _TRAILING_SLASHES.sub("", path_of(url))
-    anchor = _TRAILING_SLASHES.sub("", index_path)
-    return bool(anchor) and path.lower().startswith(f"{anchor.lower()}/")
+    anchor = _TRAILING_SLASHES.sub("", path_of(index_url))
+    if not anchor:  # the index is its host's front page
+        return bool(path)
+    return path.lower().startswith(f"{anchor.lower()}/")
 
 
 def choose_blog_article(
     blog_sitemap_urls: list[str],
     sitemap_urls: list[str],
     index_links: list[str],
-    index_path: str,
-    domain: str,
+    index_url: str,
 ) -> tuple[str | None, str]:
     """A6: pick one article under the fetched blog index. Tiers 1→2→3.
 
@@ -180,9 +199,7 @@ def choose_blog_article(
     """
 
     def usable(urls: list[str]) -> list[str]:
-        return [
-            url for url in urls if is_blog_article_candidate(url, index_path, domain)
-        ]
+        return [url for url in urls if is_blog_article_candidate(url, index_url)]
 
     def shallowest(urls: list[str]) -> str:
         return min(urls, key=lambda url: (_depth(path_of(url)), url))

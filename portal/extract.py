@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from portal import impressum as impressum_mod
 from portal import parsers, sampling, sitemap
 from portal.artifacts import ArtifactStore, utc_now
 from portal.urls import path_of
@@ -188,8 +189,10 @@ class ExtractStage:
         else:
             result.notes.append("no impressum on disk — legal_form not extracted")
 
-        blog_path = self._catalog_and_blog(result, site, artifacts, homepage_html)
-        self._blog_signals(result, artifacts, blog_path, homepage_html)
+        located = self._catalog_and_blog(
+            result, site, artifacts, homepage_html, homepage.url
+        )
+        self._blog_signals(result, artifacts, located, homepage_html, homepage.url)
         self._product_schema(result, artifacts, homepage_html)
         return result
 
@@ -247,8 +250,9 @@ class ExtractStage:
         domain: str,
         artifacts: list[_Artifact],
         homepage_html: str,
-    ) -> str | None:
-        """`catalog.product_url_count`, plus the blog path the count excludes.
+        homepage_url: str,
+    ) -> impressum_mod.BlogLocation | None:
+        """`catalog.product_url_count`, plus the blog location the count excludes.
 
         The three-state rule lives here. A site with sitemaps but no URL
         matching any product pattern is *not* a site with no products — on JTL
@@ -265,7 +269,10 @@ class ExtractStage:
         ]
         page_urls = [url for _shard, pages in shards for url in pages]
 
-        blog_path = self._blog_path(page_urls, homepage_html, domain)
+        located = impressum_mod.locate_blog(
+            page_urls, homepage_html, homepage_url, domain
+        )
+        blog_path = located.path if located else None
         # M1.27: a shard named `articles` is decided on its contents and its
         # siblings, so classification waits until every shard has been read and
         # the blog path is known.
@@ -343,11 +350,11 @@ class ExtractStage:
                 num=len(counted),
                 text=tier,
             )
-            return blog_path
+            return located
 
         if not sitemaps:
             result.notes.append("no sitemap on disk — catalogue not measured")
-            return blog_path
+            return located
 
         # §10.3: the instrument does not apply. Not a zero, and not silence.
         reason = (
@@ -359,16 +366,7 @@ class ExtractStage:
         result.notes.append(
             f"catalog not measurable: {len(page_urls)} URLs, none identifiable as products"
         )
-        return blog_path
-
-    def _blog_path(
-        self, page_urls: list[str], homepage_html: str, domain: str
-    ) -> str | None:
-        from portal import impressum as impressum_mod
-
-        return impressum_mod.find_blog_path(
-            page_urls, homepage_html, f"https://{domain}/", domain
-        )
+        return located
 
     # ── blog (§6.2's inputs) ────────────────────────────────────────────
 
@@ -376,8 +374,9 @@ class ExtractStage:
         self,
         result: ExtractResult,
         artifacts: list[_Artifact],
-        blog_path: str | None,
+        located: impressum_mod.BlogLocation | None,
         homepage_html: str,
+        homepage_url: str,
     ) -> None:
         index = next(
             (
@@ -387,27 +386,17 @@ class ExtractStage:
             ),
             None,
         )
-        if index is None or blog_path is None:
-            # `0` is written only because both the sitemaps and the homepage
-            # were searched. §10.1 records that this instrument under-detects —
-            # a blog on a subdomain or served as root-level slugs is invisible
-            # to it — so §6.2 must not let a `0` carry `opp.no_blog`'s +25 alone.
-            if homepage_html:
-                self._write(
-                    result,
-                    "content.blog_exists",
-                    "",
-                    num=0,
-                )
-                result.notes.append(
-                    "no blog index on disk; blog_exists=0 is vocabulary-limited (§10.1)"
-                )
+        if index is None:
+            self._no_blog_index(result, artifacts, located, homepage_html, homepage_url)
             return
 
         html = self._body(index)
         self._write(result, "content.blog_exists", index.url, num=1)
         read = parsers.read_blog_index(
-            html, blog_path, index_path=path_of(index.url), today=self.today
+            html,
+            located.path if located else None,
+            index_path=path_of(index.url),
+            today=self.today,
         )
         article = next(
             (
@@ -495,6 +484,91 @@ class ExtractStage:
         if read.post_count is not None:
             self._write(
                 result, "content.blog_post_count", index.url, num=read.post_count
+            )
+
+    def _no_blog_index(
+        self,
+        result: ExtractResult,
+        artifacts: list[_Artifact],
+        located: impressum_mod.BlogLocation | None,
+        homepage_html: str,
+        homepage_url: str,
+    ) -> None:
+        """No blog index on disk. **What may be claimed about that is M1.14.**
+
+        `opp.no_blog` is +25, the largest award in ruleset v3, and it is an award
+        for an *absence* — so by A7's one-question test it abstains wherever the
+        absence was not established. Two different things can put us here, they
+        are not equally recoverable, and the signal says which:
+
+        - **A blog was located and its index is not on disk.** The fetch failed:
+          a 404, a timeout, a momentarily disallowed path. `content.blog_exists`
+          is then written **at all** — a `0` would award +25 against a shop whose
+          blog we found and then failed to retrieve. It is a *transient* (A7's
+          second table): it usually fixes itself on the next run, so it retries
+          rather than filling the review queue on the first miss.
+        - **Nothing was located.** `0` is written, and `content.blog_search_
+          exhaustive` records whether both §5.3 instruments actually ran.
+
+        **What "exhaustive" means, exactly, and what it does not.** It means a
+        sitemap was enumerated *and* a homepage yielded parseable links — both
+        instruments, not one. "Did we have a sitemap" was the tempting test and
+        it is wrong, with the counter-example in the corpus: `zecplus.de` serves
+        four sitemap shards and its blog lives on `blog.zecplus.de`, a host none
+        of them names. A sitemap made one instrument available; it did not make
+        the search complete.
+
+        It does **not** mean the blog is not there. A blog on an unlinked
+        subdomain is undetectable by construction, so an exhaustive search is
+        always "we looked everywhere we can look" and never "it is not there".
+        The `1` licenses the award; it does not certify the absence.
+        """
+        if located is not None:
+            where = located.url or located.path
+            self._write(
+                result,
+                "content.blog_search_exhaustive",
+                "",
+                num=0,
+                text=(
+                    f"transient: blog located by {located.basis} at {where}, "
+                    "its index is not on disk"
+                ),
+            )
+            result.notes.append(
+                f"blog located at {where} but no index fetched — blog_exists stays "
+                "unwritten, retry next run (A7, transient)"
+            )
+            return
+
+        self._write(result, "content.blog_exists", "", num=0)
+
+        enumerated = any(a.kind == "sitemap" and a.body_path for a in artifacts)
+        parsed = bool(impressum_mod.links(homepage_html, homepage_url))
+        missing = [
+            what
+            for what, ok in (("sitemap", enumerated), ("homepage links", parsed))
+            if not ok
+        ]
+        if missing:
+            self._write(
+                result,
+                "content.blog_search_exhaustive",
+                "",
+                num=0,
+                text="limit: no " + " and no ".join(missing),
+            )
+            result.notes.append(
+                f"blog search not exhaustive (no {' and no '.join(missing)}) — "
+                "opp.no_blog must not fire on this 0 (M1.14, A7)"
+            )
+        else:
+            self._write(
+                result,
+                "content.blog_search_exhaustive",
+                "",
+                num=1,
+                text="sitemap enumerated and homepage links parsed",
             )
 
     # ── product schema (A5.5/A5.6) ──────────────────────────────────────
