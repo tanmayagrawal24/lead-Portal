@@ -640,9 +640,7 @@ class TestBlogAnchorDetection(unittest.TestCase):
             "https://x.de/Kunden-Magazin",
         )
 
-    def test_shallowest_then_code_point_breaks_a_tie(self) -> None:
-        """An index sits above its posts — the shape `lampenflut.de` shows, where
-        *Licht-Ratgeber* and *Mehr News …* point at the same page."""
+    def test_shallowest_wins_because_an_index_sits_above_its_posts(self) -> None:
         self.assertEqual(
             impressum.find_blog_link(
                 '<a href="/Ratgeber-Welt/2024/ein-post">Ratgeber</a>'
@@ -651,6 +649,26 @@ class TestBlogAnchorDetection(unittest.TestCase):
                 "x.de",
             ),
             "https://x.de/Ratgeber-Welt",
+        )
+
+    def test_the_shortest_anchor_text_wins_at_equal_depth(self) -> None:
+        """M1.35, measured on `lampenflut.de`: three vocabulary anchors, all at
+        depth 1 — one nav label and two article headlines. Code-point order
+        alone picked `Kinderzimmerleuchten…`, a leaf post, and handed it to A6
+        as the index; nothing is nested under a post, so no article could be
+        sampled and the blog dated nothing. An index link is a label, a post
+        link is a headline."""
+        self.assertEqual(
+            impressum.find_blog_link(
+                '<a href="/Kinderzimmerleuchten-Grosser-Ratgeber-fuer-Eltern">'
+                "Kinderzimmerleuchten richtig auswählen: Der große Ratgeber</a>"
+                '<a href="/Lampenflut-Licht-Ratgeber">Licht-Ratgeber</a>'
+                '<a href="/Sollux-Lampen-Ratgeber-Moderne-Leuchten">'
+                "Sollux Lampen Ratgeber: Moderne Leuchten für ein Zuhause</a>",
+                "https://lampenflut.de/",
+                "lampenflut.de",
+            ),
+            "https://lampenflut.de/Lampenflut-Licht-Ratgeber",
         )
 
 

@@ -211,8 +211,21 @@ class ExtractStage:
 
         if (length := parsers.meta_description_length(html)) is not None:
             self._write(result, "meta.description_length", url, num=length)
-        if (languages := parsers.hreflang_language_count(html)) is not None:
-            self._write(result, "i18n.hreflang_count", url, num=languages)
+        # `0`, not silence, when a fetched homepage declares no alternates at
+        # all (M3 audit §6). `opp.de_only` (+5) awards points for *being*
+        # monolingual, and the parser returns `None` for "no hreflang links" —
+        # so leaving it unwritten made the rule unable to fire on exactly the
+        # population it describes, and able to fire only on shops that declare
+        # hreflang and declare one language. 7 of 13 in the corpus. A homepage
+        # we have with no alternates in it is a measurement, not a gap; a
+        # homepage we do not have still writes nothing, so "checked and
+        # monolingual" stays distinct from "never looked".
+        self._write(
+            result,
+            "i18n.hreflang_count",
+            url,
+            num=parsers.hreflang_language_count(html) or 0,
+        )
         if credit := parsers.footer_agency_credit(html, result.domain):
             self._write(result, "agency.footer_credit", url, text=credit)
 
@@ -485,6 +498,24 @@ class ExtractStage:
             self._write(
                 result, "content.blog_post_count", index.url, num=read.post_count
             )
+
+        # §6.3's `neg.active_content` (−25) asks for four posts in six months and
+        # had no data path at all until M3 measured for one: `blog_last_post` is
+        # one date and `blog_post_count` is a total with no recency in it. The
+        # dates travel rather than a pre-computed "posts in the last 180 days",
+        # because §5 promises scoring is a pure recompute at zero cost — and a
+        # stored recency count decays silently as the window moves.
+        #
+        # Written whenever an index was read, empty list included: "this index
+        # dates nothing" is a measurement §6.3 needs, and it is the state 3 of
+        # the 7 blogs in the corpus are in.
+        self._write(
+            result,
+            "content.blog_post_dates",
+            index.url,
+            num=len(read.post_dates),
+            text=",".join(day.isoformat() for day in read.post_dates),
+        )
 
     def _no_blog_index(
         self,

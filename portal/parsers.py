@@ -454,8 +454,8 @@ def _jsonld_dates(html: str) -> list[date]:
     return found
 
 
-def newest_post_date(html: str, today: date | None = None) -> date | None:
-    """The newest post date on a blog index, by §5.3's precedence.
+def post_dates(html: str, today: date | None = None) -> list[date]:
+    """**Every** distinct post date on a page, oldest first, by §5.3's precedence.
 
     JSON-LD `datePublished` first, then `<time datetime>`, then German visible
     dates. Sitemap `<lastmod>` is **never** consulted here — it is regenerated
@@ -465,28 +465,41 @@ def newest_post_date(html: str, today: date | None = None) -> date | None:
     Future dates are discarded rather than trusted: a scheduled post dated next
     month would otherwise make a dead blog look current, which is the exact
     error `opp.blog_stale` exists to catch.
+
+    **Why the whole list rather than the maximum (M3 audit §7).** §6.3's
+    `neg.active_content` (−25) asks whether four posts appeared in six months,
+    and no maximum can answer that. The list is *distinct* dates, which under-
+    counts two posts published on one day — deliberately, because the caller
+    uses the count to decide whether its enumeration is complete, and erring
+    toward incomplete errs toward abstaining, which is the visible failure.
     """
     horizon = today or datetime.now(UTC).date()
-    candidates = [d for d in _jsonld_dates(html) if d <= horizon]
+    found = [d for d in _jsonld_dates(html) if d <= horizon]
 
-    tree = HTMLParser(html)
-    for node in tree.css("time[datetime]"):
+    for node in HTMLParser(html).css("time[datetime]"):
         parsed = _parse_iso(node.attributes.get("datetime") or "")
         if parsed is not None and parsed <= horizon:
-            candidates.append(parsed)
+            found.append(parsed)
 
-    if not candidates:
+    if not found:
         text = visible_text(html)
         for chunk in text.split(" | "):
             parsed = parse_german_date(chunk)
             if parsed is not None and parsed <= horizon:
-                candidates.append(parsed)
-        if not candidates:
+                found.append(parsed)
+        if not found:
             parsed = parse_german_date(text)
             if parsed is not None and parsed <= horizon:
-                candidates.append(parsed)
+                found.append(parsed)
 
-    return max(candidates) if candidates else None
+    return sorted(set(found))
+
+
+def newest_post_date(html: str, today: date | None = None) -> date | None:
+    """The newest post date on a blog index. A lower bound (§10.5), never a
+    maximum over the blog — only over what this page happens to expose."""
+    dates = post_dates(html, today)
+    return dates[-1] if dates else None
 
 
 @dataclass(frozen=True)
@@ -496,6 +509,10 @@ class BlogIndex:
     post_count: int | None
     newest_post: date | None
     article_schema: bool
+    #: Every distinct date the index exposes, oldest first. Compared against
+    #: `post_count` it says whether the enumeration is complete, which is what
+    #: §6.3's `neg.active_content` needs before it may decline (M3 audit §7).
+    post_dates: tuple[date, ...] = ()
 
 
 def _is_post_link(node: Node, blog_path: str, index_path: str | None) -> bool:
@@ -542,8 +559,10 @@ def read_blog_index(
         if blog_path
         else set()
     )
+    dates = post_dates(html, today)
     return BlogIndex(
         post_count=len(links) or None,
-        newest_post=newest_post_date(html, today),
+        newest_post=dates[-1] if dates else None,
         article_schema=has_article_schema(html),
+        post_dates=tuple(dates),
     )

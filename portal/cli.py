@@ -19,6 +19,8 @@ from portal import (
     extract,
     fetch,
     migrate,
+    ruleset,
+    score,
     seeds,
 )
 from portal.net import MAX_CONCURRENT_HOSTS, Fetcher, HostRateLimiter, RequestLog
@@ -165,6 +167,55 @@ def cmd_extract_p1(path: Path) -> int:
     return 0
 
 
+def cmd_score(path: Path, phase: int) -> int:
+    """§5.4 / §6. A pure recompute over `company_profile` — no network, no cost.
+
+    Printed as a **ranked lead list** rather than as a log, because that is what
+    the stage produces: the ordering is the product, and a score whose reasons
+    cannot be read is not a lead.
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    conn = db.connect(path)
+    try:
+        version = migrate.current_version(conn)
+        highest = migrate.discover()[-1][0]
+        if version < highest:
+            print(
+                f"database at {path} is at migration {version:03d} but the code "
+                f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+                file=sys.stderr,
+            )
+            return 2
+        run_id, results = score.run(conn, phase=phase)
+    finally:
+        conn.close()
+
+    if not results:
+        print("no companies to score — run `portal extract-p1` first", file=sys.stderr)
+        return 2
+
+    print(f"\nrun {run_id}: score --phase {phase}, ruleset {ruleset.RULESET_VERSION}")
+    ranked = sorted(results, key=lambda r: (-r.total, r.domain))
+    print(f"\n{'#':>2}  {'band':4} {'score':>5}  {'upside':>6} {'gate':4}  domain")
+    print("─" * 72)
+    for position, result in enumerate(ranked, 1):
+        gate = "P2" if result.admitted else "stop"
+        print(
+            f"{position:>2}  {result.band:4} {result.total:>5}  "
+            f"{result.remaining_upside:>6} {gate:4}  {result.domain}"
+        )
+
+    for result in ranked:
+        print(f"\n{result.domain} — {result.total} ({result.band})")
+        for component in result.components:
+            mark = f"{component.points:+d}" if component.points else "  ·"
+            print(f"   {mark:>4}  {component.rule_id}")
+            print(f"         {component.reason}")
+    return 0
+
+
 def cmd_diff_signals(
     path: Path,
     from_run: int | None,
@@ -271,6 +322,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="deterministic §5.3 signals from artifacts already on disk; no requests",
     )
 
+    score_parser = sub.add_parser(
+        "score",
+        help="§6 ruleset over company_profile as a ranked lead list; pure, no cost",
+    )
+    score_parser.add_argument(
+        "--phase",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="scoring phase (default: 1)",
+    )
+
     diff_parser = sub.add_parser(
         "diff-signals",
         help="per-domain signal diff between two runs; defaults to the last two",
@@ -342,6 +405,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "extract-p1":
         return cmd_extract_p1(path)
+
+    if args.command == "score":
+        return cmd_score(path, args.phase)
 
     if args.command == "diff-signals":
         return cmd_diff_signals(path, args.from_run, args.to_run, args.stage, args.list)

@@ -156,24 +156,38 @@ def find_blog_link(homepage_html: str, base_url: str, domain: str) -> str | None
     a path and appears in no sitemap the shop publishes.
 
     *Ordering*, because a homepage may carry several: same-site links before
-    foreign ones, then shallowest path, then the code-point minimum, matching
-    `find_blog_index_url` and A5.3. Same-site first is the load-bearing part —
-    it is what stops a footer link reading *"News"* and pointing at a press
-    portal from outranking the shop's own `/magazin`. Shallowest is next because
-    an index sits above its posts: `lampenflut.de` links *"Licht-Ratgeber"* and
-    *"Mehr News …"* at the same page, and either would do.
+    foreign ones, then shallowest path, then **the shortest anchor text**, then
+    the code-point minimum.
+
+    - *Same-site first* stops a footer link reading *"News"* and pointing at a
+      press portal from outranking the shop's own `/magazin`.
+    - *Shallowest* because an index sits above its posts, as in
+      `find_blog_index_url` (M1.15).
+    - *Shortest anchor text* is **measured, not assumed** (M1.35). `lampenflut.de`
+      carries three vocabulary anchors, all at depth 1: the nav label
+      *"Licht-Ratgeber"* (14 chars) → the index, and two article headlines —
+      *"Kinderzimmerleuchten richtig auswählen: Der große Ratgeber…"* (89) and
+      *"Sollux Lampen Ratgeber: Moderne Leuchten…"* (67) → individual posts.
+      Code-point order alone picked `K` and handed a *leaf post* to A6 as the
+      index, under which nothing is nested, so no article could be sampled and
+      the blog dated nothing. An index link is a **label**; a post link is a
+      **headline**, and length separates the two on the one shop in the corpus
+      that has both. It is the same argument M1.15 already makes about nav links,
+      applied one level down.
+    - *Code-point minimum* last, so the choice never depends on the machine's
+      locale (A5.3).
 
     A link to our **own** front page is skipped: a *"Blog"* in the navigation
     pointing at `/` is navigation, not a blog. The test is host-aware, because a
     root path on the blog's own host is exactly what `blog.zecplus.de` serves.
     """
     candidates = [
-        (0 if same_site(url, domain) else 1, _depth(url), url)
+        (0 if same_site(url, domain) else 1, _depth(url), len(text.strip()), url)
         for url, text in links(homepage_html, base_url)
         if _BLOG_ANCHOR.search(text)
         and not (host_of(url) == host_of(base_url) and not path_of(url).strip("/"))
     ]
-    return min(candidates)[2] if candidates else None
+    return min(candidates)[3] if candidates else None
 
 
 def locate_blog(
