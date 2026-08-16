@@ -13,6 +13,10 @@ dependencies = [
     "anthropic",
     "pydantic",
     "jinja2",
+    # M1.6: approved for M4. The §9 page needs an ASGI server and this is
+    # the one FastAPI documents; it is a dev-server dependency of a localhost
+    # tool, not a deployment target.
+    "uvicorn",
 ]
 
 # Tooling, not stack: neither is imported at runtime, so this is not a change
@@ -38,4 +42,4 @@ build-backend = "setuptools.build_meta"
 packages = ["portal"]
 
 [tool.setuptools.package-data]
-portal = ["migrations/*.sql"]
+portal = ["migrations/*.sql", "templates/*.html", "static/*"]

@@ -1,0 +1,14 @@
+{#- The table body. Rendered inline by `index.html` and returned alone by
+    `/rows` when a filter changes. One template, so the two can never drift. -#}
+{% if oob %}
+  <span id="lead-count" hx-swap-oob="true">{{ leads|length }} von {{ total }}</span>
+{% endif %}
+{% for lead in leads %}
+  {% include "_row.html" %}
+  <tr><td class="detail-cell" colspan="11" id="detail-{{ lead.company_id }}"></td></tr>
+{% else %}
+  <tr><td colspan="11" class="muted" style="padding:22px">
+    Keine Firma passt auf diese Filter.
+    {% if filters.active %}<a href="/">Filter zurücksetzen</a>{% endif %}
+  </td></tr>
+{% endfor %}

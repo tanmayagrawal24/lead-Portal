@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lead Portal</title>
+<script src="/static/htmx.min.js"></script>
+<style>
+  :root {
+    --ink: #14181d; --muted: #6b7684; --line: #dfe4ea; --bg: #f7f8fa;
+    --card: #ffffff; --accent: #1b4d8f; --warn: #8a5300; --bad: #a11b1b;
+    --abstain: #6a4b9e; --good: #1d6b3f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  header { padding: 18px 24px 12px; border-bottom: 1px solid var(--line); background: var(--card); }
+  h1 { margin: 0 0 2px; font-size: 19px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; }
+  main { padding: 18px 24px 60px; }
+
+  form.filters {
+    display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end;
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px 14px; margin-bottom: 14px;
+  }
+  form.filters label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  form.filters select { font: inherit; padding: 4px 6px; border: 1px solid var(--line);
+    border-radius: 4px; background: #fff; min-width: 120px; }
+  form.filters .reset { margin-left: auto; font-size: 13px; color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--card);
+    border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); font-weight: 600; padding: 9px 10px; border-bottom: 1px solid var(--line);
+    background: #fbfcfd; }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr.summary:hover td { background: #fbfcfd; }
+  tr.summary.excluded td { opacity: .55; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.detail-cell { padding: 0; border-bottom: 0; }
+  td.detail-cell:empty { display: none; }
+
+  .band { display: inline-block; min-width: 20px; text-align: center; font-weight: 700;
+    border-radius: 3px; padding: 1px 5px; font-size: 12px; }
+  .band-A { background: #dff3e6; color: var(--good); }
+  .band-B { background: #e3eefb; color: var(--accent); }
+  .band-C { background: #fdf0d9; color: var(--warn); }
+  .band-D { background: #eceff2; color: var(--muted); }
+  .band-none { background: repeating-linear-gradient(45deg,#eee,#eee 3px,#f7f7f7 3px,#f7f7f7 6px);
+    color: var(--muted); }
+
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+    border: 1px solid; margin-right: 4px; white-space: nowrap; }
+  .tag-review { color: var(--warn); border-color: #e6c68a; background: #fdf6e9; }
+  .tag-block  { color: var(--bad);  border-color: #e0a3a3; background: #fceaea; }
+  .tag-excl   { color: var(--muted);border-color: var(--line); background: #f2f4f6; }
+  .tag-stop   { color: var(--muted);border-color: var(--line); background: #f2f4f6; }
+  .tag-p2     { color: var(--good); border-color: #a8d5bb; background: #eaf6ef; }
+
+  button.toggle { font: inherit; background: none; border: 1px solid var(--line);
+    border-radius: 4px; color: var(--accent); cursor: pointer; padding: 1px 7px; }
+  button.toggle:hover { background: #eef3fa; }
+
+  .muted { color: var(--muted); }
+  .hook { color: var(--muted); font-size: 12.5px; }
+  code { font: 12px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  a { color: var(--accent); }
+
+  /* ── expanded detail ─────────────────────────────────────────── */
+  .detail { background: #fbfcfd; border-top: 2px solid var(--accent);
+    border-bottom: 1px solid var(--line); padding: 14px 16px 18px; }
+  .detail h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--muted); }
+  .detail section + section { margin-top: 18px; }
+  .detail .close { float: right; }
+
+  ul.components { list-style: none; margin: 0; padding: 0; }
+  ul.components > li { display: grid; grid-template-columns: 74px 1fr; gap: 10px;
+    padding: 8px 0; border-top: 1px solid var(--line); }
+  ul.components > li:first-child { border-top: 0; }
+  .pts { font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; }
+  .pts.plus { color: var(--good); }
+  .pts.minus { color: var(--bad); }
+  .pts.abstain { color: var(--abstain); font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .04em; }
+  li.abstained { background: #f8f5fc; margin: 0 -8px; padding-left: 8px; padding-right: 8px; }
+  li.abstained .reason { color: #3f2f5c; }
+  .rule { font-size: 11.5px; color: var(--muted); }
+  .reason { margin: 1px 0 4px; }
+
+  ul.evidence { list-style: none; margin: 3px 0 0; padding: 0; font-size: 12px; }
+  ul.evidence li { display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline;
+    padding: 1px 0; color: var(--muted); }
+  ul.evidence .k { font: 11.5px ui-monospace, Menlo, monospace; color: #4a5460; }
+  ul.evidence .v { color: var(--ink); }
+  ul.evidence .v.llm { border-bottom: 1px dotted var(--accent); cursor: help; }
+  ul.evidence .v.unverified { color: var(--bad); font-weight: 600;
+    border-bottom: 1px dotted var(--bad); }
+
+  .flag { border: 1px solid var(--line); border-radius: 5px; background: #fff;
+    padding: 10px 12px; margin-bottom: 8px; }
+  .flag.blocking { border-color: #e0a3a3; background: #fffafa; }
+  .flag .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .flag .name { font-weight: 600; }
+  .flag .note { margin: 5px 0 0; }
+  .flag .rationale { margin: 6px 0 0; color: var(--bad); font-size: 12.5px; }
+  .flag form { display: flex; gap: 6px; margin-top: 8px; }
+  .flag input[type=text] { flex: 1; font: inherit; padding: 4px 7px;
+    border: 1px solid var(--line); border-radius: 4px; }
+  .flag button { font: inherit; padding: 4px 12px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff; }
+
+  .blockbox { border: 1px solid #e0a3a3; background: #fceaea; border-radius: 5px;
+    padding: 10px 12px; margin-bottom: 12px; }
+  .blockbox strong { color: var(--bad); }
+  .notice { border: 1px solid var(--line); background: #fff; border-radius: 5px;
+    padding: 10px 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Lead Portal</h1>
+  <div class="sub">
+    <span id="lead-count">{{ leads|length }} von {{ total }}</span> Firmen ·
+    Schema {{ schema_version }} · nur localhost, keine Anmeldung
+  </div>
+</header>
+
+<main>
+  {# GET so the filter state lives in the URL and a filtered view is shareable
+     as a link. `hx-get` swaps the body; without JS the form still submits. #}
+  <form class="filters" hx-get="/rows" hx-target="#rows" hx-swap="innerHTML"
+        hx-trigger="change, submit" hx-push-url="true" action="/" method="get">
+    {% set selects = [
+      ('band', 'Band', ['A','B','C','D']),
+      ('platform', 'Plattform', facets.platform),
+      ('country', 'Land', facets.country),
+    ] %}
+    {% for name, label, options in selects %}
+      <label>{{ label }}
+        <select name="{{ name }}">
+          <option value="">alle</option>
+          {% for option in options %}
+            <option value="{{ option }}" {% if filters[name] == option %}selected{% endif %}>{{ option }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% endfor %}
+    {% for name, label in [('excluded','Ausgeschlossen'), ('needs_review','Prüfung nötig'), ('contact_blocked','Kontakt gesperrt')] %}
+      <label>{{ label }}
+        <select name="{{ name }}">
+          <option value="">alle</option>
+          <option value="yes" {% if filters[name] == 'yes' %}selected{% endif %}>ja</option>
+          <option value="no"  {% if filters[name] == 'no'  %}selected{% endif %}>nein</option>
+        </select>
+      </label>
+    {% endfor %}
+    <a class="reset" href="/">zurücksetzen</a>
+  </form>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:34px"></th>
+        <th>Firma</th>
+        <th style="width:56px">Band</th>
+        <th class="num" style="width:56px">Score</th>
+        <th style="width:64px">Gate</th>
+        <th style="width:110px">Ort</th>
+        <th style="width:100px">Plattform</th>
+        <th style="width:104px">Letzter Beitrag</th>
+        <th style="width:64px">KI</th>
+        <th>Aufhänger</th>
+        <th style="width:150px">Status</th>
+      </tr>
+    </thead>
+    <tbody id="rows">
+      {% include "_rows.html" %}
+    </tbody>
+  </table>
+</main>
+
+</body>
+</html>

@@ -1,0 +1,17 @@
+{#- The badges. Its own template because it is swapped out of band after a flag
+    is resolved, and because "which states does a row advertise" is one list. -#}
+{% if lead.contact_blocked %}
+  <span class="tag tag-block" title="Ein ungelöster Prüfmarker lässt den Score zu hoch erscheinen; der outreach-Eintrag wird abgelehnt (A7, §6.4)">Kontakt gesperrt</span>
+{% endif %}
+{% if lead.needs_review %}
+  <span class="tag tag-review" title="{{ lead.open_flags }} offene(r) Prüfmarker">Prüfung ({{ lead.open_flags }})</span>
+{% endif %}
+{% if lead.excluded %}
+  <span class="tag tag-excl" title="{{ lead.excluded_reason }}">ausgeschlossen</span>
+{% endif %}
+{% if lead.abstentions %}
+  <span class="tag" style="color:#6a4b9e;border-color:#c9b6e4;background:#f8f5fc"
+        title="{{ lead.abstentions|length }} Regel(n) haben sich enthalten — nicht bewertbar, nicht null">
+    {{ lead.abstentions|length }} Enthaltung{% if lead.abstentions|length != 1 %}en{% endif %}
+  </span>
+{% endif %}

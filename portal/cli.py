@@ -23,6 +23,9 @@ from portal import (
     score,
     seeds,
 )
+from portal import (
+    serve as serve_mod,
+)
 from portal.net import MAX_CONCURRENT_HOSTS, Fetcher, HostRateLimiter, RequestLog
 
 
@@ -295,6 +298,16 @@ def cmd_audit_politeness(log_path: Path) -> int:
     return 0 if ok else 1
 
 
+def cmd_serve(path: Path, host: str, port: int) -> int:
+    """§9's page. Refuses rather than starting against a database with no schema
+    — an empty table is indistinguishable from a corpus nothing has scored."""
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    print(f"lead portal on http://{host}:{port}  (database: {path})")
+    return serve_mod.serve(host, port, path)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="portal",
@@ -365,6 +378,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--list", action="store_true", help="list runs that wrote signals and exit"
     )
 
+    serve_parser = sub.add_parser(
+        "serve",
+        help="the §9 review page on localhost; read-only except flag resolution",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (default: 127.0.0.1). §1 is a single-operator tool with "
+        "no auth, so binding anywhere reachable publishes an unauthenticated database.",
+    )
+    serve_parser.add_argument(
+        "--port", type=int, default=8000, help="port (default: 8000)"
+    )
+
     audit_parser = sub.add_parser(
         "audit-politeness",
         help="measure §5.2 spacing and host concurrency from the request log",
@@ -422,6 +449,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "diff-signals":
         return cmd_diff_signals(path, args.from_run, args.to_run, args.stage, args.list)
+
+    if args.command == "serve":
+        return cmd_serve(path, args.host, args.port)
 
     if args.command == "audit-politeness":
         return cmd_audit_politeness(

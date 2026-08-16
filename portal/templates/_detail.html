@@ -1,0 +1,144 @@
+{#- The expanded row: the whole account of one company.
+
+    Everything here is read from what the pipeline stored. The only thing this
+    panel writes is a flag resolution, and it writes exactly the three columns
+    §9 names. -#}
+{% if oob %}
+  <span id="state-{{ lead.company_id }}" hx-swap-oob="true">{% include "_state.html" %}</span>
+{% endif %}
+<div class="detail">
+  <button class="toggle close" hx-get="/company/{{ lead.company_id }}/collapse"
+          hx-target="#detail-{{ lead.company_id }}" hx-swap="innerHTML">schließen</button>
+
+  {% if lead.contact_blocked %}
+    {#- Requirement, not decoration: a block a human cannot see is a block that
+        gets worked around by hand, and the trigger would then refuse a call
+        that has already been decided on. The rationale comes out of
+        `contact_blocking_reason`, so it explains itself rather than pointing at
+        a spec section. -#}
+    <div class="blockbox">
+      <strong>Kontaktaufnahme gesperrt.</strong>
+      Der <code>outreach</code>-Eintrag wird von der Datenbank abgelehnt, solange
+      einer der folgenden Marker offen ist:
+      <ul style="margin:6px 0 0 18px;padding:0">
+        {% for flag in lead.flags if flag.blocks_contact %}
+          <li>
+            <strong>{{ flag_labels.get(flag.reason, flag.reason) }}</strong> —
+            {{ flag.block_rationale }}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <section>
+    <h3>Bewertung
+      {% if lead.scored %}
+        <span class="muted" style="text-transform:none;letter-spacing:0">
+          — {{ lead.total }} Punkte, Band {{ lead.band }}, Phase {{ lead.phase }},
+          Regelwerk {{ lead.ruleset_version }}, berechnet {{ lead.computed_at }}
+          {%- if lead.remaining_upside is not none %}, Restpotenzial {{ lead.remaining_upside }}{% endif %}
+        </span>
+      {% endif %}
+    </h3>
+
+    {% if not lead.components %}
+      <p class="notice">
+        Für diese Firma liegt keine abgeschlossene Bewertung vor. Das ist keine
+        Null: <code>score</code> hat sie nicht erreicht.
+      </p>
+    {% else %}
+      <ul class="components">
+        {% for component in lead.components %}
+          <li class="{% if component.abstained %}abstained{% endif %}">
+            <div class="pts {% if component.abstained %}abstain{% elif component.points > 0 %}plus{% else %}minus{% endif %}">
+              {%- if component.abstained -%}
+                Enthaltung
+              {%- else -%}
+                {{ '%+d'|format(component.points) }}
+              {%- endif -%}
+            </div>
+            <div>
+              <div class="rule">
+                <code>{{ component.rule_id }}</code>
+                {% if component.section %}· §{{ component.section }}
+                  {{ section_labels.get(component.section, '') }}{% endif %}
+                {% if component.abstained %}
+                  · <span style="color:#6a4b9e">nicht bewertbar — die Regel hat in
+                  keine Richtung gefeuert (A7)</span>
+                {% endif %}
+              </div>
+              <p class="reason">{{ component.reason }}</p>
+
+              {% if component.evidence %}
+                <ul class="evidence">
+                  {% for item in component.evidence %}
+                    <li>
+                      <span class="k">{{ item.key }}</span>
+                      <span class="v
+                          {%- if item.is_llm %} llm{% endif %}
+                          {%- if item.unverified %} unverified{% endif %}"
+                        {%- if item.is_llm %} title="LLM-gestützt · confidence {{ item.confidence }} · {{ item.evidence_url }}"{% endif %}>
+                        {{- item.value|truncate(90) -}}
+                      </span>
+                      {% if item.unverified %}
+                        <span class="tag tag-block">nicht verifiziert</span>
+                      {% endif %}
+                      {% if item.artifact_id %}
+                        <a href="/artifact/{{ item.artifact_id }}" target="_blank"
+                           rel="noopener" title="Die gespeicherten Bytes, aus denen dieser Wert gelesen wurde">Beleg</a>
+                      {% endif %}
+                      {% if item.evidence_url %}
+                        <a href="{{ item.evidence_url }}" target="_blank" rel="noopener noreferrer"
+                           class="muted" title="{{ item.evidence_url }}">live</a>
+                      {% endif %}
+                    </li>
+                  {% endfor %}
+                </ul>
+              {% else %}
+                <div class="evidence muted" style="font-size:12px">
+                  Kein Signal hinterlegt — die Regel liest ausschließlich Felder
+                  der Firmenstammdaten.
+                </div>
+              {% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+
+  <section>
+    <h3>Prüfmarker</h3>
+    {% if not lead.flags %}
+      <p class="notice">Keine offenen Prüfmarker.</p>
+    {% else %}
+      {% for flag in lead.flags %}
+        <div class="flag {% if flag.blocks_contact %}blocking{% endif %}">
+          <div class="head">
+            <span class="name">{{ flag_labels.get(flag.reason, flag.reason) }}</span>
+            <code class="muted">{{ flag.reason }}</code>
+            <span class="muted">seit {{ flag.raised_at }}</span>
+            {% if flag.blocks_contact %}
+              <span class="tag tag-block">sperrt Kontakt</span>
+            {% endif %}
+          </div>
+          {% if flag.raised_note %}
+            <p class="note">{{ flag.raised_note }}</p>
+          {% endif %}
+          {% if flag.blocks_contact %}
+            <p class="rationale">{{ flag.block_rationale }}</p>
+          {% endif %}
+          {#- Each flag clears on its own. Resolving one of three must not clear
+              the other two: they send a person to three different pages, which
+              is why §6.4 made them distinct reasons in the first place. -#}
+          <form hx-post="/company/{{ lead.company_id }}/flag/{{ flag.id }}/resolve"
+                hx-target="#detail-{{ lead.company_id }}" hx-swap="innerHTML">
+            <input type="text" name="note" placeholder="Notiz (optional) — was haben Sie gesehen?">
+            <button type="submit">geprüft &amp; erledigt</button>
+          </form>
+        </div>
+      {% endfor %}
+    {% endif %}
+  </section>
+</div>

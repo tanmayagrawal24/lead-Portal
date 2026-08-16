@@ -1,0 +1,49 @@
+{#- One summary row. Its state badges live in a `<span>` so the flag-resolution
+    response can swap them out of band: a block that has just lifted must stop
+    showing as one in the same interaction, and a `<tr>` fragment does not
+    survive being parsed outside a table. -#}
+<tr class="summary {% if lead.excluded %}excluded{% endif %}" id="row-{{ lead.company_id }}">
+  <td>
+    <button class="toggle" title="Details"
+            hx-get="/company/{{ lead.company_id }}/detail"
+            hx-target="#detail-{{ lead.company_id }}" hx-swap="innerHTML">+</button>
+  </td>
+  <td>
+    <a href="https://{{ lead.domain }}" target="_blank" rel="noopener noreferrer">{{ lead.domain }}</a>
+  </td>
+  <td>
+    {% if lead.scored %}
+      <span class="band band-{{ lead.band }}" title="Phase {{ lead.phase }}, Regelwerk {{ lead.ruleset_version }}">{{ lead.band }}</span>
+      <span class="muted" style="font-size:11px">P{{ lead.phase }}</span>
+    {% else %}
+      <span class="band band-none" title="Noch nicht bewertet">–</span>
+    {% endif %}
+  </td>
+  <td class="num">{% if lead.scored %}{{ lead.total }}{% else %}<span class="muted">–</span>{% endif %}</td>
+  <td>
+    {#- The gate decision, and the number behind it. `admitted` is NULL where no
+        scoring run has reached this company: not a stop, an absence. -#}
+    {% if lead.admitted is none %}
+      <span class="muted">–</span>
+    {% elif lead.admitted %}
+      <span class="tag tag-p2" title="Score {{ lead.total }} + Restpotenzial {{ lead.remaining_upside }} erreicht die B-Schwelle">P2</span>
+    {% else %}
+      <span class="tag tag-stop" title="Score {{ lead.total }} + Restpotenzial {{ lead.remaining_upside }} bleibt unter der B-Schwelle">Stopp</span>
+    {% endif %}
+  </td>
+  <td>{{ lead.city or '–' }}</td>
+  <td>{{ lead.platform or '–' }}</td>
+  <td>
+    {% if lead.blog_last_post %}
+      {{ lead.blog_last_post }}
+      {%- if lead.blog_last_post_basis == 'article' %}
+        <span class="muted" title="Nur durch einen Stichprobenbeitrag belegt — eine Untergrenze ohne Obergrenze (M1.32)">*</span>
+      {%- endif %}
+    {% else %}<span class="muted">–</span>{% endif %}
+  </td>
+  <td>{{ lead.ai_visibility }}</td>
+  <td class="hook">{{ lead.hook or '—' }}</td>
+  <td>
+    <span id="state-{{ lead.company_id }}">{% include "_state.html" %}</span>
+  </td>
+</tr>
