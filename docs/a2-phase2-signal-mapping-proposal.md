@@ -99,10 +99,10 @@ artifact the text was read from (M1.42).
 | `city` | signal **+** `company.city` | `impressum.city` (text) | no | Fills §9's dead *Ort* column. |
 | `country` | signal **+** `company.country` | `impressum.country` (text) | no | Fills M4's empty country filter. `company.country` has a `CHECK (DE/AT/CH)`, so a fourth value must be written to the signal and **not** to the column, rather than failing the write — `doonails.de` is a Cyprus Ltd (§5.3) and CY is a real answer. |
 | `managing_directors` | **`contact`** rows, one per name, `role='Geschäftsführer'` **+** signal (count only) | `impressum.gf_count` (num) — *view column exists* | **yes**, disjunct 2 | Names substring-verified; an unverified name creates **no contact row** and is written nowhere. See §5 for the `gf_count = 0` defect this mapping has to avoid. |
-| `owner_name` | **`contact`** row, `role='Inhaber'` **+** signal (presence only) | `impressum.owner_name_present` (num 0/1) | **no — deliberately** | This is §10.2's lever and §10.2 is not mine to close. Extract it, record it, score nothing on it. Recording it is what makes §10.2 decidable by measurement on the next corpus instead of by argument; on this one the `Inh.`/`Inhaber` marker appears on **1 of 12** stored Impressum pages, consistent with §5.3's single observation (`lampenflut.de`). |
+| `owner_name` | **`contact`** row, `role='Inhaber'` **+** signal (presence only) | `impressum.owner_name_present` (num 0/1) | **no — deliberately** | This is §10.2's lever and §10.2 is not mine to close. Extract it, record it, score nothing on it. Recording it is what makes §10.2 decidable by measurement on the next corpus instead of by argument; on this one the `Inh.`/`Inhaber` marker appears on **1 of 11** stored Impressum pages (§8b), which is §5.3's single observation (`lampenflut.de`, served by `germanelectronic.de`) under its other name. |
 | `register_court` | signal | `impressum.register_court` (text) | no | For the brief: evidence the company is a real registered entity. |
 | `register_number` | signal | `impressum.register_number` (text) | no | As above. |
-| `vat_id` | signal | `impressum.vat_id` (text) | no | **Open question 4** — for an Einzelunternehmen a USt-IdNr is arguably tied to a natural person, and as a signal it sits outside `purge`'s reach. |
+| `vat_id` | **`contact.vat_id`** only | — | no | **Ruled (item 4): `contact.vat_id`**, on a firmer argument than the one proposed. The question is not whether a USt-IdNr is personal data in general — it is that **we cannot tell at write time which case we are in.** Branching on `legal_form` would decide it, and `legal_form` is known for **7 of 13** companies. When the classifier for *"is this tied to a natural person"* is itself two-thirds reliable, the destination is the conservative one. Needs a `contact.vat_id` column (migration). **Consequence to state: this splits the three registration identifiers across two tables** — `register_court` and `register_number` in `signal`, `vat_id` in `contact` — so §8's research brief must join to assemble them. |
 | `email` | **`contact.email`** only | — | no | Personal data. |
 | `phone` | **`contact.phone`** only | — | no | Personal data. |
 
@@ -212,18 +212,64 @@ pages. The other seven would each take a wrong +15 — and `qual.owner_operated`
 is one of two rules whose banking raises a company's effective Phase-2 threshold
 from 5 to 20 (§7.1), so the error propagates into the spend model.
 
-**Proposed mapping:** `impressum.gf_count` is written **only when the page names
-at least one** natural-person Geschäftsführer. An Impressum naming none leaves it
-unwritten, and `llm.impressum_extracted` records that the page was nonetheless
-read. This keeps §6.1's predicate exactly as ratified, and it is coherent with
-the intent: a sole trader has no Geschäftsführer and should be caught by disjunct
-1 (`legal_form`) or disjunct 3 (owner named on site), not by counting zero of
-something.
+**RULED (item 2): take both halves, not either.** The mapping rule is ratified
+*and* §6.1's predicate becomes `1 <= directors <= 2`.
 
-*The alternative* — write `0` and change the predicate to `1 <= directors <= 2` —
-is a predicate change and therefore not mine. It is the cleaner expression of the
-same intent and worth ruling on; I have proposed the mapping-side fix because it
-needs no rule edit.
+- **Mapping:** `impressum.gf_count` is written **only when the page names at least
+  one** natural-person Geschäftsführer. An Impressum naming none leaves it
+  unwritten, and `llm.impressum_extracted` records that the page was read.
+- **Predicate:** `_owner_operated` disjunct 2 becomes `1 <= directors <= 2`.
+
+The reasoning for taking both, in the operator's words: *the mapping is a
+convention that holds while every writer remembers it; the predicate is an
+invariant that holds when one doesn't.* On a +15 rule that raises a company's
+effective Phase-2 threshold from 5 to 20 (§7.1), both. Filed as **M1.46**.
+
+Re-measured on the ratified selection (both guards, n=11): a `Geschäftsführer`
+label appears on **5 of 11** stored Impressum pages, so **6 of 11 name none** and
+would each have taken a wrong +15. The argument is unchanged in shape; only the
+corpus it is measured over is now the one M5 will actually read.
+
+### 5b. The hole the ruling closed: a verification failure is not an absence
+
+§3 says an unverified name creates no `contact` row and is written nowhere. Follow
+that through: **if the model returns 2 directors and both fail substring
+verification, the verified count is 0, `gf_count` goes unwritten, and
+`llm.impressum_extracted = 1` sits beside it** — which is *precisely* the state
+this mapping assigns to "the page was read and names none". A verification
+failure and a genuine absence become indistinguishable, on the input to a +15
+rule.
+
+**Ruled:** `impressum.gf_count` counts **what the model returned**, with
+`confidence = 0` when any returned name failed verification. **Verification
+governs `contact` rows, not the count.** The two questions are different — *is
+this name real enough to write down and later put in a letter* versus *how many
+people does this page name* — and the count answers the second. §9 renders
+`confidence = 0` red, so the operator sees an unverified count as unverified
+rather than seeing nothing at all.
+
+### 5c. The same question, asked of every other field
+
+The ruling required re-checking every field where verification can fail **and**
+the mapping's absence-signature is load-bearing. Four fields, three outcomes:
+
+| field | absence-signature load-bearing? | verdict |
+|---|---|---|
+| `impressum.gf_count` | **yes** — unwritten means "names none", read by a +15 rule | fixed above: count what was returned, `confidence = 0` |
+| `impressum.owner_name_present` (0/1) | **yes** — this *is* §10.2's measurement, and a verification failure recorded as `0` would corrupt the base rate the decision rests on | **write `1` with `confidence = 0`** when a returned `owner_name` fails verification. A genuine absence writes `0`, which is a real observation and safe because no rule reads it |
+| `impressum.legal_name` | no | already handled in §3 — signal written with `confidence = 0` **and the rejected value in `value_text`**, `company.legal_name` untouched. A company name is not personal data |
+| `site.owner_named`, `brand.own_brand` | no absence-signature — but see below | **cannot be substring-verified at all.** Filed separately as **M1.47** |
+
+**The finding that came out of the re-check, and it is not small.** §5.5b's
+verification list is `legal_name`, `managing_directors`, `owner_name` — values
+*quoted from the page*, which is the only thing a substring check can test.
+`owner_named_on_site` and `own_brand` are **booleans**: judgements about a page,
+with no string to find in it. So the two scored fields §6.1 gains from Phase 2 —
+`site.owner_named` at **+15** and `brand.own_brand` at **+10** — carry **no
+verification of any kind**. That is 25 points of ruleset v3 riding on
+unverifiable model output, and the substring backstop the whole design leans on
+does not reach either of them. Not fixed here; recorded as M1.47 so it is
+decided rather than discovered.
 
 ### `own_brand = null` after Phase 2 is an abstention, not a decline
 
@@ -358,19 +404,74 @@ pattern-presence counts, not extraction accuracy** — a USt-IdNr shape in the p
 may belong to a payment provider, an e-mail may be in a cookie policy. Labelled
 as observations, per §10.4, and not as a claim that a parser would work.
 
-| candidate | pattern present | verdict |
-|---|---:|---|
-| provider block locatable | 10/12 | the anchor §5.3 already relies on |
-| `legal_form` | — | **already Phase 1** (§5.3/A1: 7/12, 0 false positives) |
-| `agency_credit` | — | **already Phase 1** (`agency.footer_credit`) |
-| PLZ + Ort inside the provider block | 9/12 | **strong Phase-1 candidate, unmeasured for accuracy.** Would fill §9's dead *Ort* column and M4's empty country filter at zero cost. Worth measuring before M5 — see §10. |
-| USt-IdNr shape | 10/12 | Phase-1 candidate, unmeasured. Highly regular format. |
-| HRA/HRB number | 4/12 | Phase-1 candidate. Low base rate — most of the corpus is not a registered *Handelsgesellschaft*. |
-| Amtsgericht | 2/12 | as above. |
-| labelled `Tel`/`Telefon` | 8/12 | Phase-1 candidate, but obfuscation (`info [at] …`, image phone numbers) is common and unmeasured here. |
-| e-mail shape | 10/12 | as above, and prone to false positives from privacy-policy contacts. |
-| `Inh.`/`Inhaber` marker | **1/12** | §10.2's lever. Consistent with §5.3's single observation. Not enough to decide anything on, which is what §10.2 already says. |
-| `Geschäftsführer` label | 5/12 | the measurement behind §5's `gf_count` decision. |
+**Restated on the ratified selection (Unit 0 item 1).** The original counts were
+measured on *naive newest-by-id*, which for `snocks.com` selects artifact 265 —
+the homepage (M1.43). Item 9 as ratified excludes that **and** any
+robots-disallowed body (M1.44), so the table is restated on the selection M5 will
+actually implement, with the original column kept beside it because the
+difference is the point. **Reproducible: `portal audit-impressum-candidates`
+(M1.48).**
+
+**The denominator is 11, not 12.** Applying both guards leaves `snocks.com` with
+no usable Impressum at all — 265 is the homepage, 171 is robots-disallowed — so
+it drops out of the measurement entirely, exactly as item 9 says it should. That
+is a smaller corpus and a *higher* hit rate on almost every row: the page that
+left was contributing to seven of the nine counts.
+
+> **This table was wrong twice before it was right, both times for the same
+> reason.** The original was measured on the naive selection while §7 recommended
+> a guarded one; the first restatement was measured with M1.43's guard only,
+> while item 9 had already been ratified with M1.44's as well. In both cases the
+> selection was *described* in one place and *applied* in another — M1.42's shape,
+> at the level of which corpus. It is now one expression (`select_inputs`) that
+> both the counts and the values read, and the command carries its own baseline
+> so a future disagreement shows up as a disagreement.
+
+| candidate | naive newest (n=12) | **ratified selection (n=11)** | verdict |
+|---|---:|---:|---|
+| provider block locatable | 10/12 | **10/11** | the anchor §5.3 already relies on |
+| `legal_form` | — | — | **already Phase 1** (§5.3/A1: 7/12, 0 false positives) |
+| `agency_credit` | — | — | **already Phase 1** (`agency.footer_credit`) |
+| PLZ + Ort inside the provider block | 9/12 | **9/11** | **strong Phase-1 candidate, presence measured, accuracy not.** Fills §9's dead *Ort* column and M4's empty country filter at zero cost. Accuracy check is the operator's — §10 item 10. |
+| USt-IdNr shape | 10/12 | **10/11** | Phase-1 candidate, unmeasured for accuracy. Highly regular format. |
+| HRA/HRB number | 4/12 | **4/11** | Phase-1 candidate. Low base rate — most of the corpus is not a registered *Handelsgesellschaft*. |
+| Amtsgericht | 2/12 † | **3/11** | as above. |
+| labelled `Tel`/`Telefon` (in block) | 8/12 | **8/11** | Phase-1 candidate, but obfuscation (`info [at] …`, image phone numbers) is common and unmeasured here. |
+| e-mail shape | 10/12 | **10/11** | as above, and prone to false positives from privacy-policy contacts. |
+| `Inh.`/`Inhaber` marker | **1/12** | **1/11** | §10.2's lever — and instrument-dependent, see §8b. |
+| `Geschäftsführer` label | 5/12 | **5/11** | the measurement behind §5's `gf_count` decision: **6 of 11 name none**. |
+
+† **The one row that does not reproduce.** Re-measurement matched the original on
+eight of nine rows; `Amtsgericht` came out 3/12 rather than 2/12 on the naive
+selection. The instrument cannot be compared, because **the script behind the
+original §8 was never committed** — the proposal was preserved as a deliverable
+and the thing that produced its numbers was not. That is now fixed by M1.48: this
+table has a command behind it, and any future measurement that reaches a proposal
+ships with its instrument.
+
+### 8b. §10.2's base rate is instrument-dependent — 1/12 or 3/12
+
+Ratified as Unit 0 item 3, and recorded here as well as in §10.2 because it
+changes what a future measurement means.
+
+- In **visible text** (`parsers.visible_text`), the `Inh.`/`Inhaber` marker
+  appears on **1 of 11** — `germanelectronic.de`, which serves `lampenflut.de`
+  (M1.18), so this is §5.3's single observation under its other name.
+- In **raw HTML**, it appears on **3 of 12** (measured across all stored
+  Impressum artifacts, so `snocks.com` is present here and absent from the
+  visible-text row above — the two are not the same denominator) — `blackpolish.de`, `snocks.com` and
+  `germanelectronic.de`. On the two extra domains the token occurs *only inside a
+  `<script>` block*, which `visible_text` decomposes deliberately, for the
+  documented reason that JSON-LD vendor identifiers otherwise land inside the
+  provider block and get read as the company's own details.
+
+Neither number is wrong; they answer different questions. **Which one settles
+§10.2 depends on what text `extract-p2` sends the model** — an open M5 decision.
+If it sends `visible_text`, the model cannot see what a human reading the page
+cannot see either, and **1/12 is the right base rate**. If it sends raw HTML,
+3/12 is, and the model inherits the contamination §5.3 strips on purpose. The
+decision is not made here; what is recorded is that it is a decision, and that
+§10.2 cannot be closed by measurement without it.
 
 **Genuinely needs the LLM — five fields:**
 
@@ -406,7 +507,31 @@ pages are sent either way — so this is a correctness argument, not a cost one.
   them, not because any of §5.5c is being designed here.
 - **Model choice** — the yield benchmark answers it (multi-provider proposal §7).
 
-## 10. For ratification
+## 10. For ratification — **RULED 2026-08-16**
+
+All ten items are closed. Items 1, 3, 5, 6, 7, 8 ratified as written; 2, 4 and 9
+ratified with changes, recorded inline above and summarised here; 10 is the
+operator's to run.
+
+| # | outcome |
+|---|---|
+| 1 | **As written.** Three-destination rule and the prohibition on a person's name in `signal`. |
+| 2 | **Changed — both halves.** Mapping rule *and* §6.1's predicate → `1 <= directors <= 2` (§5). Plus the verification/absence conflation the ruling exposed, closed in §5b, and the same question asked of every other field in §5c — which surfaced **M1.47**. |
+| 3 | **As written.** `impressum.owner_named` → `site.owner_named`. |
+| 4 | **Changed — `contact.vat_id`**, on the "we cannot tell at write time" argument rather than the general-personal-data one (§3). Splits the three registration identifiers across two tables; the brief must join. |
+| 5 | **As written.** `agency_credit` demoted to an unscored hint. |
+| 6 | **As written.** `own_brand_undetermined` as a tenth §6.4 review reason. |
+| 7 | **As written.** `one_line_offer` as a view column. |
+| 8 | **As written.** seed > Impressum > Places; LLM > regex via `COALESCE` in the view. |
+| 9 | **Changed — as amended by M1.44.** Selection excludes **(a)** any artifact whose `content_hash` matches that company's homepage **and (b)** any artifact whose URL the company's newest stored `robots.txt` disallows. Both one-off repairs proceed (265, 171, 186); the body is deleted, the row and its `error` are kept. Accepted consequence: `snocks.com` ends with no usable Impressum and routes to `no_impressum` — the two-step working. |
+| 10 | **Presence measured (10/12, §8); accuracy is the operator's**, because it needs the values and those may not enter a transcript or the repo. `portal audit-impressum-candidates --show-values` prints them to the terminal and writes nothing. |
+
+**A note the operator attached to item 9, worth keeping:** M1.44's robots policies
+are *as of the third crawl*. The two URLs are disallowed as far as we last
+looked, which is the right basis for a selection rule and **not** a claim about
+today.
+
+### The original ten, as proposed
 
 1. **The mapping in §3 and §3b as written**, including the three-destination rule
    and the prohibition on a person's name in `signal`.

@@ -178,7 +178,13 @@ def _owner_operated(profile: Profile, _today: date) -> Outcome:
             f"Die Rechtsform ({form}) weist auf ein inhabergeführtes Unternehmen hin."
         )
     directors = _num(profile, "gf_count")
-    if directors is not None and directors <= 2:
+    # `1 <=`, not just `<= 2` (M1.46). §6.1's disjunct is "names 1–2 natural-person
+    # Geschäftsführer", and naming none is not naming ≤ 2. A2's mapping already
+    # withholds the key on an Impressum that names nobody, but that is a
+    # convention every future writer has to remember; this is the invariant that
+    # holds when one does not, on a rule worth +15 that also raises the company's
+    # effective Phase-2 threshold from 5 to 20 (§7.1).
+    if directors is not None and 1 <= directors <= 2:
         named = "eine Geschäftsführerin bzw. einen Geschäftsführer"
         if directors != 1:
             named = f"{int(directors)} Geschäftsführende"

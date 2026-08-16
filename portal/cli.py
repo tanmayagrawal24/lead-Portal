@@ -18,6 +18,7 @@ from portal import (
     diff,
     extract,
     fetch,
+    impressum_audit,
     migrate,
     ruleset,
     score,
@@ -298,6 +299,34 @@ def cmd_audit_politeness(log_path: Path) -> int:
     return 0 if ok else 1
 
 
+def cmd_audit_impressum_candidates(path: Path, show_values: bool) -> int:
+    """M1.48 — the instrument behind A2 §8, committed rather than transcribed.
+
+    Default output is counts of pattern presence and nothing else. `--show-values`
+    prints the PLZ + Ort spans for the operator's accuracy check (A2 item 10) and
+    **writes nothing** — that check needs the values, and §8 forbids an extracted
+    personal value entering the repo or a report.
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    root = config.artifacts_root(path)
+    conn = db.connect(path)
+    try:
+        if show_values:
+            rows = impressum_audit.plz_ort_values(conn, root)
+            print("PLZ + Ort candidates — terminal only, nothing is written.")
+            print("Values are personal-adjacent; do not paste them anywhere.\n")
+            for domain, spans in rows:
+                shown = "  |  ".join(spans) if spans else "(no match in block)"
+                print(f"  {domain:26} {shown}")
+            return 0
+        print(impressum_audit.report(impressum_audit.audit(conn, root)))
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_serve(path: Path, host: str, port: int) -> int:
     """§9's page. Refuses rather than starting against a database with no schema
     — an empty table is indistinguishable from a corpus nothing has scored."""
@@ -403,6 +432,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="request log (default: data/requests.jsonl)",
     )
 
+    candidates_parser = sub.add_parser(
+        "audit-impressum-candidates",
+        help="which Impressum fields a deterministic parser could reach (M1.48); "
+        "counts only, nothing is written",
+    )
+    candidates_parser.add_argument(
+        "--show-values",
+        action="store_true",
+        help="print the PLZ + Ort spans to this terminal for the accuracy check "
+        "(A2 item 10). Writes nothing. Do not paste the output anywhere.",
+    )
+
     fetch_parser.add_argument(
         "--max-hosts",
         type=int,
@@ -457,6 +498,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_audit_politeness(
             args.log if args.log is not None else config.request_log_path(path)
         )
+
+    if args.command == "audit-impressum-candidates":
+        return cmd_audit_impressum_candidates(path, args.show_values)
 
     raise AssertionError(f"unhandled command: {args.command}")  # pragma: no cover
 

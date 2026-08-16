@@ -305,6 +305,44 @@ class TestAgencyCredit(unittest.TestCase):
         self.assertIn("cubecom Webdesign", reason)
 
 
+class TestOwnerOperatedDirectorCount(unittest.TestCase):
+    """§6.1 disjunct 2, as amended by M1.46: `1 <= directors <= 2`.
+
+    The predicate is the invariant behind A2's mapping convention, not a
+    duplicate of it. A2 says `impressum.gf_count` is written only when the page
+    names at least one Geschäftsführer — but that holds only while every future
+    writer remembers it, and this rule is +15 and raises the company's effective
+    Phase-2 threshold from 5 to 20 (§7.1). So the zero case is pinned here, on
+    the rule, where a mapping mistake cannot reach it.
+    """
+
+    def test_zero_directors_does_not_fire(self) -> None:
+        """Naming none is not naming ≤ 2. Before M1.46 this took +15 with the
+        reason 'Das Impressum nennt 0 Geschäftsführende'."""
+        self.assertIsNone(points(run(gf_count=0), "qual.owner_operated"))
+
+    def test_one_and_two_fire(self) -> None:
+        for directors in (1, 2):
+            with self.subTest(directors=directors):
+                self.assertEqual(
+                    points(run(gf_count=directors), "qual.owner_operated"), 15
+                )
+
+    def test_three_does_not_fire(self) -> None:
+        self.assertIsNone(points(run(gf_count=3), "qual.owner_operated"))
+
+    def test_zero_still_reaches_the_other_disjuncts(self) -> None:
+        """M1.46 narrows disjunct 2 only. A sole trader with no Geschäftsführer
+        is meant to be caught by legal_form or by being named on the site —
+        which is the coherence argument for the narrowing, so it is tested."""
+        self.assertEqual(
+            points(run(gf_count=0, legal_form="e.K."), "qual.owner_operated"), 15
+        )
+        self.assertEqual(
+            points(run(gf_count=0, owner_named=1), "qual.owner_operated"), 15
+        )
+
+
 class TestGateAndBands(unittest.TestCase):
     def test_bands(self) -> None:
         for total, band in (
