@@ -501,17 +501,43 @@ class TestBlogArticleSample(ExtractTestCase):
         self.assertNotIn("content.blog_last_post", result.signals)
         self.assertIn("no parseable post date", " ".join(result.notes))
 
-    def test_two_sources_record_a_basis_of_both(self) -> None:
-        """§6.2's interim guard needs to know what the date rests on, so the
-        basis travels with it the way A5's tier travels with the count."""
+    def test_a_sample_newer_than_the_index_is_not_bounded_by_it(self) -> None:
+        """M1.40, found by running the third crawl. The basis describes **the
+        date that was written**, not which sources produced one.
+
+        `zecplus.de` is the case: the index's newest date was 2021-03-10, the
+        sampled article was 2025-09-03, the article won the maximum — and the
+        basis said `both`, which §6.2 reads as "the index bounds this from
+        above". An index that failed to date the newest post we are holding
+        bounds nothing, and `opp.blog_slowing` took +10 on that. M1.32's defect,
+        arriving through the basis instead of through its absence.
+        """
         company_id = self.stocked()  # index dates 2024-02-01
         self.artifact(
             company_id,
             "blog_article",
             "https://muster.de/blogs/news/erster",
-            BLOG_ARTICLE,  # 2025-06-30
+            BLOG_ARTICLE,  # 2025-06-30 — newer than anything the index dates
         )
         result = self.extract(company_id)
+        self.assertEqual(str(result.signals["content.blog_last_post"]), "2025-06-30")
+        self.assertEqual(result.signals["content.blog_last_post_basis"], "article")
+        self.assertIn("does not bound it", " ".join(result.notes))
+
+    def test_two_sources_record_a_basis_of_both_when_the_index_wins(self) -> None:
+        """§6.2's interim guard needs to know what the date rests on, so the
+        basis travels with it the way A5's tier travels with the count. Where
+        the index's own maximum *is* the value written, it bounds it — and the
+        sample agreeing changes nothing about that."""
+        company_id = self.stocked()  # index dates 2024-02-01
+        self.artifact(
+            company_id,
+            "blog_article",
+            "https://muster.de/blogs/news/erster",
+            '<html><body><time datetime="2023-05-04">4. Mai 2023</time></body></html>',
+        )
+        result = self.extract(company_id)
+        self.assertEqual(str(result.signals["content.blog_last_post"]), "2024-02-01")
         self.assertEqual(result.signals["content.blog_last_post_basis"], "both")
 
     def test_an_index_date_alone_records_a_basis_of_index(self) -> None:

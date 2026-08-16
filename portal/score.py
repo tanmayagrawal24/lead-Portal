@@ -21,6 +21,12 @@ is in `ScoreStage`, on the other side of that line.
    `gate.remaining_upside` (§5.4). With a per-company gate, "just under the
    line" means something different for each company, so the threshold it was
    judged against has to be stored rather than reconstructed.
+
+**And one thing a score can withhold.** An abstention that leaves the score too
+*high* blocks outbound contact until a human resolves it (A7's third axis,
+migration 008). The block lives in the schema, on `outreach`; what this stage
+does is raise the flag that causes it and report the state back, so the lead
+list says so where a person would otherwise pick up the phone.
 """
 
 from __future__ import annotations
@@ -50,6 +56,36 @@ class Component:
     state: str
 
 
+@dataclass(frozen=True)
+class ReviewFlag:
+    """One §6.4 routing, carrying its own note.
+
+    The note travels with the flag rather than being looked up afterwards. A
+    company can abstain on three rules at once, and picking "the first
+    abstention's reason" for all three of them sends a person to the wrong page
+    — which is the failure `blog_undetectable` was made a distinct reason to
+    avoid in the first place (§6.4).
+    """
+
+    reason: str
+    note: str
+
+
+@dataclass(frozen=True)
+class PendingTransient:
+    """An A7b abstention that has not yet earned a flag.
+
+    The rule names where it *would* route; whether it routes yet depends on how
+    many consecutive runs it has abstained on, which is history and therefore
+    not a question `evaluate` may ask (§5.4: scoring is a pure function of one
+    profile row).
+    """
+
+    rule_id: str
+    reason: str
+    note: str
+
+
 @dataclass
 class ScoreResult:
     domain: str
@@ -59,7 +95,12 @@ class ScoreResult:
     components: list[Component] = field(default_factory=list)
     remaining_upside: int = 0
     admitted: bool = False
-    review_flags: list[str] = field(default_factory=list)
+    review_flags: list[ReviewFlag] = field(default_factory=list)
+    pending_transients: list[PendingTransient] = field(default_factory=list)
+    #: §8/A7: an unresolved too-high abstention refuses outbound contact for
+    #: this company. Read back from `company.contact_blocked` after the flags
+    #: are written, so what is reported is what the database will enforce.
+    contact_blocked: bool = False
 
     @property
     def awarded(self) -> list[Component]:
@@ -111,7 +152,15 @@ def evaluate(
             Component(rule.id, points, outcome.reason, outcome.state)
         )
         if outcome.review_reason:
-            result.review_flags.append(outcome.review_reason)
+            result.review_flags.append(
+                ReviewFlag(outcome.review_reason, outcome.reason)
+            )
+        if outcome.persistent_review_reason:
+            result.pending_transients.append(
+                PendingTransient(
+                    rule.id, outcome.persistent_review_reason, outcome.reason
+                )
+            )
 
     result.band = band_of(result.total)
 
@@ -124,6 +173,13 @@ def evaluate(
     )
     result.admitted = result.total + result.remaining_upside >= BAND_FLOOR["B"]
     return result
+
+
+#: A7b. Three consecutive runs, on three distinct days — the reasoning is in §5
+#: and the "distinct days" half is load-bearing: a crash-restart loop inside one
+#: afternoon manufactures three runs, and the flag would then be about our own
+#: crash rather than about the shop.
+PERSISTENT_RUNS = 3
 
 
 class ScoreStage:
@@ -153,8 +209,67 @@ class ScoreStage:
 
     def run_company(self, profile: sqlite3.Row) -> ScoreResult:
         result = evaluate(dict(profile), self.today)
+        self._route_persistent(result)
         self._persist(result)
+        result.contact_blocked = bool(
+            self.conn.execute(
+                "SELECT contact_blocked FROM company WHERE id = ?",
+                (result.company_id,),
+            ).fetchone()[0]
+        )
         return result
+
+    def _route_persistent(self, result: ScoreResult) -> None:
+        """A7b: turn a transient that has stopped being transient into a flag."""
+        for pending in result.pending_transients:
+            days = self._abstained_days(result.company_id, pending.rule_id)
+            if len(days) < PERSISTENT_RUNS:
+                continue
+            result.review_flags.append(
+                ReviewFlag(
+                    pending.reason,
+                    f"{pending.note} Der Abruf schlägt seit {min(days)} an "
+                    f"{len(days)} verschiedenen Tagen in Folge fehl – bitte "
+                    "die Seite einmal von Hand aufrufen.",
+                )
+            )
+
+    def _abstained_days(self, company_id: int, rule_id: str) -> list[str]:
+        """The distinct days this rule has abstained on, walking back over
+        *consecutive* scoring runs and stopping at the first that did not.
+
+        A component worth 0 points is exactly an abstention: `evaluate` records
+        no component at all for a rule that declines, and `assert_declared`
+        refuses a rule worth nothing. The day comes from `run.started_at` rather
+        than from the number of runs, because `score` is a free recompute and
+        may be run five times in an afternoon.
+
+        Every rule that carries a persistent routing has exactly one abstention
+        cause today, so "the rule abstained again" and "the same fetch missed
+        again" are the same fact. The one rule with two causes, `opp.no_blog`,
+        routes its other cause (`blog_undetectable`) immediately anyway.
+        """
+        days = [self.today.isoformat()]
+        rows = self.conn.execute(
+            """
+            SELECT date(r.started_at) AS day,
+                   EXISTS (SELECT 1 FROM score_component sc
+                           WHERE sc.score_id = s.id AND sc.rule_id = ?
+                             AND sc.points = 0) AS abstained
+            FROM score s JOIN run r ON r.id = s.run_id
+            WHERE s.company_id = ? AND s.phase = ? AND s.run_id <> ?
+            ORDER BY s.run_id DESC
+            """,
+            (rule_id, company_id, self.phase, self.run_id),
+        )
+        for row in rows:
+            if not row["abstained"]:
+                break
+            if row["day"] not in days:
+                days.append(row["day"])
+            if len(days) >= PERSISTENT_RUNS:
+                break
+        return days
 
     def _persist(self, result: ScoreResult) -> None:
         """Idempotent within a run (§5, `uq_score_identity`).
@@ -212,29 +327,16 @@ class ScoreStage:
                 (result.company_id, self.run_id, key, value, utc_now()),
             )
 
-        for reason in result.review_flags:
+        # The note is the abstention's own reason — what was seen, and why it
+        # could not carry the rule (migration 004) — and it is the reason of the
+        # abstention that *raised this flag*, not of whichever abstained first.
+        for flag in result.review_flags:
             self.conn.execute(
                 "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at, "
                 "raised_note) VALUES (?,?,?,?,?) "
                 "ON CONFLICT (company_id, reason) DO NOTHING",
-                (
-                    result.company_id,
-                    reason,
-                    self.run_id,
-                    utc_now(),
-                    self._note_for(reason, result),
-                ),
+                (result.company_id, flag.reason, self.run_id, utc_now(), flag.note),
             )
-
-    @staticmethod
-    def _note_for(reason: str, result: ScoreResult) -> str | None:
-        """The one line the person needs at the instant they see the queue
-        (migration 004). It is the abstention's own reason, which already says
-        what was seen and why it could not carry the rule."""
-        for component in result.abstentions:
-            if component.reason:
-                return component.reason
-        return None
 
 
 def run(
@@ -253,15 +355,34 @@ def run(
 
     stage = ScoreStage(conn, run_id, phase, today)
     rows = stage.profiles()
+    # `finished_at` marks a run that reached the end, and nothing else (M1.39):
+    # `company_profile` reads it to decide which run's account of a company to
+    # trust, so a crashed run that claimed to be finished would let a partial
+    # pass retract signals it never got to write (migration 007).
     try:
         results = [stage.run_company(row) for row in rows]
-    finally:
+    except BaseException as exc:
         conn.execute(
-            "UPDATE run SET finished_at = ?, companies_seen = ? WHERE id = ?",
-            (utc_now(), len(rows), run_id),
+            "UPDATE run SET aborted_reason = ? WHERE id = ?",
+            (f"{type(exc).__name__}: {exc}"[:500], run_id),
         )
         conn.commit()
+        raise
+    conn.execute(
+        "UPDATE run SET finished_at = ?, companies_seen = ? WHERE id = ?",
+        (utc_now(), len(results), run_id),
+    )
+    conn.commit()
     return run_id, results
 
 
-__all__ = ["Component", "ScoreResult", "ScoreStage", "band_of", "evaluate", "run"]
+__all__ = [
+    "Component",
+    "PendingTransient",
+    "ReviewFlag",
+    "ScoreResult",
+    "ScoreStage",
+    "band_of",
+    "evaluate",
+    "run",
+]

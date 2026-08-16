@@ -65,9 +65,13 @@ class Outcome:
 
     state: str
     reason: str
-    #: §6.4 routing, on an abstention. `None` where A7's part 3 does not apply
-    #: or is not yet ratified — see `docs/m3-absent-input-audit.md` §8.
+    #: §6.4 routing, raised the moment the rule abstains (A7a — a measurement
+    #: limit, which running again does not change).
     review_reason: str | None = None
+    #: §6.4 routing for an A7b transient: the request may land next time, so
+    #: this is raised only once the abstention has persisted N runs on N
+    #: distinct days. `score` counts; the rule only names where it would go.
+    persistent_review_reason: str | None = None
 
 
 def fires(reason: str) -> Outcome:
@@ -78,8 +82,19 @@ def declines() -> Outcome:
     return Outcome(DECLINES, "")
 
 
-def abstains(reason: str, review_reason: str | None = None) -> Outcome:
-    return Outcome(ABSTAINS, reason, review_reason)
+def abstains(
+    reason: str,
+    review_reason: str | None = None,
+    persistent_review_reason: str | None = None,
+) -> Outcome:
+    return Outcome(ABSTAINS, reason, review_reason, persistent_review_reason)
+
+
+#: A7b's routing, once the retry policy is exhausted (migration 009). Every
+#: instance is a page that was identified and never returned 200, and they share
+#: one reason because they send a person to answer one question: does this URL
+#: load for you?
+PERSISTENT_FETCH = "fetch_persistently_failing"
 
 
 #: A company row from `company_profile`, as a plain mapping. Scoring never sees
@@ -233,9 +248,10 @@ def _no_blog(profile: Profile, _today: date) -> Outcome:
                 else ", weil nicht beide Suchwege zur Verfügung standen."
             )
             + " Die gesamte Blog-Bewertung entfällt.",
-            # A7b: a transient retries and is flagged only after N runs, so it
-            # routes to nobody today (§10.5). A measurement limit routes now.
+            # A7a routes now; A7b retries first and routes on the third
+            # consecutive run over three distinct days (migration 009).
             review_reason=None if transient else "blog_undetectable",
+            persistent_review_reason=PERSISTENT_FETCH if transient else None,
         )
     if exists == 0:
         return fires(
@@ -315,7 +331,8 @@ def _no_article_schema(profile: Profile, _today: date) -> Outcome:
         # on a page never fetched — A5.5's error, one signal over.
         return abstains(
             "Nicht bewertbar: Es konnte kein einzelner Blogbeitrag abgerufen "
-            "werden, daher lässt sich die Auszeichnung der Beiträge nicht prüfen."
+            "werden, daher lässt sich die Auszeichnung der Beiträge nicht prüfen.",
+            persistent_review_reason=PERSISTENT_FETCH,
         )
     if present == 1:
         return declines()
@@ -328,11 +345,12 @@ def _no_article_schema(profile: Profile, _today: date) -> Outcome:
 def _no_product_schema(profile: Profile, _today: date) -> Outcome:
     present = _num(profile, "product_schema")
     if present is None:
-        # A5.5/A5.6, already ratified: absent the sampled page the rule fires in
-        # neither direction. Routing is A7b's open question (§10.5).
+        # A5.5/A5.6: absent the sampled page the rule fires in neither
+        # direction. A7b's routing, open since M1.34, is migration 009.
         return abstains(
             "Nicht bewertbar: Es konnte keine Produktseite abgerufen werden, "
-            "daher lässt sich die Auszeichnung der Produktdaten nicht prüfen."
+            "daher lässt sich die Auszeichnung der Produktdaten nicht prüfen.",
+            persistent_review_reason=PERSISTENT_FETCH,
         )
     if present == 1:
         return declines()
@@ -407,6 +425,12 @@ def _active_content(profile: Profile, today: date) -> Outcome:
     many are undated — and can never establish its absence. So the rule fires on
     a lower bound, declines only on a complete enumeration, and abstains in
     between. See `docs/m3-absent-input-audit.md` §7.
+
+    **Its abstention is the one that errs upward** (A7's third axis, migration
+    008): it withholds a penalty rather than an award, so the lead reads
+    stronger than the evidence supports and an over-scored lead gets called.
+    That is why this routing also blocks outbound contact, and why every other
+    abstention in this ruleset does not.
     """
     exists = _num(profile, "blog_exists")
     if exists == 0 and _num(profile, "blog_search_exhaustive") == 1:
@@ -423,18 +447,27 @@ def _active_content(profile: Profile, today: date) -> Outcome:
         )
 
     listed = _num(profile, "blog_post_count")
-    complete = listed is not None and len(dates) >= listed
-    if complete:
+    if listed is not None and len(dates) >= listed:
         return declines()
+    # An uncounted index abstains too — without a total there is nothing for
+    # the dates to be complete *against* — but it must not say so by pretending
+    # the total is zero. "Von 0 Beiträgen tragen nur 2 ein lesbares Datum" is
+    # what that printed on `zecplus.de`, into a letter-ready reason and into the
+    # queue note a person acts on (M1.40).
+    if listed is None:
+        return abstains(
+            f"Nicht bewertbar: Die Übersichtsseite lässt sich nicht auszählen; "
+            f"{len(dates)} Beiträge tragen ein lesbares Datum – wie oft der Shop "
+            "veröffentlicht, lässt sich daraus nicht bestimmen.",
+            review_reason="blog_cadence_unmeasurable",
+        )
     return abstains(
-        "Nicht bewertbar: Von "
-        f"{int(listed) if listed is not None else 0} Beiträgen auf der "
+        f"Nicht bewertbar: Von {int(listed)} Beiträgen auf der "
         f"Übersichtsseite tragen nur {len(dates)} ein lesbares Datum – wie oft "
         "der Shop veröffentlicht, lässt sich daraus nicht bestimmen.",
-        # A7 part 3 is unratified for this one. It is the abstention that most
-        # needs it: unlike every other in this spec it leaves the score too
-        # *high*, and an over-scored lead gets contacted. See §10.5.
-        review_reason=None,
+        # Ratified 2026-08-16, migration 008. A7a rather than A7b: the dates are
+        # missing from the index itself, so running again reads the same index.
+        review_reason="blog_cadence_unmeasurable",
     )
 
 

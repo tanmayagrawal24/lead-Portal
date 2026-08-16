@@ -166,6 +166,20 @@ Remaining findings (A1–A4, B1, B3.2–B3.3, B5–B7, C1–C4) are still open a
 
 **M1.29's cheaper alternative was assessed and rejected as the primary instrument.** Blog sitemap shards carry a `<lastmod>` per article, on both platforms that serve one, and it is already on disk. It measures modification, not publication — and the corpus contains a measured instance of it lying by three years. The numbers are in §5.3; the consequence is that a freshness proxy erring only *fresh* suppresses `opp.blog_stale` on exactly the stale blogs the rule exists to find. It is admissible as a hint for a human, never as the value.
 
+### Amendments from M3, second pass — 2026-08-16
+
+**These came from accepting M3 and then running it.** Two are corrections to work landed the same day, and both were found by the same move: taking a claim the code makes and asking what it rests on.
+
+| # | Finding | Resolution | Sections |
+|---|---|---|---|
+| M1.39 | **Migration 006 trusted the latest run of a stage to be complete, and a crashed run is not.** Per §5 (D6) a crash-then-restart mints a **new `run_id`**, so a run that wrote 10 of 13 companies and died becomes the latest run of its stage — and the 3 it never reached read as *retractions* rather than as *incompleteness*. That inverts 006: it exists to stop a stale value persisting, and un-narrowed it makes a live value **vanish**, silently, because absence is exactly what every A7 guard reads as "do not fire". | The authoritative run for a (company, stage) is the latest one that **finished** — `finished_at IS NOT NULL` and no `aborted_reason` (migration 007). A partial run is ignored **wholesale**, keys it did write included: falling back per key mixes two runs' beliefs and rebuilds the defect 006 closed. `fetch.run` and `score.run` set `finished_at` from the success path only and record an abort otherwise; they wrote it from a `finally`, which marked a crashed run finished — a column cannot be made load-bearing while it lies. | §4, §5 |
+| M1.40 | **`content.blog_last_post_basis` described which sources had a date, not which date was written.** It said `both` whenever the index and the sampled article each produced one — and §6.2 reads `both` as *the index bounds this from above*. On `zecplus.de` the index's newest was 2021-03-10, the sampled article was 2025-09-03, the article won the maximum, and the basis still claimed a bound from an index that had plainly failed to date the newest post we were holding. `opp.blog_slowing` took **+10** on it. M1.32's defect, arriving through the basis instead of through its absence — live on **3 of 13** shops. | The index bounds the value only where the index's own maximum **is** the value written; otherwise the basis is `article` and §6.2's staleness rungs stay silent. Found by re-scoring after the crawl and reading the reason text, not by a test. | §5.3, §6.2 |
+| M1.41 | **§5.4's safety claim was stronger than the gate.** "No company whose final score could reach B is discarded" counts only Phase-2 reachability, so a Phase-1 rule that **abstained** contributes nothing — and an abstained rung is not a rung that scored zero. `propellerdiscount.de` is stopped at 0 + 50 against a floor of 55 with a blog ladder worth up to +25 abstaining. | The claim is narrowed, not the gate widened: **nothing whose final score could reach B is discarded without a human being told.** Counting abstained rungs as upside was refused — it buys the guarantee with Phase-2 spend on points that may not exist. The property depends on the review queue actually being read, and that dependency is now written down next to it. | §5.4 |
+
+**A7 gained a third axis (M1.37), and it is the one that has a consequence.** *Would running again help* decides the routing; **which way the score is wrong while it waits** decides what else must happen. Every instance but one errs too **low** — an award withheld, a ranking delay the queue repairs. `neg.active_content` errs too **high**: a penalty withheld, and an over-scored lead is not mis-ranked, it is called. So a too-high abstention now **blocks outbound contact** until a human resolves it, refused in the schema on `outreach` (migration 008), which is §8's rule about exports applied to the same failure one step further out. Two routings were ratified with it: `blog_cadence_unmeasurable` (008) and `fetch_persistently_failing` (009, closing A7b's open question from M1.34).
+
+**The third crawl ran on 2026-08-16** — 13 domains, 738 requests, §5.2 held. `zecplus.de` and `germanelectronic.de` had their blog indexes fetched for the first time, and `neg.active_content` **fired for the first time in the project's history**: `lampenflut.de` publishes 11 posts in six months, which is not an opportunity, and the score fell 30 → 5. Findings in `docs/third-crawl-findings.md`.
+
 ## Changelog v0.1 → v0.2 (retained for the record)
 
 1. **ScrapeGraphAI removed.** Both extractions use the Anthropic SDK directly with tool-use structured output. (§5.5)
@@ -271,8 +285,12 @@ CREATE TABLE company (
     discovered_at   TEXT NOT NULL,             -- ISO8601 UTC
     excluded        INTEGER NOT NULL DEFAULT 0,
     excluded_reason TEXT,                      -- never exclude silently; always record why
-    needs_review    INTEGER NOT NULL DEFAULT 0 -- derived: 1 iff an unresolved review_flag exists.
-                                               -- Maintained by trigger, never written directly.
+    needs_review    INTEGER NOT NULL DEFAULT 0, -- derived: 1 iff an unresolved review_flag exists.
+                                                -- Maintained by trigger, never written directly.
+    contact_blocked INTEGER NOT NULL DEFAULT 0 -- derived: 1 iff an unresolved review_flag names a
+                                               -- reason in contact_blocking_reason (migration 008).
+                                               -- A cache for the UI; the refusal itself is a trigger
+                                               -- on `outreach` reading the flags live. See §8, A7.
 );
 CREATE INDEX idx_company_excluded ON company(excluded);
 CREATE INDEX idx_company_review ON company(needs_review);
@@ -430,6 +448,13 @@ CREATE UNIQUE INDEX uq_signal_identity ON signal(run_id, company_id, key, eviden
 -- a signal a stage stops writing is never retracted, and every A7 guard —
 -- all of which work by declining to write — is undone by the read model.
 --
+-- M1.39: and the run must have FINISHED (migration 007). Authority by
+-- omission is only sound from a run that reached the end: a crash mints a
+-- new run_id (§5, D6), so a partial pass would otherwise retract every key
+-- it never got to. A run still in flight, one that crashed, and one that
+-- aborted are all the same thing here — an account nobody has claimed is
+-- complete — and each is ignored WHOLESALE, keys it did write included.
+--
 -- D5(a): the ORDER BY carries an `id DESC` tiebreaker. Signals written
 -- within the same second share an observed_at; without the tiebreaker,
 -- which one the view surfaces is arbitrary and can differ between
@@ -511,6 +536,17 @@ CREATE TABLE contact (
     purge_after       TEXT NOT NULL            -- collected_at + 12 months; enforced by `portal purge` (§8)
 );
 
+-- ─────────────────────────────────────────────────────────────
+-- Migration 008. WHICH review reasons refuse outbound contact, as data:
+-- an abstention that leaves a score too HIGH is an outward-facing error,
+-- and §8's rule for exports applies to it. Classifying the next one is an
+-- INSERT here, not a branch repeated across four triggers.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE contact_blocking_reason (
+    reason    TEXT PRIMARY KEY,
+    rationale TEXT NOT NULL                    -- why this reason leaves the score too high
+);
+
 CREATE TABLE outreach (
     id          INTEGER PRIMARY KEY,
     company_id  INTEGER NOT NULL REFERENCES company(id) ON DELETE CASCADE,
@@ -586,24 +622,38 @@ This is written down because it is **the single most repeated design decision in
 
 **The table is split in two, because abstentions are not all the same kind of thing (M1.34).** Naming A7 conflated them, and the conflation has a cost: one class is permanent until the instrument changes, the other usually resolves itself on the next run, and giving them one resolution policy either fills the review queue with things that fix themselves or leaves permanent gaps waiting for a retry that will never help.
 
+**And the tables carry a third axis: the direction of the error (M1.37).** *Whether* running again helps decides the routing. *Which way the score is wrong while it waits* decides what else has to happen, and until M3 nothing recorded it.
+
+Every instance but one guards a rule that **awards** points for an absence. The abstention withholds an award, the lead reads too **low**, it ranks below where it belongs, and the queue reaches it eventually. The cost is a delay in ranking, and the queue is the whole remedy.
+
+`neg.active_content` subtracts 25 for a **presence**. Abstaining withholds a *penalty*, so the lead reads too **high** — and a lead that reads too high is not mis-ranked, it is **called**. `doonails.de` publishes actively, cannot be measured to be doing so, and sits in the list as a strong prospect on a score that is knowingly up to 25 points generous. The failure is not a worse ordering; it is a phone call to a company already doing the thing the letter offers to sell them.
+
+> **A too-high abstention blocks outbound contact for that company until a human resolves it.** Not a warning beside the row: the `outreach` insert is refused, in the schema (migration 008).
+
+This is §8's rule applied to a second outward-facing failure. §8 already holds that an export whose comparative claim cannot state its basis must **fail rather than degrade**, because the failure leaves the building and lands on a third party. A contact made on a score the pipeline cannot support is the same shape and gets the same treatment. Too-low abstentions block nothing.
+
+Which reasons block is **data** — the `contact_blocking_reason` table — so that classifying the next one is an INSERT and not a branch repeated across four triggers, and so that the axis is recorded per reason rather than re-derived per abstention. `company.contact_blocked` is a cache for the UI, maintained exactly as `needs_review` is; the refusal itself reads the flags live.
+
 **A7a — measurement limits.** The instrument cannot reach this shop. Nothing about running again changes that, so the routing is immediate.
 
-| # | The measurement | Why it cannot carry the rule | Rule that abstains | Routed by |
-|---|---|---|---|---|
-| 2 | `content.blog_last_post`, unparseable (§6.2) | An undated index is an unknown, not a stale blog | the blog ladder below `no_blog` | `blog_date_unparseable` |
-| 3 | `catalog.product_url_count`, no tier identifying a product (§10.3) | A `0` would claim a real shop has no catalogue | `qual.product_depth`, `qual.own_domain_shop`, `opp.no_product_schema` | `catalog_not_measurable` |
-| 4 | `content.blog_last_post`, basis `article` (M1.32) | A lower bound with no maximum behind it cannot show staleness | `opp.blog_stale` (+20), `opp.blog_slowing` (+10) | `blog_date_unbounded` |
-| 5 | `content.blog_exists = 0` from a search that ran only one of the two instruments (M1.14) | A vocabulary that did not run is not an absence | **the whole ladder**, `opp.no_blog` (+25) included | `blog_undetectable` |
-| 7 | `content.blog_post_dates` covering fewer posts than the index lists (M1.37) | A partial enumeration can establish activity and never its absence | `neg.active_content` (−25) | **nothing yet — §10.5.** The one instance whose abstention leaves the score too *high* |
-| 8 | `i18n.hreflang_count` absent because no homepage was read (M1.38) | An unread page is not a monolingual one | `opp.de_only` (+5) | nothing — the rule simply does not fire, and no points are at stake in the expensive direction |
+| # | The measurement | Why it cannot carry the rule | Rule that abstains | Error direction | Routed by |
+|---|---|---|---|---|---|
+| 2 | `content.blog_last_post`, unparseable (§6.2) | An undated index is an unknown, not a stale blog | the blog ladder below `no_blog` | too low | `blog_date_unparseable` |
+| 3 | `catalog.product_url_count`, no tier identifying a product (§10.3) | A `0` would claim a real shop has no catalogue | `qual.product_depth`, `qual.own_domain_shop`, `opp.no_product_schema` | too low | `catalog_not_measurable` |
+| 4 | `content.blog_last_post` not bounded from above by the index (M1.32, M1.40) | A lower bound with no maximum behind it cannot show staleness | `opp.blog_stale` (+20), `opp.blog_slowing` (+10) | too low | `blog_date_unbounded` |
+| 5 | `content.blog_exists = 0` from a search that ran only one of the two instruments (M1.14) | A vocabulary that did not run is not an absence | **the whole ladder**, `opp.no_blog` (+25) included | too low | `blog_undetectable` |
+| 7 | `content.blog_post_dates` covering fewer posts than the index lists, or an index that cannot be counted (M1.37) | A partial enumeration can establish activity and never its absence | `neg.active_content` (−25) | **too high** | `blog_cadence_unmeasurable` — **and outbound contact is blocked** (migration 008) |
+| 8 | `i18n.hreflang_count` absent because no homepage was read (M1.38) | An unread page is not a monolingual one | `opp.de_only` (+5) | too low | nothing — the rule simply does not fire, and no points are at stake in the expensive direction |
 
 **A7b — transient failures.** The instrument applies and the request missed. A 404, a timeout, a momentarily disallowed path. These **retry on the next run** and are flagged only once they persist; the abstention itself is immediate and identical to A7a, because a rule must not fire on a page we do not have whatever the reason.
 
-| # | The measurement | What failed | Rule that abstains | Routed by |
-|---|---|---|---|---|
-| 1 | `schema.product_present`, absent a product page fetched with HTTP 200 (A5.5, A5.6) | A product was identified and its page did not return 200 | `opp.no_product_schema` (+10) | after **N** runs — reason unratified, see below |
-| 6 | `content.blog_exists`, where a blog was located and its index did not return 200 (M1.14) | The blog was found; the index fetch missed | **the whole ladder** — `content.blog_exists` is not written at all | after **N** runs — as above |
-| 9 | `schema.article_present`, absent an article fetched with HTTP 200 (A6.1, M3 audit) | An article was identified and its page did not return 200 | `opp.no_article_schema` (+8) | after **N** runs — as above |
+| # | The measurement | What failed | Rule that abstains | Error direction | Routed by |
+|---|---|---|---|---|---|
+| 1 | `schema.product_present`, absent a product page fetched with HTTP 200 (A5.5, A5.6) | A product was identified and its page did not return 200 | `opp.no_product_schema` (+10) | too low | `fetch_persistently_failing`, after **N** runs |
+| 6 | `content.blog_exists`, where a blog was located and its index did not return 200 (M1.14) | The blog was found; the index fetch missed | **the whole ladder** — `content.blog_exists` is not written at all | too low | `fetch_persistently_failing`, after **N** runs |
+| 9 | `schema.article_present`, absent an article fetched with HTTP 200 (A6.1, M3 audit) | An article was identified and its page did not return 200 | `opp.no_article_schema` (+8) | too low | `fetch_persistently_failing`, after **N** runs |
+
+All three are too-low, so none blocks contact. That is not a coincidence and it is worth naming: a transient is a *page we did not get*, and a page we did not get can only withhold an award. The one abstention that errs upward is the one where the page loaded fine and said too little.
 
 **N = 3 consecutive runs, on 3 distinct days.** The reasoning, because the number is otherwise arbitrary:
 
@@ -611,7 +661,7 @@ This is written down because it is **the single most repeated design decision in
 - **The asymmetry points late, not early.** A premature flag costs queue credibility, and §6.4 has already written down what that costs: *a queue that refills itself stops being read*. A late flag costs one run's delay on a company whose points are merely unawarded, which is the safe direction A5.5 already chose. When the two errors are unequal, take the safe side — M1.4's rule.
 - **"On distinct days" is load-bearing, not decoration.** §5's idempotency contract gives a crashed-then-restarted run a **new `run_id`**. Without the day requirement a single crash-restart loop inside one afternoon manufactures three runs and therefore a flag, and the flag would be about our own crash rather than about the shop.
 
-**Which reason a persistent transient routes to is not settled here.** By the third run it has stopped being transient and has become a measurement limit, so it needs routing — but `possible_marketplace_only` means something else (§5.2 assigns it to *zero candidates*, not to a candidate that will not load) and `catalog_not_measurable` means *nothing was measured*. A sixth reason is a §6.4 ratification, and only `blog_undetectable` was ratified with M1.34. **Tracked in §10.5**, with the retry-and-count policy above already binding.
+**Which reason a persistent transient routes to was settled with M3: `fetch_persistently_failing`** (§6.4, migration 009). By the third run the retry policy is exhausted and what is left is a measurement limit wearing a transient's clothes, so it routes like one. **One reason for all three instances**, because unlike the blog trio they send a person to answer a single question — *does this URL load for you?* — and `raised_note` carries which URL and since when. `possible_marketplace_only` was never a candidate (§5.2 assigns it to *zero candidates*, not to a candidate that will not load) and neither was `catalog_not_measurable` (*nothing was measured*).
 
 **The point of naming A7 is that the next instance is applied rather than argued.** The recurring shape is a rule that awards points for an *absence* — no schema, no posts, no catalogue, no recent post, no blog — reading a failure to measure as the absence it rewards. Every such rule is a candidate, and the test is one question: *if this signal is missing or weak, does the rule award points?* If yes, A7 applies. Then the second question decides the routing: *would running again plausibly fix it?*
 
@@ -716,7 +766,7 @@ Store bodies on disk under `data/artifacts/{domain}/{kind}-{timestamp}.html`, pa
 | `content.blog_exists` | **Two instruments, path vocabulary first (M1.14).** (1) A blog/magazin/ratgeber/news **path** in a sitemap or a homepage link; (2) failing that, a homepage link whose **anchor text** is that vocabulary, with the href taken **wherever it points** — subdomains and foreign hosts included. `1` is written only from a blog index fetched with HTTP 200. | The path vocabulary alone missed 2 of 13 shops, both of them publishing. Anchor text reaches both — 2 true positives, 4 true negatives across the six shops carrying a `0`. **Order is the precision control**: anchor text's two loose matches sit on shops a path already resolves, so running it second means neither is reached. |
 | `content.blog_search_exhaustive` | Written **only alongside `content.blog_exists = 0`**, as the qualifier of that `0`: `1` when a sitemap was enumerated **and** the homepage yielded parseable links, `0` otherwise. `value_text` carries the reason with a stable prefix — `limit:` for a measurement limit, `transient:` for a fetch that missed. | **Unscored qualifier, read by §6.2's rung 1 (M1.14, A7).** An *enabling* fact, so a run predating it fails safe. `1` licenses `opp.no_blog` (+25); it does **not** certify that no blog exists — a blog on an unlinked subdomain is undetectable by construction. Where a blog *was* located and its index did not load, `content.blog_exists` is not written at all and this signal carries `transient:`. |
 | `content.blog_last_post` | **Authoritative:** the **later** of the date parsed from the sampled blog article (A6, M1.29) and the newest date on the blog index (M1.30) — JSON-LD `datePublished`, `<time datetime>`, or German visible-date patterns (`12. März 2023`), in that precedence. Both sources are lower bounds; neither is preferred. Sitemap `<lastmod>` is a hint only and is **never** used alone. | The index was the wrong page: Shopify blog indexes carry no `<time>` and no `datePublished` at all, and 5 of 7 detected blogs yielded no date from one. **The lastmod warning is now measured, not asserted — see below.** |
-| `content.blog_last_post_basis` | Which sources dated the value above: `index`, `article`, or `both`. Written whenever `content.blog_last_post` is written, with the same `evidence_url`. | **Unscored provenance, read by §6.2 (M1.32).** The two sources are lower bounds of different strength — the index's date is a maximum over the posts it *lists*, a sampled article's is one post's with nothing behind it. `article` alone is a floor with no ceiling, and §6.2's staleness rungs must not fire on it. Absent the signal the same guard applies, so a run predating it fails safe. |
+| `content.blog_last_post_basis` | **What bounds the value above** (M1.40): `index` or `both` where the index's own newest date *is* the value written, `article` otherwise — including where the index dated something older and the sample won. Written whenever `content.blog_last_post` is written, with the same `evidence_url`. | **Unscored provenance, read by §6.2 (M1.32).** The two sources are lower bounds of different strength — the index's date is a maximum over the posts it *lists*, a sampled article's is one post's with nothing behind it. `article` is a floor with no ceiling, and §6.2's staleness rungs must not fire on it. **It describes the date written, not the sources that had one**: an index whose newest is older than the sample has demonstrably failed to date the newest post we hold, and bounds nothing. Absent the signal the same guard applies, so a run predating it fails safe. |
 | `content.blog_post_count` | Count of post links on the blog index (paginated: first page count × page count if pagination is visible), cross-checked against sitemap URL count under the blog path. **Not written for a blog on its own host** (M1.14). | Sitemap counts include tag/category noise; index count wins on conflict. A host-based blog has no path prefix separating its posts from its navigation, so "every same-host link" would be a count made of menus — the parser returns `None`, and §6.2 reads that as *not counted* rather than as *few*. |
 | `catalog.product_url_count` | **A5's tier hierarchy, in A5's order (M1.24):** Tier 1 the product sitemap — recognised either by a platform filename convention *or* by the shard's own name (M1.24); Tier 2 product-typical paths (`/detail/`, `/products/`, `/produkt/`); otherwise not measurable (§10.3). Translations are excluded (M1.25). The tier is written to `value_text` alongside the count. | Path patterns are the **fallback**, not the default: reading them first counted `smile-store.de` at 6 against a catalogue of 194. A count of 6 from a path pattern and a count of 6 from a product sitemap are different claims, so the tier travels with the number. |
 | `schema.article_present`, `schema.product_present` | Parse all `application/ld+json` blocks and collect `@type`. `article_present` is read from the **sampled blog article** (A6), `product_present` from the sampled product page (A5) plus the homepage. **Neither is ever written without its sample** (A5.5, A6.1). | Checking only the homepage under-detects; checking the *index* under-detects to zero. `Article`/`BlogPosting` lives on the post, and `schema.article_present` was `0` on **every** blog index in the corpus — a wrong "checked and absent" for shops whose posts all carry it. |
@@ -780,7 +830,7 @@ advance(c)          if phase1_total(c) + remaining_upside(c) >= B_band_floor
 
 The first-crawl measurement makes this sharper rather than softer. The five shops with no legal-form token are exactly the five sole traders (§5.3) — the companies *most* likely to win the rule in Phase 2 on "owner named". **The +15 that has to stay inside the bound sits on the best leads**, which is precisely why it cannot be dropped from a global constant to make the arithmetic pleasant.
 
-**Why per-company is strictly better than any safe global constant.** It is safe by construction — no company whose final score could reach B is discarded, since `remaining_upside` bounds what Phase 2 can add for *that* company — and it is tighter, because a company that has already been awarded a rule in Phase 1 cannot be awarded it again:
+**Why per-company is strictly better than any safe global constant.** It is tighter than any global constant, because a company that has already been awarded a rule in Phase 1 cannot be awarded it again:
 
 | company | won `qual.owner_operated` in Phase 1? | `remaining_upside` | effective threshold |
 |---|---|---|---|
@@ -788,6 +838,16 @@ The first-crawl measurement makes this sharper rather than softer. The five shop
 | legal form is `GmbH`, or absent | no — Phase 2 may still award it | 50 (35 + `owner_operated` 15) | 5 |
 
 A global constant must use the worst case for every company; this uses each company's own.
+
+**The safety property, stated at the strength it actually holds (M1.41).** This section used to claim the gate is *safe by construction* — "no company whose final score could reach B is discarded, since `remaining_upside` bounds what Phase 2 can add". That claim is too strong, and running the gate found the counter-example. `remaining_upside` sums Phase-2 reachability only, so a **Phase-1 rule that abstained contributes nothing** — and an abstained rung is not a rung that scored zero, it is a rung nobody has measured. `propellerdiscount.de` is stopped at 0 + 50 = 50 against a B floor of 55, with §6.2's blog ladder abstaining and worth up to +25 if its blog index were ever fetched. So the number the gate compared against was one the pipeline already knew was incomplete, and "nothing recoverable is discarded" rested on an unmeasured rung.
+
+The fix is **not** to count abstained rungs as upside. That inflates every gate decision to cover a measurement nobody has made, and it buys the guarantee with Phase-2 spend on companies whose points may not exist. What holds instead is this, and it is what the section now claims:
+
+> **No company whose final score could reach B is discarded without a human being told.**
+
+An abstention is not silence: A7 requires it to route to a `review_flag` (§6.4), and `propellerdiscount.de` carries `blog_undetectable` for exactly the rung the gate could not count. The gate may stop a company on an incomplete number; it may not stop one *quietly*. Scoring is a free recompute, so a resolved flag or a later fetch re-gates the company at no cost.
+
+**The property therefore has a dependency, and it is a human one:** it holds only where the review queue is actually read. §6.4 already spends its stickiness argument on keeping the queue readable — *a queue that refills itself stops being read* — and this is what that argument is protecting. If the queue goes unread, the gate's guarantee degrades to the arithmetic one, which is: a company stopped below the floor stays stopped.
 
 **Each rule declares whether Phase 2 can still change its outcome**, and the declaration is part of the ruleset rather than inferred from the signal names — inference is what produced the wrong answer in the first place. **Assert at startup that every rule carries the declaration**, and fail loudly on any that does not, so adding a rule cannot silently widen or narrow the gate. A new Phase-2-reachable rule automatically raises `remaining_upside` for the companies it applies to.
 
@@ -801,7 +861,7 @@ Record per company, as signals, both the decision and the number behind it — `
 
 A negative rule contributes `max(0, points)`, i.e. nothing: the bound is on what Phase 2 could still **add**, and `neg.has_agency` can only subtract. It is still declared Phase-2-reachable, because §5.4 says a Phase-2 score below its Phase-1 predecessor is expected and correct.
 
-**One finding from running it, recorded rather than fixed (§10.5).** `remaining_upside` counts only Phase-2 reachability, so a Phase-1 rule that **abstained** contributes nothing — and §5.4's safety claim is that "no company whose final score could reach B is discarded". On the corpus, `propellerdiscount.de` scores 0 with an abstained blog ladder; 0 + 50 = 50, one point of arithmetic below the B floor of 55, so it is the only company the gate stops. Had its blog index been fetched, rung 1 could have awarded +25 and the gate would have admitted it. The stop is not permanent — scoring is a free recompute and the next run re-gates it — but for one run the gate rested on a number the pipeline knew was incomplete. Whether an abstained *transient* should carry its points into the bound is a change to a gate ratified one day ago, so it is tracked, not taken.
+**The finding that forced the narrowing above, kept here as the measurement (M1.41).** `propellerdiscount.de` scores 0 with §6.2's ladder abstaining; 0 + 50 = 50, five points below the B floor, and it is the only company the gate stops. Had its blog index been reachable, rung 1 could have awarded +25. The stop is not permanent — scoring is a free recompute and the next run re-gates it — and it is not silent, which is the part that does the work: the company carries `blog_undetectable`. Whether an abstained rung should carry its points into the bound stays **refused**, for the reason above: it would buy the guarantee with Phase-2 spend on points that may not exist.
 
 ### 5.5 extract-p2 — paid signals, advancing companies only
 
@@ -922,12 +982,14 @@ Two consequences to state rather than discover later:
 days_since_newest = (today − content.blog_last_post).days      # NULL if no date parsed
 post_count        = content.blog_post_count                    # NULL if not counted
 bounded           = content.blog_last_post_basis ∈ {'index', 'both'}   # false if unwritten
+                    # i.e. the index's own newest date IS the value (M1.40)
 searched          = content.blog_search_exhaustive = 1         # false if unwritten
 
 if blog_exists is NULL or (not blog_exists and not searched):
     → NO RUNG FIRES AND THE LADDER STOPS. Raise review_flag 'blog_undetectable'
       where the reason is a measurement limit; where it is transient, retry and
-      count instead (A7b). Never fall through to the rungs below.
+      count toward 'fetch_persistently_failing' instead (A7b, migration 009).
+      Never fall through to the rungs below.
 elif not blog_exists:
     → opp.no_blog          +25
 elif blog_last_post is NULL:
@@ -1006,7 +1068,11 @@ The old 45-point cap is removed: mutual exclusivity in the ladder plus the condi
 
 Completeness is deliberately strict — two posts on one day count as one date and force an abstention — because abstaining is the *visible* error.
 
-**This is the first A7 instance where abstention is not the conservative direction, and that is worth stating plainly.** Every previous instance guards a rule that *awards* points for an absence, so declining to fire loses points and the queue catches an under-scored lead. This rule *subtracts* points for a presence, so declining to fire leaves the score too **high**. A7's shape is identical; the cost of the abstention is inverted. The routing therefore matters more here than anywhere else in this spec, and it is the one instance that still has none — see §10.5.
+**This is the first A7 instance where abstention is not the conservative direction, and that is worth stating plainly.** Every previous instance guards a rule that *awards* points for an absence, so declining to fire loses points and the queue catches an under-scored lead. This rule *subtracts* points for a presence, so declining to fire leaves the score too **high**. A7's shape is identical; the cost of the abstention is inverted.
+
+**Ratified 2026-08-16 (M1.37).** It routes to `blog_cadence_unmeasurable` (§6.4, migration 008), and because it is the too-high direction it also **blocks outbound contact** for that company until the flag is resolved — A7's third axis, argued in §5. On the corpus it abstains on **6 of 13** and blocks all six.
+
+**An index that cannot be counted abstains here too (M1.40).** Completeness is `distinct dates ≥ posts listed`, and where `content.blog_post_count` was never written there is no total for the dates to be complete against. `zecplus.de` is the case: two dated posts, no count. The reason must say that rather than printing the missing total as a zero — *"von 0 Beiträgen tragen nur 2 ein lesbares Datum"* is a sentence that goes into a letter and into the queue note a person acts on.
 
 ### 6.4 Hard exclusions and soft review flags
 
@@ -1044,6 +1110,16 @@ These are independent and can all apply to one company, which is why they are ro
   **A fifth reason rather than a reuse, for the same purpose `blog_date_unbounded` was distinct from `blog_date_unparseable`: a different thing is known, so a different resolution applies.** `blog_date_unparseable` says *there is an index and its dates are unreadable* — open it and read the top. `blog_date_unbounded` says *there is a date and it cannot bound the rule* — one narrow question, is this blog dead. `blog_undetectable` says *we do not know whether there is a blog at all* — a different question again, answered somewhere else entirely: does this shop publish, anywhere, under any name? Sent to the wrong one of the three, a human opens the wrong page.
 
   **What it may never be presented as.** Not "this shop has no blog". The reason means the search could not have been exhaustive — and per §6.2 even an exhaustive one means only that we looked everywhere we can look.
+
+- `blog_cadence_unmeasurable` — `neg.active_content` (−25) cannot decide how often the shop publishes: the index dates fewer posts than it lists, or lists posts it does not count (§6.3, M1.37). Ratified 2026-08-16, added in migration 008. Raised by `score`, where the rule is evaluated.
+
+  **A sixth reason rather than a reuse**, on the discriminator the blog reasons have now been split by three times — a different thing is known, so a different resolution applies. `blog_date_unparseable` says *there is an index and its dates are unreadable*. `blog_date_unbounded` says *there is a date and it cannot bound the rule*. This one says *there are dates, for some of the posts* — and the question it asks a human is neither of the others: **how often does this shop publish?** Answered by opening the blog and reading the dates down the first page.
+
+  **It is the first reason that blocks outbound contact** (§5's third axis, §8's rule). Every other abstention in this spec leaves the lead scored too low, which is a ranking delay the queue repairs. This one withholds a *penalty*, so the lead reads stronger than the evidence supports — and the failure mode is not a bad ordering, it is a call to a company that already publishes weekly. Until a human resolves the flag, `outreach` refuses the row.
+
+  **What resolution means here, and what it does not.** Resolving is a person saying they looked at the blog and know the cadence. Per the stickiness rule below it is never re-raised, so the block lifts on that judgement and not on any later measurement — which is the intended trade, because the human's answer is the more durable fact.
+
+- `fetch_persistently_failing` — a page that was identified and has not returned 200 for **3 consecutive runs on 3 distinct days** (A7b, §5). Ratified 2026-08-16, added in migration 009, closing the routing M1.34 left open. Three measurements share it — the product sample, the blog index, and the sampled article — because all three send a person to the same question, *does this URL load for you?*, with `raised_note` carrying which URL and since when. Counted by `score` over consecutive scoring runs, which is why the days matter: a crash-restart loop inside one afternoon must not manufacture a flag about our own crash. Too-low in every instance, so it blocks nothing.
 
 - `domain_moved` — the seeded domain now serves a different registrable domain and the new host was adopted (§5.1, §5.2). Whether the shop behind the new host is still the lead that was intended is a judgement about the lead list, not one the crawler may make: `germanelectronic.de` now serves `lampenflut.de`, a different brand with a different catalogue.
 - `duplicate_site` — raised on the company that **owns** a host another row tried to adopt, so a merge target is visible rather than silently accumulating duplicates pointed at it. Distinct from the exclusion of the same name, which sits on the row that lost.
@@ -1124,6 +1200,8 @@ M1.22's per-company gate admits roughly **95%** of discovered companies today, b
 ## 8. Compliance requirements
 
 These are requirements, not recommendations. They shape the schema, so they cannot be bolted on later.
+
+**No outbound contact on a score the pipeline cannot support (M1.37).** Where a rule abstains in the direction that leaves the score too *high*, the affected company's `outreach` rows are refused until a human resolves the flag — enforced in the schema (migration 008), not in a UI warning. The reasoning is this section's own: an export that cannot state its basis must fail rather than degrade, because the failure leaves the building. A contact placed on a score that is knowingly up to 25 points generous is the same category of error, one step further out. See §5's A7, third axis.
 
 **No outbound email capability.** B2B cold email in Germany is restricted under §7 UWG; prior consent is required in practice and the "mutmaßliche Einwilligung" exception is narrow. The `outreach.channel` enum permits only `post` and `phone`. The application must contain no SMTP client, no mail API dependency, and no send button. This is why "no email sending" is a non-goal in §2 rather than a backlog item.
 
@@ -1230,9 +1308,9 @@ That resolution is the reason to keep the question open rather than close it. A 
   **What has been taken, meanwhile, is the interim guard (M1.32).** It is deliberately independent of the question above: `content.blog_last_post_basis` records whether the date rests on the index (a maximum over listed posts) or on the sample alone (a floor with nothing above it), and §6.2's two staleness rungs decline to fire on the latter. That closes the expensive direction on the 2 shops where it is open today and constrains nothing about how the sample is later chosen. It is **not** retired by the selector fix: a lastmod-chosen sample is a better lower bound, not a maximum, so `basis = article` stays unbounded whatever picks the article. Retiring it needs a source that bounds the newest post from above, which the proposal is explicit about not being.
 
   **Resolved: a suppressed rung routes to a human.** `blog_date_unbounded` (§6.4, migration 004) is raised by `score` wherever the guard silences a staleness rung, carrying the lower bound in `raised_note`. It is a distinct reason rather than a reuse of `catalog_not_measurable`, because *a value that cannot bound the rule* and *no value at all* send a person to do different things. The general form is now A7 (§5), which this was the fourth instance of.
-- **`neg.active_content`'s abstention has no routing, and it is the one that most needs it (M1.37, A7 instance 7).** On **5 of 13** shops the rule cannot measure publishing cadence, abstains, and tells nobody. Unlike every other abstention in this spec it leaves the score too **high** — an over-scored lead is not merely mis-ranked, it gets contacted, and `doonails.de` is currently ranked 7th on a score that is knowingly up to 25 points generous. Recommended reason: **`blog_cadence_unmeasurable`**, whose resolution is one question a human answers by opening the blog and looking at the dates — distinct from `blog_date_unparseable` (*no date at all*, and cadence is not the question) and from `blog_date_unbounded` (*a date that cannot bound staleness*). A sixth review reason is a §6.4 ratification. **Take this one before the other.**
+- **`neg.active_content`'s abstention had no routing, and it was the one that most needed it (M1.37, A7 instance 7). Resolved 2026-08-16.** `blog_cadence_unmeasurable` (§6.4, migration 008), plus the consequence the direction of the error demands: a too-high abstention **blocks outbound contact** until a human resolves it, the same way §8 fails an export that cannot state its basis. The general form is A7's **third axis** (§5), which this instance forced into the tables: *which way the score is wrong while it waits* is not the same question as *would running again help*, and only the first of the two had ever been recorded. On the corpus it now abstains on 6 of 13 and blocks all six.
 - **The gate treats an abstained Phase-1 rule as zero upside (M3).** `remaining_upside` counts Phase-2 reachability only, so a company can be stopped on a total the pipeline knows is incomplete — `propellerdiscount.de`, at 0 + 50 against a B floor of 55, with an abstained blog ladder worth up to +25. §5.4's safety claim is that nothing whose final score could reach B is discarded, and for one run that claim rests on an unmeasured rung. It self-corrects on the next run, since scoring is a free recompute and no Phase-2 money has been spent. Whether an abstained **transient** should carry its points into the bound is a change to a gate ratified on 2026-08-16, so it is recorded here rather than taken.
-- **A persistent transient needs a routing, and does not have one yet (M1.34, A7b).** By its third consecutive failing run a transient has stopped being transient: the retry policy has been exhausted and what remains is a measurement limit with no queue entry. The counting policy is settled — **N = 3 consecutive runs on 3 distinct days**, with the reasoning in A7 — and the *reason* it routes to is not. Neither existing reason fits: `possible_marketplace_only` is §5.2's answer to *zero candidates*, not to a candidate that will not load, and `catalog_not_measurable` means *nothing was measured*. Two instances are waiting on it: `schema.product_present` where a product page was selected and never returned 200 (A5.5's long-standing gap), and `content.blog_exists` where a blog was located and its index missed (M1.14). A sixth review reason is a §6.4 ratification; **settle it with the M3 scoring work**, since that is where the counter would live. Until then both abstain correctly and silently, which is the safe direction and the incomplete one.
+- **A persistent transient needed a routing (M1.34, A7b). Resolved 2026-08-16.** `fetch_persistently_failing` (§6.4, migration 009), counted by `score` over consecutive scoring runs at the N = 3 / 3-distinct-days policy A7 already bound. One reason for all three instances — the product sample, the blog index and the sampled article — because they send a person to one question, and `raised_note` carries which URL. It had waited a milestone: for three runs a company could have a rule going quiet with nobody told.
 - **Timestamps are read as UTC dates.** `navucko.com`'s newest post moved 2026-06-21 → 2026-06-20 when M1.31 made timestamps parseable: `…T22:00:00Z` is the 21st in CEST. Immaterial at §6.2's month-scale thresholds and recorded so it is not later mistaken for drift.
 - Ollama for local extraction instead of Haiku — saves ~$10/month at Phase-2 volumes, costs German-language extraction quality and the substring-verification simplicity. Currently: use Haiku.
 - Whether to store artifact bodies compressed (gzip) — likely yes above a few hundred companies.

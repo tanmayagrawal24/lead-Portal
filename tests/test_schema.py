@@ -26,6 +26,9 @@ SPEC_TABLES = {
     "outreach",
     "run",
     "llm_batch",
+    # Migration 008: which review reasons refuse outbound contact, as data
+    # rather than as a branch repeated across four triggers.
+    "contact_blocking_reason",
 }
 
 SPEC_VIEWS = {"company_profile"}
@@ -34,6 +37,10 @@ SPEC_TRIGGERS = {
     "trg_review_flag_after_insert",
     "trg_review_flag_after_update",
     "trg_review_flag_after_delete",
+    # Migration 008. A7's third axis: an abstention that leaves the score too
+    # high refuses the contact rather than warning next to it (§8's shape).
+    "trg_outreach_blocked_before_insert",
+    "trg_outreach_blocked_before_update",
 }
 
 # Named in §4 because behaviour depends on them, not just performance.
@@ -221,12 +228,14 @@ class TestReviewFlag(SchemaTestCase):
             "catalog_not_measurable",
             "blog_date_unbounded",
             "blog_undetectable",
+            "blog_cadence_unmeasurable",
+            "fetch_persistently_failing",
         ):
             self.raise_flag(company_id, run_id, reason)
         count = self.conn.execute(
             "SELECT COUNT(*) FROM review_flag WHERE company_id = ?", (company_id,)
         ).fetchone()[0]
-        self.assertEqual(count, 8)
+        self.assertEqual(count, 10)
 
     def test_a_raise_note_survives_and_is_optional(self) -> None:
         """Migration 004. `blog_date_unbounded` sends a human to open a blog,
@@ -427,6 +436,101 @@ class TestNeedsReviewInvariant(SchemaTestCase):
             "UPDATE company SET needs_review = 1 WHERE id = ?", (company_id,)
         )
         self.assertEqual(self.desynced_companies(), [company_id])
+
+
+class TestContactBlock(SchemaTestCase):
+    """Migration 008. §8 fails an export that cannot state its basis; A7's
+    third axis fails a contact the score cannot support. Same shape, and the
+    same treatment: refused, not warned about."""
+
+    def block(self, company_id: int, run_id: int) -> None:
+        self.conn.execute(
+            "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at) "
+            "VALUES (?,'blog_cadence_unmeasurable',?,?)",
+            (company_id, run_id, NOW),
+        )
+
+    def contact(self, company_id: int) -> None:
+        self.conn.execute(
+            "INSERT INTO outreach (company_id, channel, occurred_at) VALUES (?,'post',?)",
+            (company_id, NOW),
+        )
+
+    def test_an_unblocked_company_can_be_contacted(self) -> None:
+        company_id, run_id = self.add_company(), self.add_run()
+        self.conn.execute(
+            "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at) "
+            "VALUES (?,'no_impressum',?,?)",
+            (company_id, run_id, NOW),
+        )
+        self.contact(company_id)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM outreach").fetchone()[0], 1
+        )
+
+    def test_a_blocking_flag_refuses_the_contact(self) -> None:
+        company_id, run_id = self.add_company(), self.add_run()
+        self.block(company_id, run_id)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.contact(company_id)
+
+    def test_the_cache_follows_the_flag_in_both_directions(self) -> None:
+        company_id, run_id = self.add_company(), self.add_run()
+        self.block(company_id, run_id)
+        self.assertEqual(self.blocked(company_id), 1)
+        self.conn.execute(
+            "UPDATE review_flag SET resolved_at = ?, resolved_by_human = 1 "
+            "WHERE company_id = ?",
+            (NOW, company_id),
+        )
+        self.assertEqual(self.blocked(company_id), 0)
+        self.contact(company_id)
+
+    def test_the_block_is_enforced_live_and_not_off_the_cache(self) -> None:
+        """`company.contact_blocked` is a cache for the UI, and a cache can be
+        desynced by a direct write — `needs_review` already has a test pinning
+        exactly that. The refusal therefore reads the flags."""
+        company_id, run_id = self.add_company(), self.add_run()
+        self.block(company_id, run_id)
+        self.conn.execute(
+            "UPDATE company SET contact_blocked = 0 WHERE id = ?", (company_id,)
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.contact(company_id)
+
+    def test_a_recorded_contact_cannot_be_moved_onto_a_blocked_company(self) -> None:
+        free, blocked = self.add_company("frei.de"), self.add_company("gesperrt.de")
+        self.block(blocked, self.add_run())
+        self.contact(free)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                "UPDATE outreach SET company_id = ? WHERE company_id = ?",
+                (blocked, free),
+            )
+
+    def test_the_blocking_set_is_data(self) -> None:
+        """Adding the next too-high abstention is an INSERT, not four trigger
+        rewrites — and it takes effect on flags already raised."""
+        company_id, run_id = self.add_company(), self.add_run()
+        self.conn.execute(
+            "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at) "
+            "VALUES (?,'catalog_not_measurable',?,?)",
+            (company_id, run_id, NOW),
+        )
+        self.contact(company_id)
+        self.conn.execute(
+            "INSERT INTO contact_blocking_reason (reason, rationale) "
+            "VALUES ('catalog_not_measurable','hypothetical')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.contact(company_id)
+
+    def blocked(self, company_id: int) -> int:
+        return int(
+            self.conn.execute(
+                "SELECT contact_blocked FROM company WHERE id = ?", (company_id,)
+            ).fetchone()[0]
+        )
 
 
 class TestConstraints(SchemaTestCase):

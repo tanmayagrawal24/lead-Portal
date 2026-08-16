@@ -11,8 +11,10 @@ cases are pinned first, because they are the ones that fail silently.
 from __future__ import annotations
 
 import socket
+import sqlite3
 import tempfile
 import unittest
+import unittest.mock
 from datetime import date
 from pathlib import Path
 
@@ -53,6 +55,15 @@ def state(result: score.ScoreResult, rule_id: str) -> str:
         if component.rule_id == rule_id:
             return component.state
     return "declined"
+
+
+def flags(result: score.ScoreResult) -> list[str]:
+    """The §6.4 reasons raised, without their notes."""
+    return [flag.reason for flag in result.review_flags]
+
+
+def note(result: score.ScoreResult, reason: str) -> str:
+    return next(flag.note for flag in result.review_flags if flag.reason == reason)
 
 
 class TestRulesetIsData(unittest.TestCase):
@@ -169,7 +180,7 @@ class TestBlogLadder(unittest.TestCase):
             blog_search_exhaustive=0,
             blog_search_limit="transient: blog located by anchor_text at x",
         )
-        self.assertEqual(result.review_flags, [])
+        self.assertEqual(flags(result), [])
 
     def test_a_measurement_limit_routes_now(self) -> None:
         result = run(
@@ -177,7 +188,7 @@ class TestBlogLadder(unittest.TestCase):
             blog_search_exhaustive=0,
             blog_search_limit="limit: no homepage links",
         )
-        self.assertEqual(result.review_flags, ["blog_undetectable"])
+        self.assertEqual(flags(result), ["blog_undetectable"])
 
     def test_stale_fires_only_on_a_bounded_date(self) -> None:
         stale = {"blog_exists": 1, "blog_last_post": "2020-03-24"}
@@ -186,7 +197,7 @@ class TestBlogLadder(unittest.TestCase):
         )
         unbounded = run(**stale, blog_last_post_basis="article")
         self.assertEqual(state(unbounded, "opp.blog_stale"), ruleset.ABSTAINS)
-        self.assertEqual(unbounded.review_flags, ["blog_date_unbounded"])
+        self.assertIn("blog_date_unbounded", flags(unbounded))
 
     def test_an_unbounded_stale_date_does_not_fall_through_to_thin_blog(self) -> None:
         """§6.2: `opp.thin_blog` needs a post *within* 365 days, which is
@@ -202,7 +213,7 @@ class TestBlogLadder(unittest.TestCase):
     def test_an_unparseable_date_stops_at_rung_two(self) -> None:
         result = run(blog_exists=1, blog_post_count=2)
         self.assertEqual(state(result, "opp.blog_stale"), ruleset.ABSTAINS)
-        self.assertEqual(result.review_flags, ["blog_date_unparseable"])
+        self.assertIn("blog_date_unparseable", flags(result))
         self.assertIsNone(points(result, "opp.thin_blog"))
 
     def test_an_uncounted_blog_does_not_win_thin_blog_but_does_fall_through(
@@ -456,9 +467,16 @@ class ScoreStageTestCase(unittest.TestCase):
         self.conn = db.connect(Path(tmp.name) / "portal.db")
         self.addCleanup(self.conn.close)
         migrate.apply_pending(self.conn)
-        self.run_id = int(
+        self.run_id = self.add_run("extract-p1", "2026-08-15T00:00:00Z")
+
+    def add_run(self, stage: str, started_at: str, *, finished: bool = True) -> int:
+        """A run row. `finished` is explicit because migration 007 makes it
+        load-bearing: only a run that reached the end is authoritative for the
+        signals it wrote, and for the ones it did not."""
+        return int(
             self.conn.execute(
-                "INSERT INTO run (started_at, stage) VALUES ('2026-08-15T00:00:00Z','extract-p1')"
+                "INSERT INTO run (started_at, stage, finished_at) VALUES (?,?,?)",
+                (started_at, stage, started_at if finished else None),
             ).lastrowid
         )
 
@@ -581,6 +599,165 @@ class TestPersistence(ScoreStageTestCase):
         self.assertIn("Nicht bewertbar", row["raised_note"])
 
 
+class TestContactBlock(ScoreStageTestCase):
+    """Migration 008. A7's third axis: an abstention that leaves the score too
+    *high* refuses outbound contact until a human resolves it."""
+
+    def cadence_unmeasurable(self, domain: str = "muster.de") -> int:
+        """`doonails.de`'s shape: an index listing posts, none of them dated."""
+        company_id = self.company(domain)
+        self.signal(company_id, "content.blog_exists", num=1)
+        self.signal(company_id, "content.blog_post_count", num=26)
+        self.signal(company_id, "content.blog_last_post", text=None)
+        return company_id
+
+    def test_the_abstention_now_routes(self) -> None:
+        company_id = self.cadence_unmeasurable()
+        score.run(self.conn, today=TODAY)
+        reasons = {
+            row["reason"]
+            for row in self.conn.execute(
+                "SELECT reason FROM review_flag WHERE company_id = ?", (company_id,)
+            )
+        }
+        self.assertIn("blog_cadence_unmeasurable", reasons)
+
+    def test_it_blocks_outbound_contact(self) -> None:
+        """The consequence, not just the queue entry. §8 fails an export that
+        cannot state its basis; this fails a contact the score cannot support."""
+        company_id = self.cadence_unmeasurable()
+        _run_id, results = score.run(self.conn, today=TODAY)
+        self.assertTrue(results[0].contact_blocked)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                "INSERT INTO outreach (company_id, channel, occurred_at) "
+                "VALUES (?, 'phone', ?)",
+                (company_id, "2026-08-16T09:00:00Z"),
+            )
+
+    def test_resolving_the_flag_lifts_the_block(self) -> None:
+        company_id = self.cadence_unmeasurable()
+        score.run(self.conn, today=TODAY)
+        self.conn.execute(
+            "UPDATE review_flag SET resolved_at = ?, resolved_by_human = 1 "
+            "WHERE company_id = ? AND reason = 'blog_cadence_unmeasurable'",
+            ("2026-08-16T10:00:00Z", company_id),
+        )
+        self.conn.execute(
+            "INSERT INTO outreach (company_id, channel, occurred_at) "
+            "VALUES (?, 'post', ?)",
+            (company_id, "2026-08-16T11:00:00Z"),
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM outreach").fetchone()[0], 1
+        )
+
+    def test_a_too_low_abstention_blocks_nothing(self) -> None:
+        """The axis has to discriminate, or it is just a second word for
+        `needs_review`. `blog_undetectable` withholds +25 — the lead reads too
+        weak, which is a queue item and not a phone call."""
+        company_id = self.company()
+        self.signal(company_id, "content.blog_exists", num=0)
+        self.signal(
+            company_id,
+            "content.blog_search_exhaustive",
+            num=0,
+            text="limit: no sitemap",
+        )
+        _run_id, results = score.run(self.conn, today=TODAY)
+        self.assertTrue(results[0].review_flags)
+        self.assertFalse(results[0].contact_blocked)
+        self.conn.execute(
+            "INSERT INTO outreach (company_id, channel, occurred_at) "
+            "VALUES (?, 'phone', ?)",
+            (company_id, "2026-08-16T09:00:00Z"),
+        )
+
+    def test_each_flag_carries_its_own_abstentions_note(self) -> None:
+        """Two rules abstain for different reasons; the notes must not cross.
+        Sent to the wrong page, a person answers the wrong question (§6.4)."""
+        company_id = self.company()
+        self.signal(company_id, "content.blog_exists", num=1)
+        self.signal(company_id, "content.blog_post_count", num=9)
+        notes = dict(
+            self.conn.execute(
+                "SELECT reason, raised_note FROM review_flag WHERE company_id = ?",
+                (company_id,),
+            ).fetchall()
+        )
+        score.run(self.conn, today=TODAY)
+        notes = dict(
+            self.conn.execute(
+                "SELECT reason, raised_note FROM review_flag WHERE company_id = ?",
+                (company_id,),
+            ).fetchall()
+        )
+        self.assertIn("kein Datum", notes["blog_date_unparseable"])
+        self.assertIn("lesbares Datum", notes["blog_cadence_unmeasurable"])
+
+
+class TestPersistentTransient(ScoreStageTestCase):
+    """Migration 009 / A7b. A transient retries; on the third consecutive run
+    over three distinct days it has stopped being transient."""
+
+    def scored_on(self, company_id: int, day: str) -> score.ScoreResult:
+        run_id = self.add_run("score-p1", f"{day}T09:00:00Z")
+        _run_id, results = score.run(
+            self.conn, today=date.fromisoformat(day), run_id=run_id
+        )
+        return next(r for r in results if r.company_id == company_id)
+
+    def raised(self, company_id: int) -> list[str]:
+        return [
+            row["reason"]
+            for row in self.conn.execute(
+                "SELECT reason FROM review_flag WHERE company_id = ?", (company_id,)
+            )
+        ]
+
+    def test_two_runs_are_not_enough(self) -> None:
+        company_id = self.company()  # no product sample: opp.no_product_schema abstains
+        self.scored_on(company_id, "2026-08-14")
+        self.scored_on(company_id, "2026-08-15")
+        self.assertNotIn("fetch_persistently_failing", self.raised(company_id))
+
+    def test_the_third_day_routes_it(self) -> None:
+        company_id = self.company()
+        for day in ("2026-08-14", "2026-08-15", "2026-08-16"):
+            self.scored_on(company_id, day)
+        self.assertIn("fetch_persistently_failing", self.raised(company_id))
+        note = self.conn.execute(
+            "SELECT raised_note FROM review_flag WHERE company_id = ? "
+            "AND reason = 'fetch_persistently_failing'",
+            (company_id,),
+        ).fetchone()[0]
+        self.assertIn("2026-08-14", note)
+        self.assertIn("Produktseite", note)
+
+    def test_three_runs_in_one_day_are_one_day(self) -> None:
+        """§5: without the distinct-day requirement a crash-restart loop inside
+        one afternoon manufactures the flag, and the flag would then be about
+        our own crash rather than about the shop."""
+        company_id = self.company()
+        for _ in range(3):
+            self.scored_on(company_id, "2026-08-16")
+        self.assertNotIn("fetch_persistently_failing", self.raised(company_id))
+
+    def test_a_run_where_it_measured_resets_the_count(self) -> None:
+        """Consecutive means consecutive: one successful fetch in the middle
+        and the retry policy starts again."""
+        company_id = self.company()
+        self.scored_on(company_id, "2026-08-14")
+        self.signal(company_id, "schema.product_present", num=0)
+        self.scored_on(company_id, "2026-08-15")
+        self.conn.execute(
+            "DELETE FROM signal WHERE company_id = ? AND key = 'schema.product_present'",
+            (company_id,),
+        )
+        self.scored_on(company_id, "2026-08-16")
+        self.assertNotIn("fetch_persistently_failing", self.raised(company_id))
+
+
 class TestStageScopedProfile(ScoreStageTestCase):
     """Migration 006. A signal a later run of the same stage stopped writing is
     superseded — otherwise every A7 guard is undone by the read model."""
@@ -588,11 +765,7 @@ class TestStageScopedProfile(ScoreStageTestCase):
     def test_a_later_run_of_the_same_stage_supersedes_by_omission(self) -> None:
         company_id = self.company()
         self.signal(company_id, "agency.footer_credit", text="Powered by JTL-Shop")
-        later = int(
-            self.conn.execute(
-                "INSERT INTO run (started_at, stage) VALUES ('2026-08-16T00:00:00Z','extract-p1')"
-            ).lastrowid
-        )
+        later = self.add_run("extract-p1", "2026-08-16T00:00:00Z")
         self.signal(company_id, "platform.detected", text="JTL", run_id=later)
         credit = self.conn.execute(
             "SELECT agency_credit FROM company_profile WHERE company_id = ?",
@@ -604,18 +777,10 @@ class TestStageScopedProfile(ScoreStageTestCase):
         """A Phase-1 re-extract must not blank Phase-2 signals, or every
         re-score would discard what Phase 2 was paid for."""
         company_id = self.company()
-        paid = int(
-            self.conn.execute(
-                "INSERT INTO run (started_at, stage) VALUES ('2026-08-15T01:00:00Z','extract-p2')"
-            ).lastrowid
-        )
+        paid = self.add_run("extract-p2", "2026-08-15T01:00:00Z")
         self.signal(company_id, "ai.queries_checked", num=2, run_id=paid)
         self.signal(company_id, "ai.brand_mentions", num=0, run_id=paid)
-        later = int(
-            self.conn.execute(
-                "INSERT INTO run (started_at, stage) VALUES ('2026-08-16T00:00:00Z','extract-p1')"
-            ).lastrowid
-        )
+        later = self.add_run("extract-p1", "2026-08-16T00:00:00Z")
         self.signal(company_id, "platform.detected", text="Shopify", run_id=later)
         row = self.conn.execute(
             "SELECT ai_queries_checked, ai_brand_mentions FROM company_profile "
@@ -630,11 +795,7 @@ class TestStageScopedProfile(ScoreStageTestCase):
         touched, skipped = self.company("a.de"), self.company("b.de")
         self.signal(touched, "platform.detected", text="Shopify")
         self.signal(skipped, "platform.detected", text="JTL")
-        later = int(
-            self.conn.execute(
-                "INSERT INTO run (started_at, stage) VALUES ('2026-08-16T00:00:00Z','extract-p1')"
-            ).lastrowid
-        )
+        later = self.add_run("extract-p1", "2026-08-16T00:00:00Z")
         self.signal(touched, "platform.detected", text="Shopify", run_id=later)
         rows = dict(
             self.conn.execute(
@@ -642,6 +803,102 @@ class TestStageScopedProfile(ScoreStageTestCase):
             ).fetchall()
         )
         self.assertEqual(rows, {"a.de": "Shopify", "b.de": "JTL"})
+
+
+class TestOnlyFinishedRunsAreAuthoritative(ScoreStageTestCase):
+    """Migration 007. 006 read the latest run of a stage as authoritative,
+    including by omission — which is right only if that run finished.
+
+    Per §5 (D6) a crash-then-restart mints a **new** run_id, so a run that
+    wrote 10 of 15 keys and died would otherwise become the latest, and the 5
+    it never reached would read as retractions rather than as incompleteness.
+    That inverts 006: instead of a stale value persisting, a live value
+    vanishes. Nothing in the suite before this could reach the case, because
+    every fixture run was finished by construction.
+    """
+
+    def written(self, company_id: int) -> tuple[str | None, str | None]:
+        row = self.conn.execute(
+            "SELECT platform, agency_credit FROM company_profile WHERE company_id = ?",
+            (company_id,),
+        ).fetchone()
+        return row["platform"], row["agency_credit"]
+
+    def test_a_partial_run_does_not_retract_the_previous_runs_keys(self) -> None:
+        company_id = self.company()
+        self.signal(company_id, "platform.detected", text="Shopify")
+        self.signal(company_id, "agency.footer_credit", text="Umsetzung: Agentur X")
+
+        crashed = self.add_run("extract-p1", "2026-08-16T00:00:00Z", finished=False)
+        self.signal(company_id, "platform.detected", text="Shopware", run_id=crashed)
+
+        self.assertEqual(
+            self.written(company_id),
+            ("Shopify", "Umsetzung: Agentur X"),
+            "an unfinished run must retract nothing, and supersede nothing",
+        )
+
+    def test_an_aborted_run_is_not_authoritative_either(self) -> None:
+        """A run that stopped itself against a ceiling wrote a partial account
+        of the corpus just as surely as one that crashed."""
+        company_id = self.company()
+        self.signal(company_id, "agency.footer_credit", text="Umsetzung: Agentur X")
+        aborted = self.add_run("extract-p1", "2026-08-16T00:00:00Z")
+        self.conn.execute(
+            "UPDATE run SET aborted_reason = 'cost ceiling' WHERE id = ?", (aborted,)
+        )
+        self.signal(company_id, "platform.detected", text="Shopware", run_id=aborted)
+        self.assertEqual(self.written(company_id), (None, "Umsetzung: Agentur X"))
+
+    def test_the_partial_runs_own_keys_are_ignored_too(self) -> None:
+        """Wholesale, not per key. Taking the crashed run's keys where it has
+        them and falling back per key rebuilds the exact defect 006 closed: a
+        key it would have declined to write, served from an older run that
+        did."""
+        company_id = self.company()
+        self.signal(company_id, "agency.footer_credit", text="Powered by JTL-Shop")
+        crashed = self.add_run("extract-p1", "2026-08-16T00:00:00Z", finished=False)
+        self.signal(company_id, "platform.detected", text="JTL", run_id=crashed)
+        self.assertEqual(self.written(company_id), (None, "Powered by JTL-Shop"))
+
+    def test_the_restarted_run_supersedes_once_it_finishes(self) -> None:
+        """Anti-vacuity: the narrowing must not have disabled 006. A complete
+        run still retracts by omission — that is the whole mechanism."""
+        company_id = self.company()
+        self.signal(company_id, "agency.footer_credit", text="Powered by JTL-Shop")
+        restarted = self.add_run("extract-p1", "2026-08-16T01:00:00Z")
+        self.signal(company_id, "platform.detected", text="JTL", run_id=restarted)
+        self.assertEqual(self.written(company_id), ("JTL", None))
+
+    def test_score_marks_its_own_run_finished_only_on_success(self) -> None:
+        """`finished_at` is now load-bearing, so the stages had to stop writing
+        it from a `finally` — which marked a crashed run finished."""
+        self.company()
+        run_id, _ = score.run(self.conn, today=TODAY)
+        row = self.conn.execute(
+            "SELECT finished_at, aborted_reason FROM run WHERE id = ?", (run_id,)
+        ).fetchone()
+        self.assertIsNotNone(row["finished_at"])
+        self.assertIsNone(row["aborted_reason"])
+
+    def test_a_crashed_scoring_run_records_the_abort_and_no_finish(self) -> None:
+        self.company()
+        run_id = self.add_run("score-p1", "2026-08-16T02:00:00Z", finished=False)
+        stage = score.ScoreStage(self.conn, run_id, 1, TODAY)
+        rows = stage.profiles()
+        with (
+            unittest.mock.patch.object(
+                score.ScoreStage, "run_company", side_effect=RuntimeError("boom")
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            score.run(self.conn, run_id=run_id, today=TODAY)
+        self.assertTrue(rows)
+        row = self.conn.execute(
+            "SELECT finished_at, aborted_reason FROM run WHERE id = ?", (run_id,)
+        ).fetchone()
+        self.assertIsNone(row["finished_at"])
+        self.assertIn("boom", row["aborted_reason"])
 
 
 if __name__ == "__main__":

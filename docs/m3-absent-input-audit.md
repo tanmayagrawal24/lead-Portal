@@ -46,7 +46,7 @@ one defect in the read model that resurrects two already-fixed bugs.
 | `opp.thin_blog` | +12 | `content.blog_post_count` | does not fire, **falls through** (M1.34) | — | — | **A7 — guarded** |
 | `opp.blog_slowing` | +10 | `content.blog_last_post`, `..._basis` | as `blog_stale` | — | as `blog_stale` | **A7 — guarded** |
 | `opp.no_article_schema` | +8 | `content.blog_exists`, `schema.article_present` | **fires on an unwritten signal** | 0 → fires, correctly | A6.1 leaves it unwritten when no article was sampled | **A7 — NEW.** See §5. |
-| `opp.no_product_schema` | +10 | `schema.product_present` | must not fire | 0 → fires, correctly | A5.5/A5.6 | **A7 — guarded**, routing still open (A7b) |
+| `opp.no_product_schema` | +10 | `schema.product_present` | must not fire | 0 → fires, correctly | A5.5/A5.6 | **A7 — guarded**, routed by `fetch_persistently_failing` (migration 009) |
 | `opp.ai_invisible` | +15 | `ai.queries_checked ≥ 2`, `ai.brand_mentions = 0` | no fire — the `queries_checked` guard is already the A7 guard | — | — | **safe** |
 | `opp.slow_site` | +10 | `perf.lighthouse_performance < 50` | **NULL must not read as < 50** | — | — | **A7 — NEW**, latent: Phase 2 only, so it cannot bite until M5. Guarded now anyway. |
 | `opp.de_only` | +5 | `i18n.hreflang_count` | **never written for a shop with no `hreflang` at all** — which is exactly the de-only population | 1 → fires | — | **B7 shape.** See §6. |
@@ -203,15 +203,25 @@ fix are corrections to instruments, not changes to weights or thresholds:
 - `content.blog_post_dates`
 - the `opp.no_article_schema` and `opp.slow_site` guards
 
-**Two §6.4 ratifications are outstanding**, both routings for abstentions that
-are correct today but silent. Every rule below already abstains in the safe
-direction; what is missing is part 3 of A7, the review flag:
+**Two §6.4 ratifications were outstanding**, both routings for abstentions that
+were correct and silent. **Both ratified 2026-08-16**, the cadence one first:
 
-| # | abstention | how often on the corpus | recommended reason |
-|---|---|---|---|
-| 1 | a **persistent** transient — a product page or blog index that has failed for N = 3 runs (A7b, carried over from M1.34) | 2 shops today, at run 1 of 3 | `fetch_persistently_failing` |
-| 2 | `neg.active_content` cannot measure cadence | **5 of 13** | `blog_cadence_unmeasurable` |
+| # | abstention | how often | reason | blocks contact? |
+|---|---|---|---|---|
+| 2 | `neg.active_content` cannot measure cadence | **6 of 13** after the third crawl | `blog_cadence_unmeasurable` (migration 008) | **yes** |
+| 1 | a **persistent** transient — a product page, blog index or article that has failed for N = 3 runs on 3 distinct days (A7b, carried over from M1.34) | 2 shops counting, at day 1 of 3 | `fetch_persistently_failing` (migration 009) | no |
 
-The second is the larger of the two and is the one I would take first: it is 5
-companies whose score is knowingly 25 points high, and unlike every other
-abstention in this spec, nobody is currently told.
+**And the ratification of the first one added a third axis to the tables above:
+the direction of the error.** This audit recorded, for every rule, what could
+not be measured and what routes it — and not the thing that decides how much an
+abstention costs. Every instance here but one errs too **low**: an award
+withheld, the lead ranks below where it belongs, and the queue reaches it. Only
+`neg.active_content` errs too **high**, because it withholds a *penalty* — and a
+lead that reads too high is not mis-ranked, it is called.
+
+So that one carries a consequence the others do not: an unresolved
+`blog_cadence_unmeasurable` **refuses outbound contact** for that company, in
+the schema, the same way §8 fails an export that cannot state its basis. The
+axis is recorded per reason (`contact_blocking_reason`) rather than re-derived
+per abstention, so the next instance is classified rather than argued — which is
+the same reason A7 was named in the first place.

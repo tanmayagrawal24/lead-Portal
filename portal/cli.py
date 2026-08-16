@@ -202,9 +202,13 @@ def cmd_score(path: Path, phase: int) -> int:
     print("─" * 72)
     for position, result in enumerate(ranked, 1):
         gate = "P2" if result.admitted else "stop"
+        # The block is printed in the ranked list and not only in the detail
+        # below it, because the ranked list is what a person reads before
+        # deciding who to call (§8, A7's third axis).
+        blocked = "  ⛔ KONTAKT GESPERRT" if result.contact_blocked else ""
         print(
             f"{position:>2}  {result.band:4} {result.total:>5}  "
-            f"{result.remaining_upside:>6} {gate:4}  {result.domain}"
+            f"{result.remaining_upside:>6} {gate:4}  {result.domain}{blocked}"
         )
 
     for result in ranked:
@@ -213,6 +217,13 @@ def cmd_score(path: Path, phase: int) -> int:
             mark = f"{component.points:+d}" if component.points else "  ·"
             print(f"   {mark:>4}  {component.rule_id}")
             print(f"         {component.reason}")
+        for flag in result.review_flags:
+            print(f"    →  review: {flag.reason}")
+        if result.contact_blocked:
+            print(
+                "    ⛔ Kontakt gesperrt: Die Bewertung ist möglicherweise zu "
+                "hoch. Erst nach Prüfung kontaktieren."
+            )
     return 0
 
 

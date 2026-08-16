@@ -476,17 +476,35 @@ class ExtractStage:
             # written as an *enabling* fact rather than a suppressing one so
             # that a run predating this guard — where the signal is simply
             # absent — fails to the safe side, which is A5.5's discipline.
+            # **The basis describes the date that was written, not the sources
+            # that had one (M1.40).** It said `both` whenever each source
+            # produced a date, and §6.2 reads `both` as "the index bounds this
+            # from above". On `zecplus.de` the index's newest was 2021-03-10,
+            # the sampled article was 2025-09-03, the article won the max — and
+            # the basis still claimed a bound the index plainly does not
+            # supply, since it failed to date the newest post we are holding.
+            # `opp.blog_slowing` took +10 on that, which is M1.32's defect
+            # arriving through the basis instead of through its absence.
+            #
+            # The index bounds the value only when the index's own maximum *is*
+            # the value. Otherwise the date rests on the sample: a floor with
+            # no ceiling, and §6.2's staleness rungs must not fire on it.
+            index_bounds = index_dated and newest == read.newest_post
             basis = (
-                "both"
-                if index_dated and article_dated
-                else ("index" if index_dated else "article")
+                ("both" if article_dated else "index") if index_bounds else "article"
             )
             self._write(result, "content.blog_last_post_basis", evidence, text=basis)
             if basis == "article":
                 result.notes.append(
-                    "blog_last_post is sample-only (the index carries no date): "
-                    "a lower bound with no maximum behind it, so §6.2's staleness "
-                    "rungs must not fire on it"
+                    "blog_last_post is sample-only ("
+                    + (
+                        "the sampled post is newer than anything the index dates, "
+                        "so the index's maximum does not bound it"
+                        if index_dated
+                        else "the index carries no date"
+                    )
+                    + "): a lower bound with no maximum behind it, so §6.2's "
+                    "staleness rungs must not fire on it"
                 )
         else:
             # §6.2's NULL branch: a blog whose dates cannot be parsed is an

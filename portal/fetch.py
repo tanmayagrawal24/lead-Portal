@@ -776,16 +776,28 @@ def run(
         conn, fetcher, ArtifactStore(artifacts_root), run_id, max_hosts, base_url
     )
 
+    # `finished_at` is set on the success path **only**, and an abort is
+    # recorded instead (M1.39). It used to be written from the `finally`, which
+    # marked a crashed run finished — and `company_profile` now reads exactly
+    # that column to decide which run's account of a company to trust
+    # (migration 007). A run that died at company 10 of 13 must not be able to
+    # retract the three it never reached.
     try:
         with ThreadPoolExecutor(max_workers=max_hosts) as pool:
             results = list(pool.map(lambda row: stage.run_company(*row), company_rows))
+    except BaseException as exc:
+        conn.execute(
+            "UPDATE run SET aborted_reason = ? WHERE id = ?",
+            (f"{type(exc).__name__}: {exc}"[:500], run_id),
+        )
+        raise
     finally:
         if owns_fetcher:
             fetcher.close()
-        conn.execute(
-            "UPDATE run SET finished_at = ?, companies_seen = ? WHERE id = ?",
-            (utc_now(), len(company_rows), run_id),
-        )
+    conn.execute(
+        "UPDATE run SET finished_at = ?, companies_seen = ? WHERE id = ?",
+        (utc_now(), len(results), run_id),
+    )
     return run_id, results
 
 
