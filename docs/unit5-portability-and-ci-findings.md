@@ -242,16 +242,43 @@ injected-client seam a measurement: `llm_anthropic._client` raises
 its own fake. M5 is the next unit and the first that spends; the door is shut
 before it, not after.
 
+## 8b. The workflow has now run, on GitHub Actions, and is green
+
+Run `32046900494`, on the push of this unit — not a local simulation:
+
+```
+ruff                              success
+pytest (py3.11)                   success
+pytest (py3.12)                   success
+audit-politeness (fixture corpus) success
+```
+
+The audit job's log, which is the part worth reading, because it is the half
+that had to prove it could still fail:
+
+```
+build a healthy corpus and audit it
+  corpus at /home/runner/work/_temp/corpus-ok/portal.db: run 1, 10 artifacts,
+    kinds=['blog_article','blog_index','homepage','impressum','product_page','robots','sitemap']
+  §5.2: HELD
+prove the gate can fail
+  corpus at /home/runner/work/_temp/corpus-bad/portal.db: run 1, 1 artifacts, kinds=(none)
+  *** UNREAD *** 127.0.0.1   HTTP 503 http_503 — 0 bodies stored for this company
+  §5.2: BREACHED
+  the audit correctly refused a corpus with an unread robots.txt
+```
+
+**Python 3.11 — the declared floor — passed on a real runner**, which is the one
+thing this machine could not check: only `/usr/bin/python3.12` exists here.
+
 ## 9. What could not be verified
 
-- **The workflow has never run on GitHub Actions.** Every command in it was run
-  locally and the failure condition was reproduced locally, but the runner
-  itself, `actions/setup-python`, and Python **3.11** specifically are unproven
-  — only 3.12 exists on this machine (`/usr/bin/python3.12`, and nothing else).
-  If 3.11 fails, it fails on something this unit could not see.
 - **Whether the container base image GitHub uses resolves `.localhost`.** It
-  does not matter any more — the tests use `.invalid`, which resolves nowhere —
-  but the original claim about *that specific image* is still second-hand.
+  does not matter any more — the tests use `.invalid`, which resolves nowhere,
+  so the suite is green on that runner for a reason that does not depend on the
+  answer — but the original claim about *that specific image* is still
+  second-hand and this unit did not test it.
+- **Python 3.13.** Still absent from the matrix, still never run. §7 above.
 - **`package.json` / `package-lock.json`** are untracked and declare
   `@github/copilot-sdk`. They are unexplained by anything in the repository and
   are **not** part of the M5 remnant, so they were left exactly as found.
@@ -264,3 +291,9 @@ before it, not after.
 The first external audit's section headed *"LLM-generated/hallucination
 signals"* has **still** not been transmitted. Five units have now reported
 around it. It is missing, not empty, and that audit is not closed.
+
+**Re-verified here rather than repeated.** `origin/copilot/research-high-level-review`
+is still at `f1f9732` and `git diff f1f9732 origin/copilot/research-high-level-review`
+is empty — byte-identical, carrying no audit artifact. `gh pr list --state all`
+and `gh issue list --state all` both return nothing. There is no route to that
+section on the remote; it has to come from whoever holds it.
