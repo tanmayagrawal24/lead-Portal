@@ -36,6 +36,12 @@ from portal.net import (
     Response,
     RobotsExempt,
 )
+
+# A7b's N, imported rather than restated. The policy is one number and two
+# stages read it; a second copy here would be M1.42's shape — a fact described
+# by a second expression that can disagree with the first.
+from portal.ruleset import PERSISTENT_FETCH
+from portal.score import PERSISTENT_RUNS
 from portal.urls import (
     authority_of,
     default_base,
@@ -116,20 +122,110 @@ class FetchStage:
                 (reason, company_id),
             )
 
-    def _raise_review_flag(self, company_id: int, reason: str) -> None:
+    def _raise_review_flag(
+        self, company_id: int, reason: str, note: str | None = None
+    ) -> None:
         """§6.4 soft flag, using the idiom from §4: DO NOTHING on the uniqueness
         conflict only, so a misspelled reason still raises."""
         with self._db_lock:
-            self._raise_review_flag_locked(company_id, reason)
+            self._raise_review_flag_locked(company_id, reason, note)
 
-    def _raise_review_flag_locked(self, company_id: int, reason: str) -> None:
+    def _raise_review_flag_locked(
+        self, company_id: int, reason: str, note: str | None = None
+    ) -> None:
         """As above, for callers already holding `_db_lock`. `_db_lock` is a
         plain `Lock`, so nesting the public helpers would deadlock."""
         self.conn.execute(
-            "INSERT INTO review_flag (company_id, reason, raised_run_id, raised_at) "
-            "VALUES (?,?,?,?) ON CONFLICT (company_id, reason) DO NOTHING",
-            (company_id, reason, self.run_id, utc_now()),
+            "INSERT INTO review_flag "
+            "(company_id, reason, raised_run_id, raised_at, raised_note) "
+            "VALUES (?,?,?,?,?) ON CONFLICT (company_id, reason) DO NOTHING",
+            (company_id, reason, self.run_id, utc_now(), note),
         )
+
+    # ── a robots.txt we cannot read, run after run (M1.59, A7b) ─────────
+
+    def _robots_failing_days(
+        self, company_id: int, robots_artifact: StoredArtifact
+    ) -> list[str]:
+        """The distinct days this authority's `robots.txt` has been unreadable,
+        as an unbroken streak ending today. Empty when the streak is broken.
+
+        A7b's counting policy, applied to a fetch-stage fact rather than to a
+        rule abstention: **3 runs on 3 distinct days**, so a crash-restart loop
+        inside one afternoon cannot manufacture a flag about our own crash.
+
+        Two joins do the work, because `artifact` carries no `run_id`:
+
+        * `fetched_at` on the failure row is when this URL first failed —
+          `_record_failure` updates in place and never rewrites it (§5.2).
+        * A **success** at the same authority since then breaks the streak. A
+          200 creates its own row and advances `last_checked_at` on every
+          re-fetch of identical content, so `last_checked_at > fetched_at` is
+          exactly "it has worked since".
+
+        Two limits, both stated because both are real and neither is measured
+        away. A `fetch` run given a company list that omitted this shop still
+        counts as a day here; and M1.61's content-hash collapse can file a
+        success under a *sibling* origin's row, which an authority match then
+        misses. Both err the same way — toward flagging early — and this flag
+        raises a queue item and blocks nothing (§6.4, migration 009).
+        """
+        with self._db_lock:
+            row = self.conn.execute(
+                "SELECT fetched_at FROM artifact WHERE id = ?",
+                (robots_artifact.artifact_id,),
+            ).fetchone()
+            if row is None:
+                return []
+            first_failed = str(row["fetched_at"])
+            authority = authority_of(robots_artifact.url)
+            recovered = [
+                r
+                for r in self.conn.execute(
+                    "SELECT url FROM artifact WHERE company_id = ? AND kind = 'robots' "
+                    "AND content_hash IS NOT NULL AND last_checked_at > ?",
+                    (company_id, first_failed),
+                )
+                if authority_of(str(r["url"])) == authority
+            ]
+            if recovered:
+                return []
+            days = self.conn.execute(
+                "SELECT DISTINCT date(started_at) AS day FROM run "
+                "WHERE stage = 'fetch' AND date(started_at) >= date(?) "
+                "ORDER BY day",
+                (first_failed,),
+            ).fetchall()
+        return [str(day["day"]) for day in days]
+
+    def _flag_persistent_robots_failure(
+        self,
+        company_id: int,
+        domain: str,
+        robots_artifact: StoredArtifact,
+        why: str,
+        result: CompanyResult,
+    ) -> None:
+        """Raise `fetch_persistently_failing` once, and only once it persists.
+
+        A single 503 is a transient and A7b says a transient retries before it
+        becomes a person's problem. What routes here is M1.34's vocabulary
+        because it is M1.34's question: *does this URL load for you?* — the
+        same one the product page, the blog index and the sampled article send,
+        which is why migration 009 gave all of them one reason.
+        """
+        days = self._robots_failing_days(company_id, robots_artifact)
+        if len(days) < PERSISTENT_RUNS:
+            return
+        self._raise_review_flag(
+            company_id,
+            PERSISTENT_FETCH,
+            f"{robots_artifact.url}: {why}. Die robots.txt von {domain} ist seit "
+            f"{days[0]} an {len(days)} verschiedenen Tagen in Folge nicht lesbar, "
+            "daher wurde nichts abgerufen – bitte die Seite einmal von Hand "
+            "aufrufen.",
+        )
+        result.review_flags.append(PERSISTENT_FETCH)
 
     # ── a seeded domain that has moved (P2, M1.18) ──────────────────────
 
@@ -318,12 +414,26 @@ class FetchStage:
         robots_response = self.fetcher.get(
             f"{base}/robots.txt", hop_allowed=within_site
         )
-        result.artifacts.append(
-            self._record(company_id, domain, "robots", robots_response)
-        )
-        policy = robots_mod.parse(
-            robots_response.text() if robots_response.ok else None
-        )
+        robots_artifact = self._record(company_id, domain, "robots", robots_response)
+        result.artifacts.append(robots_artifact)
+        policy = robots_mod.for_response(robots_response)
+
+        # M1.59: a robots.txt we could not read stops this company's run here.
+        #
+        # Not an exclusion. `company.excluded` is a standing verdict about a
+        # lead and this is a fact about one afternoon, so nothing is written to
+        # `company` — the run simply produces no bodies for this shop, with the
+        # reason on the result where an operator reading the run output sees it.
+        # Every later request is gated on `allowed()`, which an `unavailable`
+        # policy already refuses, so returning here is belt and braces; it is
+        # here so the shop is not billed 40 refusal rows per run for a state
+        # that is about our reading and not about its pages.
+        if policy.unavailable is not None:
+            result.notes.append(f"{policy.unavailable} — nothing fetched for {domain}")
+            self._flag_persistent_robots_failure(
+                company_id, domain, robots_artifact, policy.unavailable, result
+            )
+            return result
 
         if (reason := policy.blocks_required_paths(base)) is not None:
             self._exclude(company_id, reason)
@@ -374,9 +484,18 @@ class FetchStage:
                 result.artifacts.append(
                     self._record(company_id, domain, "robots", probe)
                 )
-                policies[authority] = robots_mod.parse(
-                    probe.text() if probe.ok else None
-                )
+                policies[authority] = robots_mod.for_response(probe)
+                # M1.59, the same tri-state one authority out. A blog host or a
+                # redirect target whose robots.txt 503s is `unfetchable` for the
+                # rest of this run — routed through the dict that already exists
+                # for `crawl_delay_too_high`, because both mean the same thing
+                # here: this authority is off limits and the reason is recorded.
+                # §5.2's rule that a blog host refusing us is a missing signal
+                # and never an exclusion holds unchanged.
+                if (why := policies[authority].unavailable) is not None:
+                    unfetchable[authority] = why
+                    result.notes.append(f"{authority} not fetched — {why}")
+                    return policies[authority]
                 refusal = self._apply_crawl_delay(url, policies[authority])
                 if refusal is not None:
                     unfetchable[authority] = refusal

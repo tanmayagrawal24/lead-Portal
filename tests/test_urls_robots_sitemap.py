@@ -6,7 +6,7 @@ import gzip
 import unittest
 from pathlib import Path
 
-from portal import impressum, robots, sitemap, urls
+from portal import impressum, net, robots, sitemap, urls
 
 
 class TestNormaliseDomain(unittest.TestCase):
@@ -169,9 +169,13 @@ class TestRobotsPolicy(unittest.TestCase):
         self.assertIsNotNone(policy.blocks_required_paths("https://example.de"))
 
     def test_malformed_robots_does_not_abort(self) -> None:
-        self.assertTrue(
-            robots.parse("\x00\x01 not robots at all").allows("https://example.de/")
-        )
+        """And is measured rather than assumed: stdlib **skips** what it cannot
+        read instead of raising, so this input reaches the parser and comes back
+        with no rules — it never takes M1.60's `unavailable` branch. The branch
+        that does is pinned in `TestUnavailablePolicy`."""
+        policy = robots.parse("\x00\x01 not robots at all")
+        self.assertIsNone(policy.unavailable)
+        self.assertTrue(policy.allows("https://example.de/"))
 
     def test_crawl_delay_is_read_for_our_agent(self) -> None:
         policy = robots.parse(
@@ -201,6 +205,107 @@ class TestRobotsPolicy(unittest.TestCase):
                 "https://example.de/sitemap-products.xml",
             ],
         )
+
+
+class TestForResponse(unittest.TestCase):
+    """RFC 9309 §2.3.1's three cases, which `Response.ok` merged into two
+    (M1.59). The classifier is a pure function of status and body."""
+
+    def policy(self, **kwargs: object) -> robots.RobotsPolicy:
+        return robots.for_response(
+            net.Response(url="https://example.de/robots.txt", **kwargs)
+        )  # type: ignore[arg-type]
+
+    def test_200_with_rules_is_the_rules(self) -> None:
+        policy = self.policy(status=200, body=b"User-agent: *\nDisallow: /x\n")
+        self.assertIsNone(policy.unavailable)
+        self.assertFalse(policy.allows("https://example.de/x"))
+        self.assertTrue(policy.allows("https://example.de/y"))
+
+    def test_404_is_unrestricted_and_that_is_the_case_the_docstring_is_about(
+        self,
+    ) -> None:
+        """The behaviour M1.59 keeps. A 404 on robots.txt is the common case for
+        a small shop and means there is no file."""
+        policy = self.policy(status=404, body=b"not found")
+        self.assertIsNone(policy.unavailable)
+        self.assertTrue(policy.allows("https://example.de/impressum"))
+
+    def test_403_is_also_unrestricted(self) -> None:
+        self.assertTrue(self.policy(status=403, body=b"").allows("https://example.de/"))
+
+    def test_5xx_disallows_everything(self) -> None:
+        for status in (500, 502, 503):
+            with self.subTest(status=status):
+                policy = self.policy(status=status, body=b"")
+                self.assertIn(f"HTTP {status}", policy.unavailable or "")
+                self.assertFalse(policy.allows("https://example.de/impressum"))
+
+    def test_429_disallows_everything(self) -> None:
+        """A rate-limit response is the server asking us to stop. Read as "no
+        rules stated" it answered a request to back off by crawling the site."""
+        policy = self.policy(status=429, body=b"")
+        self.assertIn("HTTP 429", policy.unavailable or "")
+        self.assertFalse(policy.allows("https://example.de/"))
+
+    def test_a_transport_failure_disallows_everything(self) -> None:
+        policy = self.policy(error="ConnectTimeout: timed out")
+        self.assertIn("ConnectTimeout", policy.unavailable or "")
+        self.assertFalse(policy.allows("https://example.de/"))
+
+    def test_a_redirect_loop_disallows_everything(self) -> None:
+        """No status at all: the chain never resolved. §2.3.1.1 would permit
+        allow-all here; a MAY is not a licence to convert missing evidence into
+        permission."""
+        policy = self.policy(error="too_many_redirects: over 5 from x")
+        self.assertFalse(policy.allows("https://example.de/"))
+
+    def test_a_refused_redirect_stays_unrestricted(self) -> None:
+        """M1.18's moved-domain shape, 2 of 13 in the corpus: the hop leaves the
+        seeded site and is refused, and the host actually fetched has its own
+        robots.txt read before its first request. Treating this as unavailable
+        would produce nothing at all for those two shops."""
+        policy = self.policy(status=301, error="redirect_refused: https://elsewhere/")
+        self.assertIsNone(policy.unavailable)
+        self.assertTrue(policy.allows("https://example.de/"))
+
+
+class TestUnavailablePolicy(unittest.TestCase):
+    def test_it_allows_nothing_and_states_no_delay(self) -> None:
+        """M1.59(a), structurally: the crawl delay is lost with the policy, and
+        an unavailable policy leaves no request for a delay to pace. The pair
+        cannot come apart, which is why a 503 can no longer drop a host's stated
+        pacing and fall back to our own default."""
+        policy = robots.unavailable("HTTP 503")
+        self.assertIsNone(policy.crawl_delay())
+        for path in ("/", "/impressum", "/sitemap.xml", "/anything"):
+            self.assertFalse(policy.allows(f"https://example.de{path}"))
+
+    def test_it_is_not_an_exclusion(self) -> None:
+        """A standing verdict about a lead must not be written from a fact about
+        one afternoon."""
+        self.assertIsNone(
+            robots.unavailable("HTTP 503").blocks_required_paths("https://example.de")
+        )
+
+    def test_an_unparseable_retrieved_body_is_unavailable(self) -> None:
+        """M1.60. Not the 4xx case: the server has a file and served it."""
+
+        class Exploding(str):
+            def splitlines(self, *_a: object):  # type: ignore[override]
+                raise ValueError("boom")
+
+        policy = robots.parse(Exploding("User-agent: *"))
+        self.assertIn("unparseable", policy.unavailable or "")
+        self.assertFalse(policy.allows("https://example.de/"))
+
+    def test_an_empty_body_is_unrestricted_not_unavailable(self) -> None:
+        """An empty robots.txt states no rules, which is a real answer."""
+        for text in ("", "   \n\n"):
+            with self.subTest(text=repr(text)):
+                policy = robots.parse(text)
+                self.assertIsNone(policy.unavailable)
+                self.assertTrue(policy.allows("https://example.de/"))
 
 
 URLSET = """<?xml version="1.0" encoding="UTF-8"?>

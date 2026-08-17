@@ -289,18 +289,35 @@ def cmd_diff_signals(
     return 0
 
 
-def cmd_audit_politeness(log_path: Path) -> int:
-    """Report measured spacing and host concurrency. Non-zero if §5.2 was broken.
+def cmd_audit_politeness(log_path: Path, path: Path) -> int:
+    """Report measured spacing, host concurrency and robots coverage. Non-zero
+    if §5.2 was broken.
 
     Exits non-zero on a breach so this is usable as an acceptance check rather
     than only as something to read.
+
+    The database is required, not optional (M1.62). Spacing alone was a green
+    light over a policy that may never have been read: an unrestricted policy
+    is measured against the *default* interval, and passes. A missing database
+    is therefore an error here rather than a narrower audit.
     """
     if not log_path.exists():
         print(
             f"no request log at {log_path} — run `portal fetch` first", file=sys.stderr
         )
         return 2
-    text, ok = audit.report(log_path)
+    if not path.exists():
+        print(
+            f"no database at {path} — spacing alone cannot show whether a "
+            "robots.txt was read (M1.62); run `portal init`",
+            file=sys.stderr,
+        )
+        return 2
+    conn = db.connect(path)
+    try:
+        text, ok = audit.report(log_path, conn=conn)
+    finally:
+        conn.close()
     print(text)
     return 0 if ok else 1
 
@@ -609,7 +626,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit_parser = sub.add_parser(
         "audit-politeness",
-        help="measure §5.2 spacing and host concurrency from the request log",
+        help="measure §5.2 spacing and host concurrency from the request log, "
+        "and robots.txt coverage from the artifact table",
     )
     audit_parser.add_argument(
         "--log",
@@ -697,7 +715,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "audit-politeness":
         return cmd_audit_politeness(
-            args.log if args.log is not None else config.request_log_path(path)
+            args.log if args.log is not None else config.request_log_path(path),
+            path,
         )
 
     if args.command == "audit-impressum-candidates":

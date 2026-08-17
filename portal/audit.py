@@ -16,12 +16,23 @@ request occupies its host from `issued` until `issued + elapsed`, and the
 answer is the largest number of distinct hosts whose intervals overlap at any
 instant. Counting requests rather than hosts would be a different and much
 weaker claim.
+
+**Spacing is not the whole of politeness, and this file used to behave as
+though it were (M1.62).** Under H1 a robots.txt that 503'd produced an
+unrestricted policy, so the pages that followed were spaced against the
+*default* interval and this audit passed — the instrument built to verify
+politeness could not see the one failure that makes politeness wrong, because
+the failure changes which pages may be fetched and not how fast they arrive.
+`robots_coverage` reads the artifact table for that, and `report` fails on it
+the way it already fails on a spacing breach (M1.19's instinct: a rule should
+be enforceable, not stated).
 """
 
 from __future__ import annotations
 
 import itertools
 import json
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,8 +118,130 @@ def max_hosts_in_flight(entries: list[dict]) -> int:
     return highest
 
 
-def report(path: Path, intervals: dict[str, float] | None = None) -> tuple[str, bool]:
-    """A human-readable audit and whether §5.2 held. Returns `(text, ok)`."""
+@dataclass(frozen=True)
+class RobotsArtifact:
+    """One stored `robots.txt` fetch, classified the way `robots.for_response`
+    classifies a live one."""
+
+    domain: str
+    url: str
+    status: int | None
+    has_body: bool
+    error: str | None
+    bodies_for_company: int
+
+    @property
+    def readable(self) -> bool:
+        return self.status == 200 and self.has_body
+
+    @property
+    def unavailable(self) -> bool:
+        """5xx, 429, or no status at all — the states under which M1.59 refuses
+        to fetch. A stored row in this state means bodies alongside it were
+        fetched under rules nobody read."""
+        if self.readable:
+            return False
+        if self.status is None:
+            return True
+        return self.status == 429 or 500 <= self.status < 600
+
+    @property
+    def breach(self) -> bool:
+        return self.unavailable and self.bodies_for_company > 0
+
+
+def robots_coverage(conn: sqlite3.Connection) -> list[RobotsArtifact]:
+    """Every stored `robots.txt` artifact that is not a 200 with a body.
+
+    Reads stored *state*, not a run: `artifact` carries no `run_id`, and failure
+    rows update in place (§5.2), so "which run" is not a question this table can
+    answer. What it can answer is the one that matters — is there a policy on
+    disk that was never read, next to pages that were fetched anyway.
+    """
+    rows = conn.execute(
+        """
+        SELECT c.domain               AS domain,
+               a.url                  AS url,
+               a.http_status          AS status,
+               a.content_hash IS NOT NULL AS has_body,
+               a.error                AS error,
+               (SELECT count(*) FROM artifact b
+                 WHERE b.company_id = a.company_id AND b.kind <> 'robots'
+                   AND b.content_hash IS NOT NULL) AS bodies
+        FROM artifact a JOIN company c ON c.id = a.company_id
+        WHERE a.kind = 'robots'
+          AND NOT (a.http_status = 200 AND a.content_hash IS NOT NULL)
+        ORDER BY c.domain, a.id
+        """
+    ).fetchall()
+    return [
+        RobotsArtifact(
+            domain=str(row["domain"]),
+            url=str(row["url"]),
+            status=row["status"],
+            has_body=bool(row["has_body"]),
+            error=row["error"],
+            bodies_for_company=int(row["bodies"]),
+        )
+        for row in rows
+    ]
+
+
+def robots_report(conn: sqlite3.Connection) -> tuple[str, bool]:
+    """The robots half of the audit, and whether it held.
+
+    Two classes, reported separately and failing separately, because collapsing
+    them would make this instrument cry wolf and a check nobody trusts is worse
+    than no check:
+
+    * **unavailable** — 5xx, 429, a transport failure. Fails. With bodies stored
+      for the company it is a breach outright: pages were fetched under a policy
+      that was never read. With none it still fails, because a policy the tool
+      could not read is not a policy it may proceed under.
+    * **no file** — 4xx, or a redirect we declined to follow. **Reported and not
+      failed.** RFC 9309 §2.3.1.2 makes a 4xx "no rules stated", and the only
+      shape of the second in this corpus is M1.18's moved domain, where the host
+      actually fetched has its own robots.txt read before its first request.
+    """
+    findings = robots_coverage(conn)
+    unavailable = [f for f in findings if f.unavailable]
+    absent = [f for f in findings if not f.unavailable]
+
+    lines = ["", f"robots.txt coverage: {len(findings)} stored artifacts are not 200"]
+    if not findings:
+        lines[-1] = (
+            "robots.txt coverage: every stored robots artifact is a 200 with a body"
+        )
+    for finding in unavailable:
+        lines.append(
+            f"  *** UNREAD *** {finding.domain:28} HTTP {finding.status} "
+            f"{finding.error or ''} — {finding.bodies_for_company} bodies stored "
+            f"for this company{' (BREACH)' if finding.breach else ''}"
+        )
+    for finding in absent:
+        lines.append(
+            f"  no file       {finding.domain:28} HTTP {finding.status} "
+            f"{finding.error or ''} — RFC 9309 §2.3.1.2, not a breach"
+        )
+    ok = not unavailable
+    lines.append(
+        f"§5.2 robots: {'HELD' if ok else 'BREACHED'} — "
+        f"{len(unavailable)} unread, {len(absent)} stating no file"
+    )
+    return "\n".join(lines), ok
+
+
+def report(
+    path: Path,
+    intervals: dict[str, float] | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[str, bool]:
+    """A human-readable audit and whether §5.2 held. Returns `(text, ok)`.
+
+    `conn` adds the robots half (M1.62). It is optional so the spacing
+    measurement stays usable against a bare log, and the CLI always passes one
+    — an audit run without it says so in its output rather than looking green.
+    """
     entries = load(path)
     if not entries:
         return f"{path}: no requests logged", False
@@ -136,6 +269,19 @@ def report(path: Path, intervals: dict[str, float] | None = None) -> tuple[str, 
             f"max hosts in flight: {concurrent} (ceiling {MAX_CONCURRENT_HOSTS}) — "
             f"{'ok' if hosts_ok else '*** OVER ***'}"
         ),
-        f"§5.2: {'HELD' if spacing_ok and hosts_ok else 'BREACHED'}",
     ]
-    return "\n".join(lines), spacing_ok and hosts_ok
+
+    robots_ok = True
+    if conn is None:
+        lines.append(
+            "robots.txt coverage: NOT CHECKED — no database given, so this audit "
+            "says nothing about whether a policy was read (M1.62)"
+        )
+    else:
+        text, robots_ok = robots_report(conn)
+        lines.append(text)
+
+    lines.append(
+        f"§5.2: {'HELD' if spacing_ok and hosts_ok and robots_ok else 'BREACHED'}"
+    )
+    return "\n".join(lines), spacing_ok and hosts_ok and robots_ok

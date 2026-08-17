@@ -243,6 +243,205 @@ class TestRobotsHandling(FetchTestCase):
         self.assertIn("homepage", result.kinds)
 
 
+class TestRobotsUnavailable(FetchTestCase):
+    """M1.59 — RFC 9309 §2.3.1's third case, which used to be the first.
+
+    Every one of these responses used to reach `robots_mod.parse(None)` and come
+    back as an unrestricted policy, so a shop whose robots.txt was 503-ing had
+    its Impressum, its catalogue and its blog fetched under rules nobody read.
+    """
+
+    def _shop_with_broken_robots(self, status: int):
+        def build(base: str) -> Site:
+            site = shopfixtures.shopware_shop(base)
+            site.add("/robots.txt", "server error", status=status)
+            return site
+
+        return build
+
+    def _assert_nothing_but_robots_was_fetched(self, server, result) -> None:
+        self.assertEqual(
+            server.site.paths(),
+            ["/robots.txt"],
+            "no page may be requested under rules we never read",
+        )
+        self.assertIsNone(
+            result.excluded_reason,
+            "a transient is not a standing verdict about the lead",
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT excluded FROM company WHERE id = ?", (result.company_id,)
+            ).fetchone()["excluded"],
+            0,
+        )
+        stored = [
+            row
+            for row in self.artifact_rows(result.company_id)
+            if row["content_hash"] is not None
+        ]
+        self.assertEqual(
+            [row["kind"] for row in stored], [], "no body may be stored at all"
+        )
+
+    def test_a_503_robots_stops_the_run_and_stores_no_impressum(self) -> None:
+        """The instruction's minimum case: /robots.txt 503s while /impressum
+        would happily return 200."""
+        server = self.serve(self._shop_with_broken_robots(503))
+        result = self.run_fetch(server)
+        self._assert_nothing_but_robots_was_fetched(server, result)
+        self.assertIn("robots_unavailable", " ".join(result.notes))
+        self.assertIn("HTTP 503", " ".join(result.notes))
+
+    def test_a_429_robots_stops_the_run(self) -> None:
+        server = self.serve(self._shop_with_broken_robots(429))
+        result = self.run_fetch(server)
+        self._assert_nothing_but_robots_was_fetched(server, result)
+        self.assertIn("HTTP 429", " ".join(result.notes))
+
+    def test_a_transport_failure_stops_the_run(self) -> None:
+        """Nothing is listening on the port, so the connection is refused before
+        any status exists."""
+        server = self.serve(shopfixtures.shopware_shop)
+        dead = f"http://{server.address}:{_closed_port()}"
+        company_id = self.add_company(server.address)
+        _run_id, results = fetch.run(
+            self.conn,
+            [(company_id, server.address)],
+            self.artifacts,
+            fetcher=self.fetcher,
+            max_hosts=1,
+            base_url=lambda _d: dead,
+        )
+        result = results[0]
+        self.assertIsNone(result.excluded_reason)
+        self.assertIn("robots_unavailable", " ".join(result.notes))
+        self.assertEqual(
+            [
+                row["kind"]
+                for row in self.artifact_rows(company_id)
+                if row["content_hash"] is not None
+            ],
+            [],
+        )
+
+    def test_a_404_robots_still_allows_the_crawl(self) -> None:
+        """The other side of the tri-state, kept: `parse(None)`'s reasoning is
+        right for an absent file and this is the case it is about."""
+        server = self.serve(self._shop_with_broken_robots(404))
+        result = self.run_fetch(server)
+        self.assertIsNone(result.excluded_reason)
+        self.assertIn("impressum", result.kinds)
+        self.assertIn("homepage", result.kinds)
+
+    def test_the_failure_is_recorded_as_unavailable_not_as_disallowed(self) -> None:
+        """A `robots_disallowed` row means the shop said so. Nothing here did."""
+        server = self.serve(self._shop_with_broken_robots(503))
+        result = self.run_fetch(server)
+        errors = [row["error"] for row in self.artifact_rows(result.company_id)]
+        self.assertNotIn(
+            "robots_disallowed",
+            " ".join(e for e in errors if e),
+            "the shop stated no rules; it must not be recorded as if it had",
+        )
+
+    def _repeat_run(self, server, company_id: int) -> fetch.CompanyResult:
+        _run_id, results = fetch.run(
+            self.conn,
+            [(company_id, server.address)],
+            self.artifacts,
+            fetcher=self.fetcher,
+            max_hosts=1,
+            base_url=lambda _d: server.base,
+        )
+        return results[0]
+
+    def _backdate_last_run(self, day: str) -> None:
+        self.conn.execute(
+            "UPDATE run SET started_at = ? WHERE id = (SELECT max(id) FROM run)",
+            (f"{day}T09:00:00Z",),
+        )
+
+    def _backdate_first_failure(self, company_id: int, day: str) -> None:
+        """`_record_failure` updates in place and never rewrites `fetched_at`,
+        so this is the column that carries "since when" (§5.2)."""
+        self.conn.execute(
+            "UPDATE artifact SET fetched_at = ? WHERE company_id = ? AND kind = 'robots'",
+            (f"{day}T09:00:00Z", company_id),
+        )
+
+    def test_one_occurrence_raises_no_flag_and_three_distinct_days_do(self) -> None:
+        """A7b's counting policy (M1.34), applied to a fetch-stage fact.
+
+        The runs are backdated onto three distinct days because that is the half
+        of the policy that stops a crash-restart loop inside one afternoon from
+        manufacturing a flag about our own crash.
+        """
+        server = self.serve(self._shop_with_broken_robots(503))
+        company_id = self.add_company(server.address)
+
+        first = self._repeat_run(server, company_id)
+        self.assertEqual(first.review_flags, [], "one 503 is a transient")
+        self.assertEqual(self.review_flags(company_id), [])
+        self._backdate_last_run("2026-08-10")
+        self._backdate_first_failure(company_id, "2026-08-10")
+
+        second = self._repeat_run(server, company_id)
+        self.assertEqual(second.review_flags, [], "two days is still not three")
+        self.assertEqual(self.review_flags(company_id), [])
+        self._backdate_last_run("2026-08-11")
+        self._backdate_first_failure(company_id, "2026-08-10")
+
+        third = self._repeat_run(server, company_id)
+        self.assertEqual(third.review_flags, ["fetch_persistently_failing"])
+        row = self.conn.execute(
+            "SELECT raised_note FROM review_flag WHERE company_id = ? AND reason = ?",
+            (company_id, "fetch_persistently_failing"),
+        ).fetchone()
+        self.assertIn("robots.txt", row["raised_note"])
+        self.assertIn("HTTP 503", row["raised_note"])
+
+    def test_a_success_since_the_first_failure_breaks_the_streak(self) -> None:
+        """However many runs the failure row has seen, a robots.txt that has
+        worked since is not persistently unreadable."""
+        server = self.serve(self._shop_with_broken_robots(503))
+        company_id = self.add_company(server.address)
+        self._repeat_run(server, company_id)
+        self._backdate_last_run("2026-08-10")
+        self._repeat_run(server, company_id)
+        self._backdate_last_run("2026-08-11")
+        self._backdate_first_failure(company_id, "2026-08-10")
+
+        self.conn.execute(
+            "INSERT INTO artifact (company_id, kind, url, http_status, content_hash, "
+            "body_path, bytes, fetched_at, last_checked_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                company_id,
+                "robots",
+                f"{server.base}/robots.txt",
+                200,
+                "deadbeef",
+                "x/robots.txt",
+                10,
+                "2026-08-11T09:00:00Z",
+                "2026-08-11T09:00:00Z",
+            ),
+        )
+
+        third = self._repeat_run(server, company_id)
+        self.assertEqual(third.review_flags, [])
+        self.assertEqual(self.review_flags(company_id), [])
+
+
+def _closed_port() -> int:
+    """A port with nothing listening on it, for the transport-failure case."""
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
 class TestCrawlDelay(FetchTestCase):
     """§5.2: honour `max(floor, Crawl-delay)`, and skip above the cap."""
 

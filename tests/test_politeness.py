@@ -420,6 +420,24 @@ class TestRequestLogAndAudit(unittest.TestCase):
         self.assertIn("*** UNDER ***", text)
         self.assertIn("*** OVER ***", text)
 
+    def test_a_report_without_a_database_says_so_rather_than_looking_green(
+        self,
+    ) -> None:
+        """M1.62: spacing alone is not a politeness verdict."""
+        site = Site()
+        site.add("/", "<html><body>ok</body></html>")
+        path = self._log_path()
+        with FixtureServer(site) as server:
+            fetcher = Fetcher(
+                limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
+                log=net.RequestLog(path),
+            )
+            self.addCleanup(fetcher.close)
+            fetcher.get(f"{server.base}/", hop_allowed=net.RobotsExempt)
+
+        text, _ok = audit.report(path)
+        self.assertIn("NOT CHECKED", text)
+
     def test_crawl_delay_hosts_are_judged_against_their_own_interval(self) -> None:
         """1.0s is fine for most hosts and a breach for one that asked for 5s."""
         path = self._log_path()
@@ -434,3 +452,132 @@ class TestRequestLogAndAudit(unittest.TestCase):
         entries = audit.load(path)
         self.assertTrue(audit.spacing(entries)[0].ok)
         self.assertFalse(audit.spacing(entries, {"slow.de": 5.0})[0].ok)
+
+
+class TestRobotsCoverageAudit(unittest.TestCase):
+    """M1.62 — the half of `audit-politeness` that was blind by construction.
+
+    Spacing measures how fast requests arrived. H1 changed *which pages may be
+    fetched at all*, and left the spacing correct, so the audit passed over a
+    policy that was never read. These pin that it no longer can.
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.conn = db.connect(self.root / "portal.db")
+        self.addCleanup(self.conn.close)
+        migrate.apply_pending(self.conn)
+        self.conn.execute(
+            "INSERT INTO run (started_at, stage) VALUES ('2026-08-17T00:00:00Z','fetch')"
+        )
+        self.company_id = int(
+            self.conn.execute(
+                "INSERT INTO company (domain, discovery_source, discovered_at) "
+                "VALUES ('muster.example','seed_csv','2026-08-17T00:00:00Z')"
+            ).lastrowid
+        )
+
+    def _artifact(
+        self,
+        kind: str,
+        url: str,
+        status: int | None,
+        content_hash: str | None,
+        error: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO artifact (company_id, kind, url, http_status, content_hash, "
+            "error, fetched_at, last_checked_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                self.company_id,
+                kind,
+                url,
+                status,
+                content_hash,
+                error,
+                "2026-08-17T00:00:00Z",
+                "2026-08-17T00:00:00Z",
+            ),
+        )
+
+    def test_a_readable_robots_is_not_reported(self) -> None:
+        self._artifact("robots", "https://muster.example/robots.txt", 200, "aaa")
+        self._artifact("homepage", "https://muster.example/", 200, "bbb")
+        text, ok = audit.robots_report(self.conn)
+        self.assertTrue(ok, text)
+        self.assertIn("every stored robots artifact is a 200", text)
+
+    def test_a_503_robots_with_bodies_beside_it_is_a_breach(self) -> None:
+        """The exact state H1 produced: a policy nobody read, and pages stored
+        under it anyway."""
+        self._artifact(
+            "robots", "https://muster.example/robots.txt", 503, None, "http_503"
+        )
+        self._artifact("impressum", "https://muster.example/impressum", 200, "bbb")
+        findings = audit.robots_coverage(self.conn)
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0].unavailable)
+        self.assertTrue(findings[0].breach)
+        text, ok = audit.robots_report(self.conn)
+        self.assertFalse(ok)
+        self.assertIn("*** UNREAD ***", text)
+        self.assertIn("BREACH", text)
+
+    def test_a_429_and_a_transport_failure_both_fail(self) -> None:
+        for status, error in ((429, "http_429"), (None, "ConnectTimeout: x")):
+            with self.subTest(status=status):
+                self.conn.execute("DELETE FROM artifact")
+                self._artifact(
+                    "robots", "https://muster.example/robots.txt", status, None, error
+                )
+                _text, ok = audit.robots_report(self.conn)
+                self.assertFalse(ok)
+
+    def test_a_404_robots_is_reported_and_does_not_fail(self) -> None:
+        """RFC 9309 §2.3.1.2 — a shop with no robots.txt is not a breach, and a
+        check that reddened on it would be a check nobody reads."""
+        self._artifact(
+            "robots", "https://muster.example/robots.txt", 404, None, "http_404"
+        )
+        self._artifact("homepage", "https://muster.example/", 200, "bbb")
+        text, ok = audit.robots_report(self.conn)
+        self.assertTrue(ok, text)
+        self.assertIn("no file", text)
+
+    def test_a_refused_redirect_is_reported_and_does_not_fail(self) -> None:
+        """M1.18's moved-domain shape, 2 of 13 in the real corpus."""
+        self._artifact(
+            "robots",
+            "https://muster.example/robots.txt",
+            301,
+            None,
+            "redirect_refused: https://elsewhere.example/robots.txt",
+        )
+        text, ok = audit.robots_report(self.conn)
+        self.assertTrue(ok, text)
+        self.assertIn("not a breach", text)
+
+    def test_the_full_report_fails_on_robots_even_when_spacing_held(self) -> None:
+        """The anti-vacuity test for M1.62: a log with perfect spacing must not
+        be able to produce a green audit over an unread policy."""
+        path = self.root / "requests.jsonl"
+        log = net.RequestLog(path)
+        for offset in range(3):
+            log.record(
+                issued_at="x",
+                issued_monotonic=100.0 + offset * 2,
+                elapsed=0.1,
+                host="muster.example",
+                url="https://muster.example/",
+            )
+        self._artifact(
+            "robots", "https://muster.example/robots.txt", 503, None, "http_503"
+        )
+        self._artifact("impressum", "https://muster.example/impressum", 200, "bbb")
+
+        text, ok = audit.report(path, conn=self.conn)
+        self.assertIn("ok", text)  # spacing held
+        self.assertFalse(ok, text)
+        self.assertIn("§5.2: BREACHED", text)
