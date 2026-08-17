@@ -1,0 +1,146 @@
+# M2 — the checks the project already had, run by something other than memory.
+#
+# 8,255 lines of tests and a ruff config existed before this file did, and
+# nothing ran either. Every finding in the 17 Aug external review was one the
+# reviewer had to know to run. That is the gap this closes, and it is the
+# project's own standard applied to itself: `portal audit-politeness` exits
+# non-zero so politeness is enforced rather than stated (M1.19), and the same
+# argument makes an unenforced test suite an assertion rather than a check.
+#
+# **M4 landed first, deliberately.** Three apex→www tests resolved
+# `www.localhost`, which RFC 6761 §6.3 makes optional — they pass on macOS and
+# under systemd-resolved and fail in exactly this container. A first CI that is
+# red on arrival teaches people to ignore CI, which is worse than no CI.
+# Reproduced before it was fixed; see M1.64 and the unit report.
+#
+# ── what must never happen here ──────────────────────────────────────────
+#
+#  * **No request leaves the runner except package installs.** The whole suite
+#    runs against loopback `FixtureServer`s. The one live request in the
+#    project is `tests/test_live_smoke.py`, opt-in behind `PORTAL_LIVE_SMOKE`
+#    and targeting creative-potato.global only — this workflow never sets that
+#    variable, so it stays skipped, and `assert-no-api-key` below fails the
+#    build if the environment ever grows a way to spend money.
+#  * **No `ANTHROPIC_API_KEY`, and none is to be added as a secret.** The suite
+#    runs with it explicitly removed from the environment, which is what turns
+#    Unit 2's injected-client seam from a claim into a measurement: every
+#    provider test drives a fake SDK object, and a key in scope would let a
+#    regression reach the network without anyone noticing. M5 is the next unit
+#    and is the first stage that spends; this closes before it, not after.
+#  * **No `data/`.** It is gitignored and is not in the repository. Any job
+#    needing a database builds one from fixtures — see `tests/fixture_corpus`.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: nothing here writes to the repository or its metadata.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      # Two gates, not one: `check` is the lint and `format --check` is the
+      # formatter, and the project's convention is that neither is negotiable.
+      # `pyproject.toml` excludes `docs/` — the spec's illustrative Python is
+      # prose and a formatter does not get to edit it.
+      - run: ruff check .
+      - run: ruff format --check .
+
+  test:
+    name: pytest (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor declared in `pyproject.toml` and the version the project is
+        # developed on. The container base image is where M4's bug lived, so
+        # the matrix is load-bearing rather than decoration.
+        #
+        # 3.13 is deliberately **not** here yet: no interpreter above 3.12 has
+        # ever run this suite, and putting an unverified one in the first CI is
+        # how a green light gets ignored the week it goes red. Add it as a
+        # deliberate act, with the run that proves it.
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: assert-no-api-key
+        # Fails the build if a key ever reaches this environment, whoever added
+        # it and however. A comment saying "do not add a secret" is read by
+        # people who are already being careful.
+        run: |
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is set in CI. Remove it: no job here may reach a paid endpoint (§7 control 9)."
+            exit 1
+          fi
+          if [ -n "${PORTAL_LIVE_SMOKE:-}" ]; then
+            echo "::error::PORTAL_LIVE_SMOKE is set. The live smoke test is opt-in and must stay skipped in CI."
+            exit 1
+          fi
+          echo "no key, no live-smoke opt-in"
+
+      - run: pip install -e ".[dev]"
+
+      # `env -u` removes the variable rather than blanking it, so the suite runs
+      # in the state it claims to: `llm_anthropic._client` raises MissingKeyError
+      # before any network attempt, and every provider test supplies its own
+      # fake client.
+      #
+      # The migration runner from empty to head is **already covered here** —
+      # `tests/test_migrate.py::TestApplyPending` applies every migration to a
+      # fresh database, asserts `user_version` matches the highest on disk, and
+      # asserts a second run is a no-op. A separate job would re-run the same
+      # code path with weaker assertions, so there is not one.
+      - name: pytest
+        run: env -u ANTHROPIC_API_KEY python -m pytest -q
+
+  politeness:
+    name: audit-politeness (fixture corpus)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+
+      # `data/` is not in the repository, so the corpus is built here, entirely
+      # from a loopback fixture server, at the real 1 req/s floor — anything
+      # faster would fail its own spacing audit.
+      - name: build a healthy corpus and audit it
+        run: |
+          python -m tests.fixture_corpus "$RUNNER_TEMP/corpus-ok"
+          portal --db "$RUNNER_TEMP/corpus-ok/portal.db" audit-politeness
+
+      # The anti-vacuity half, and the reason this is a job rather than a line.
+      # A gate that can only go green is a green light wired to nothing. The
+      # same corpus with `robots.txt` returning 503 must make the audit exit
+      # non-zero — which is M1.62's whole point, since spacing alone still
+      # measures fine there.
+      - name: prove the gate can fail
+        run: |
+          python -m tests.fixture_corpus "$RUNNER_TEMP/corpus-bad" --breached
+          if portal --db "$RUNNER_TEMP/corpus-bad/portal.db" audit-politeness; then
+            echo "::error::audit-politeness passed a corpus whose robots.txt was never read. The gate is not wired up."
+            exit 1
+          fi
+          echo "the audit correctly refused a corpus with an unread robots.txt"

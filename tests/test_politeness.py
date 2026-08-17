@@ -11,17 +11,26 @@ no third-party domain involved.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
+import socket
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 
-from portal import audit, db, fetch, migrate, net
+from portal import audit, cli, db, fetch, migrate, net, urls
 from portal.net import Fetcher, HostRateLimiter
-from tests import shopfixtures
-from tests.fixture_server import ConcurrencyTracker, FixtureServer, Site
+from tests import fixture_corpus, shopfixtures
+from tests.fixture_server import (
+    FIXTURE_APEX,
+    FIXTURE_WWW,
+    ConcurrencyTracker,
+    FixtureServer,
+    Site,
+    resolves_to_loopback,
+)
 
 #: Scheduler jitter can shave a millisecond off a sleep; the rule is 1.0s and
 #: this is the tolerance for measuring it, not a relaxation of the rule.
@@ -66,6 +75,64 @@ class TestHostRateLimiter(unittest.TestCase):
         stamps.sort()
         for earlier, later in itertools.pairwise(stamps):
             self.assertGreaterEqual(later - earlier, 0.3 - TOLERANCE)
+
+
+class TestTheResolverShim(unittest.TestCase):
+    """M4 / M1.64 — the suite resolves its own hostnames, and this proves it.
+
+    The three apex→www tests used `localhost` / `www.localhost`, which RFC 6761
+    §6.3 makes optional: macOS and systemd-resolved answer for the subdomain,
+    most container images do not. The tests therefore passed on the machines the
+    project was developed on and failed in exactly the environment CI runs in.
+    """
+
+    def test_the_fixture_names_do_not_resolve_without_the_shim(self) -> None:
+        """The anti-vacuity test, and the reason the names are `.invalid`.
+
+        RFC 2606 §2 guarantees `.invalid` is never delegated, so this assertion
+        holds on **every** machine — including the ones that resolve
+        `www.localhost`. Built on `.localhost` this test would pass here while
+        proving nothing, and the shim could be deleted without a failure.
+        """
+        for name in (FIXTURE_APEX, FIXTURE_WWW):
+            with self.subTest(name=name), self.assertRaises(OSError):
+                socket.getaddrinfo(name, 80)
+
+    def test_the_shim_maps_them_and_passes_everything_else_through(self) -> None:
+        with resolves_to_loopback(FIXTURE_APEX, FIXTURE_WWW) as mapped:
+            self.assertEqual(mapped, sorted([FIXTURE_APEX, FIXTURE_WWW]))
+            for name in (FIXTURE_APEX, FIXTURE_WWW):
+                with self.subTest(name=name):
+                    addresses = {info[4][0] for info in socket.getaddrinfo(name, 80)}
+                    self.assertEqual(addresses, {"127.0.0.1"})
+            # Pass-through: an unmapped name is still resolved by the real
+            # resolver, so the shim cannot mask a genuine lookup failure.
+            self.assertTrue(socket.getaddrinfo("127.0.0.2", 80))
+            with self.assertRaises(OSError):
+                socket.getaddrinfo("also.invalid", 80)
+
+    def test_it_is_removed_on_exit_including_on_exception(self) -> None:
+        """Scoped, not global. A shim that outlived its test would make the next
+        one pass for a reason it never declared."""
+        original = socket.getaddrinfo
+        with (
+            contextlib.suppress(RuntimeError),
+            resolves_to_loopback(FIXTURE_APEX),
+        ):
+            self.assertIsNot(socket.getaddrinfo, original)
+            raise RuntimeError("boom")
+        self.assertIs(socket.getaddrinfo, original)
+
+    def test_the_shim_is_what_makes_the_apex_www_tests_reachable(self) -> None:
+        """Ties the shim to the thing it exists for: two **distinct
+        authorities** on one machine, which is what M1.8's shared budget is
+        about. `host_of` reads the key off the URL authority, so the names have
+        to be in the URL — a `Host:` header would leave both keyed on
+        `127.0.0.1:PORT` and the test unable to tell them apart."""
+        apex_url = f"http://{FIXTURE_APEX}:8000/"
+        www_url = f"http://{FIXTURE_WWW}:8000/"
+        self.assertNotEqual(urls.authority_of(apex_url), urls.authority_of(www_url))
+        self.assertEqual(urls.host_of(apex_url), urls.host_of(www_url))
 
 
 class TestTheBypassIsExplicit(unittest.TestCase):
@@ -144,18 +211,20 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
         back-to-back pair issue two requests to one server inside a second —
         double §5.2's floor, on almost every domain in the corpus.
 
-        `www.localhost` and `localhost` both resolve to 127.0.0.1, so the shape
-        is reachable end to end without leaving loopback.
+        The two names are `.invalid` and are mapped to 127.0.0.1 by the suite's
+        own resolver shim (M1.64), so the hop really does cross apex→www with
+        two distinct authorities in the URLs — and no resolver is asked anything.
         """
+        self.enterContext(resolves_to_loopback(FIXTURE_APEX, FIXTURE_WWW))
         server = FixtureServer(Site())
-        server.site.add_redirect("/", f"http://www.localhost:{server.port}/de/")
+        server.site.add_redirect("/", f"http://{FIXTURE_WWW}:{server.port}/de/")
         server.site.add("/de/", "<html><body>ok</body></html>")
 
         with server:
             fetcher = Fetcher(limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS))
             self.addCleanup(fetcher.close)
             response = fetcher.get(
-                f"http://localhost:{server.port}/",
+                f"http://{FIXTURE_APEX}:{server.port}/",
                 # Vouched for, so this test measures the budget and nothing else.
                 hop_allowed=lambda _from, _to: True,
             )
@@ -163,7 +232,7 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(
             server.site.hosts(),
-            [f"localhost:{server.port}", f"www.localhost:{server.port}"],
+            [f"{FIXTURE_APEX}:{server.port}", f"{FIXTURE_WWW}:{server.port}"],
             "the hop must really have crossed apex→www, or this proves nothing",
         )
         arrivals = server.site.arrivals()
@@ -581,3 +650,36 @@ class TestRobotsCoverageAudit(unittest.TestCase):
         self.assertIn("ok", text)  # spacing held
         self.assertFalse(ok, text)
         self.assertIn("§5.2: BREACHED", text)
+
+
+class TestTheAuditCliExitCode(unittest.TestCase):
+    """M2 / M1.65 — `audit-politeness` is a gate, and a gate is its exit code.
+
+    `audit.report` is unit-tested above; the CLI that turns it into a process
+    status was not tested at all, and that status is the entire point of M1.19's
+    "an acceptance check rather than something to read". CI runs this same path
+    against a fixture-built corpus.
+
+    The breached corpus is the one exercised here because it is the fast one:
+    under M1.59 a 503 `robots.txt` stops the run at one request, so no politeness
+    floor has to be waited out. The healthy corpus takes ~10s at the real 1 req/s
+    and is left to the CI job.
+    """
+
+    def test_a_corpus_with_an_unread_policy_exits_non_zero(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        database = fixture_corpus.build(Path(tmp.name), breached=True)
+
+        code = cli.main(["--db", str(database), "audit-politeness"])
+        self.assertEqual(code, 1, "an unread robots.txt must fail the gate")
+
+    def test_the_gate_refuses_to_pass_without_a_database(self) -> None:
+        """M1.62: spacing alone is not a politeness verdict, so a missing
+        database is an error rather than a narrower audit."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        database = fixture_corpus.build(Path(tmp.name), breached=True)
+        database.unlink()
+
+        self.assertEqual(cli.main(["--db", str(database), "audit-politeness"]), 2)

@@ -7,6 +7,13 @@ data/
 *.db-wal
 *.db-shm
 
+# Node tooling that is not part of the stack (§3). `node_modules/` is 391 MB of
+# untracked build output sitting in a PUBLIC repository with a `git add -A` one
+# keystroke away; `package.json` and `package-lock.json` are deliberately NOT
+# ignored, because what they declare is a question for a human and hiding it
+# would answer it by default.
+node_modules/
+
 # Python
 __pycache__/
 *.py[cod]

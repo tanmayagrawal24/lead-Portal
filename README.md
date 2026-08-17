@@ -104,6 +104,19 @@ python -m unittest discover -s tests -t .
 ruff check . && ruff format --check .
 ```
 
+Nothing here contacts a third-party host. The one live request in the project is
+`tests/test_live_smoke.py`, opt-in behind `PORTAL_LIVE_SMOKE=1` and targeting
+`creative-potato.global` only; everything else runs against loopback fixture
+servers. The apex→www tests use `shop.invalid` / `www.shop.invalid`, resolved to
+127.0.0.1 by the suite's own shim (M1.64) — `.invalid` is reserved by RFC 2606
+and resolves nowhere, so the suite never asks a resolver a question that a
+different machine could answer differently.
+
+`.github/workflows/ci.yml` runs ruff, the suite on Python 3.11 and 3.12, and
+`audit-politeness` against a corpus built from fixtures — the last one twice, so
+the gate has to prove it can still go red (M1.65). CI has no `ANTHROPIC_API_KEY`
+and fails the build if one appears.
+
 ## Migrations
 
 Numbered `.sql` files in `portal/migrations/`, named `NNN_lower_snake.sql` and

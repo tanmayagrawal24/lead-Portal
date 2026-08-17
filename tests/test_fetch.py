@@ -16,7 +16,13 @@ from portal import db, fetch, migrate, net, sitemap
 from portal.artifacts import ArtifactStore
 from portal.net import Fetcher, HostRateLimiter
 from tests import shopfixtures
-from tests.fixture_server import FixtureServer, Site
+from tests.fixture_server import (
+    FIXTURE_APEX,
+    FIXTURE_WWW,
+    FixtureServer,
+    Site,
+    resolves_to_loopback,
+)
 
 
 class FetchTestCase(unittest.TestCase):
@@ -915,25 +921,26 @@ class TestAMovedRegistrableDomain(FetchTestCase):
     def test_an_apex_to_www_redirect_is_not_a_move(self) -> None:
         """Five of thirteen domains do this. Adopting there would churn
         identity for nothing."""
+        self.enterContext(resolves_to_loopback(FIXTURE_APEX, FIXTURE_WWW))
         server = FixtureServer(Site())
         server.site.add(
             "/robots.txt", "User-agent: *\nAllow: /\n", content_type="text/plain"
         )
         server.site.add_redirect(
             "/",
-            f"http://www.localhost:{server.port}/",
-            only_from_host=f"localhost:{server.port}",
+            f"http://{FIXTURE_WWW}:{server.port}/",
+            only_from_host=f"{FIXTURE_APEX}:{server.port}",
         )
         server.site.routes.update(shopfixtures.shopware_shop(server.base).routes)
         with server:
-            company_id = self.add_company("localhost")
+            company_id = self.add_company(FIXTURE_APEX)
             _run_id, results = fetch.run(
                 self.conn,
-                [(company_id, "localhost")],
+                [(company_id, FIXTURE_APEX)],
                 self.artifacts,
                 fetcher=self.fetcher,
                 max_hosts=1,
-                base_url=lambda _d: f"http://localhost:{server.port}",
+                base_url=lambda _d: f"http://{FIXTURE_APEX}:{server.port}",
             )
 
         row = self.conn.execute(
@@ -947,31 +954,36 @@ class TestAMovedRegistrableDomain(FetchTestCase):
 class TestApexToWwwWithinTheSeededSite(FetchTestCase):
     """The redirect nearly every German shop has, end to end.
 
-    `localhost` and `www.localhost` both resolve to 127.0.0.1, so one fixture
-    server answering on both names is a faithful apex→www host — same machine,
-    two names, one bouncing to the other — with nothing but loopback involved.
+    One fixture server answering on both names is a faithful apex→www host —
+    same machine, two names, one bouncing to the other. The names are `.invalid`
+    and are mapped to 127.0.0.1 by the suite's resolver shim (M1.64): they must
+    be **in the URL**, because `host_of` derives the politeness key from the
+    authority and nowhere else, so a test that connected to `127.0.0.1` and put
+    the name in a `Host:` header would key both requests on `127.0.0.1:PORT` and
+    could no longer tell apex from www. It would pass while measuring nothing.
     """
 
     def _serve_apex_redirecting_to_www(self) -> tuple[FixtureServer, str]:
+        self.enterContext(resolves_to_loopback(FIXTURE_APEX, FIXTURE_WWW))
         server = FixtureServer(Site())
-        apex = f"localhost:{server.port}"
+        apex = f"{FIXTURE_APEX}:{server.port}"
         base = f"http://{apex}"
         server.site.routes.update(shopfixtures.shopware_shop(base).routes)
         # Path-preserving, and only for requests arriving on the apex name —
         # exactly how such a server behaves.
         for path in ("/robots.txt", "/"):
             server.site.add_redirect(
-                path, f"http://www.{apex}{path}", only_from_host=apex
+                path, f"http://{FIXTURE_WWW}:{server.port}{path}", only_from_host=apex
             )
         server.__enter__()
         self.addCleanup(server.__exit__, None, None, None)
         return server, base
 
     def _run(self, base: str) -> fetch.CompanyResult:
-        company_id = self.add_company("localhost")
+        company_id = self.add_company(FIXTURE_APEX)
         _run_id, results = fetch.run(
             self.conn,
-            [(company_id, "localhost")],
+            [(company_id, FIXTURE_APEX)],
             self.artifacts,
             fetcher=self.fetcher,
             max_hosts=1,
@@ -986,7 +998,7 @@ class TestApexToWwwWithinTheSeededSite(FetchTestCase):
         server, base = self._serve_apex_redirecting_to_www()
         result = self._run(base)
 
-        apex = f"localhost:{server.port}"
+        apex = f"{FIXTURE_APEX}:{server.port}"
         robots_hosts = [
             host
             for path, host in zip(server.site.paths(), server.site.hosts(), strict=True)
@@ -994,7 +1006,7 @@ class TestApexToWwwWithinTheSeededSite(FetchTestCase):
         ]
         self.assertEqual(
             robots_hosts,
-            [apex, f"www.{apex}"],
+            [apex, f"{FIXTURE_WWW}:{server.port}"],
             "robots.txt should be asked of the apex, then followed to www",
         )
         self.assertIsNone(result.excluded_reason)
@@ -1020,11 +1032,12 @@ class TestApexToWwwWithinTheSeededSite(FetchTestCase):
     ) -> None:
         """The other half of the rule. Within the site is conventional; anywhere
         else there is nothing that could have authorised it."""
+        self.enterContext(resolves_to_loopback(FIXTURE_APEX, FIXTURE_WWW))
         elsewhere = self.serve(
             lambda base: shopfixtures.shopware_shop(base), address="127.0.0.2"
         )
         server = FixtureServer(Site())
-        base = f"http://localhost:{server.port}"
+        base = f"http://{FIXTURE_APEX}:{server.port}"
         server.site.routes.update(shopfixtures.shopware_shop(base).routes)
         server.site.add_redirect("/robots.txt", f"{elsewhere.base}/robots.txt")
         server.__enter__()

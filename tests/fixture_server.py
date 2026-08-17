@@ -3,16 +3,82 @@
 Every M1 test except the single live smoke test runs against this. It records
 per-request arrival times and in-flight hosts, which is what makes the §5.2
 politeness rules observably testable rather than merely asserted.
+
+**The suite resolves its own hostnames (M4, M1.64).** The apex→www tests need
+two *distinct authorities* answering from one machine, because that is what
+M1.8's shared politeness budget is about — and `host_of` derives that key from
+the URL, so the two names have to be in the URL and therefore have to resolve.
+They used to be `localhost` and `www.localhost`, which resolve on macOS and
+under systemd-resolved (RFC 6761 §6.3) and **not** in most container images.
+`resolves_to_loopback` maps the names instead, so nothing in the suite asks a
+resolver a question it may answer differently on another machine.
 """
 
 from __future__ import annotations
 
 import gzip
+import socket
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Self
+
+#: RFC 2606 §2 reserves `.invalid` and guarantees it is never delegated, so
+#: these names resolve **nowhere** — which is the point. Built on `.localhost`
+#: the shim would be dead weight on every machine that already resolves it, and
+#: could be deleted without a single test noticing; the tests would go back to
+#: passing by accident, which is how this defect survived to be found by an
+#: external reviewer. On `.invalid` the shim is load-bearing everywhere, so
+#: removing or breaking it fails the suite on the maintainer's laptop and in CI
+#: alike. That property replaces "assert the shim is installed" with "the tests
+#: cannot run without it".
+FIXTURE_APEX = "shop.invalid"
+FIXTURE_WWW = f"www.{FIXTURE_APEX}"
+
+
+@contextmanager
+def resolves_to_loopback(
+    *names: str, address: str = "127.0.0.1"
+) -> Iterator[list[str]]:
+    """Resolve `names` to `address` for the duration of the block.
+
+    **The seam is `socket.getaddrinfo`, and that was verified rather than
+    assumed.** `net.Fetcher` is `httpx.Client` over httpcore's sync backend,
+    whose `connect_tcp` calls `socket.create_connection((host, port))` — and
+    `socket.create_connection` looks `getaddrinfo` up as a module global in
+    `socket`, so patching the attribute intercepts it. Traced under httpx
+    0.28.1 / httpcore 1.0.9 by wrapping both functions and printing the stack:
+    `handle_request → _connect → connect_tcp → create_connection →
+    getaddrinfo`. Patching `create_connection` instead would work today and
+    would break the moment httpcore used a socket directly; `getaddrinfo` is
+    the narrower waist.
+
+    Scoped, not global: the previous function is restored on exit, including on
+    exception, and nesting restores in LIFO order. It is process-wide while
+    installed — `fetch` runs its workers in a thread pool and they must see it —
+    so it is a context manager rather than a fixture that could outlive a test.
+
+    Yields the list of names it is mapping, so a caller can assert on it.
+    """
+    mapped = {name.lower() for name in names}
+    previous = socket.getaddrinfo
+
+    # Signature mirrors `socket.getaddrinfo` exactly, shadowed builtin `type`
+    # included: a caller passing `type=SOCK_STREAM` by keyword must reach the
+    # real function unchanged, and renaming the parameter would break that.
+    def shim(host, port, family=0, type=0, proto=0, flags=0):
+        if isinstance(host, str) and host.lower() in mapped:
+            host = address
+        return previous(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = shim
+    try:
+        yield sorted(mapped)
+    finally:
+        socket.getaddrinfo = previous
 
 
 @dataclass
