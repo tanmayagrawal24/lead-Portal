@@ -92,11 +92,26 @@ portal llm-prices --reserve 40  # a real §7 control 4 reservation (needs a key)
 `portal llm-prices` prints the two tables the LLM layer is built on — token
 prices with their as-of dates, and the per-model facts an interface must not
 generalise away (Haiku 4.5 rejects `output_config.effort`, caps output at 64K
-rather than 128K, and will not cache a prompt under 4096 tokens). It touches no
-database and makes no paid call. `--reserve` performs a real `count_tokens`
-measurement and therefore needs `ANTHROPIC_API_KEY`; without one it says so
-rather than substituting a heuristic, because a fallback estimate is how an
-unmeasured number gets into the cost ledger looking measured.
+rather than 128K, and will not cache a prompt under 4096 tokens). The tables
+make no paid call and touch no database.
+
+`--reserve` **opens the database**, because a real §7 control 4 reservation is
+one the §7 control 2 ledger has cleared. It prints what the rolling 30-day
+window currently holds and refuses with exit 2 above the `$45` ceiling; only
+then does it perform the real `count_tokens` measurement, which needs
+`ANTHROPIC_API_KEY`. Without a key it says so rather than substituting a
+heuristic, because a fallback estimate is how an unmeasured number gets into the
+cost ledger looking measured.
+
+**No paid path can skip that ledger, and it is checked at import** (M1.69–M1.72).
+`portal/ledger.py` holds the ceiling, the window and the one query that reads
+them; `llm.reserve_batch` and `AnthropicProvider.submit_batch` will not run
+without a `LedgerClearance`, which only `ledger.check_ceiling` constructs. Every
+callable in `portal/llm.py` and on `AnthropicProvider` is classified as paid or
+free, and `assert_ledger_guarded` fails the **import** on one that is neither —
+so a new paid path nobody declared cannot be shipped, and the gate exists before
+the caller (M5) that will need it. Nothing writes `run.est_cost_usd` yet, so the
+ledger reads `$0.00` today; that is the intended order.
 
 The database defaults to `data/portal.db`. Override with the `PORTAL_DB`
 environment variable or `--db`. Secrets come from the environment only; `.env`
