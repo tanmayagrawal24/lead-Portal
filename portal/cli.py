@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -447,6 +448,19 @@ def cmd_llm_prices(database: Path, reserve_kb: float | None) -> int:
         clearance = ledger.check_ceiling(conn)
     except ledger.CeilingExceeded as exc:
         print(f"  refused: {exc}", file=sys.stderr)
+        return 2
+    except sqlite3.Error as exc:
+        # A database with no `run` table is not a database with no spend.
+        # Reading "no such table" as $0 is the fail-open direction, and it is
+        # the one §7 control 2 exists to close — so this refuses and names the
+        # fix rather than pricing a call against a ledger it could not read.
+        print(
+            f"  refused: the §7 control 2 ledger is not readable ({exc}). "
+            f"Run `portal init` on {database} first — an unreadable ledger and "
+            f"an empty one look alike, and treating this as $0 spent is how an "
+            f"unmeasured number authorises a paid call.",
+            file=sys.stderr,
+        )
         return 2
     finally:
         conn.close()

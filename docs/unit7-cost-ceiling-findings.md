@@ -307,12 +307,47 @@ against its presence.
 |---|---|
 | `ruff check .` | clean |
 | `ruff format --check .` | clean |
-| full suite | **574 passed, 2 skipped, 123 subtests** |
+| full suite | **576 passed, 2 skipped, 123 subtests** |
 | `audit-politeness`, healthy corpus | `§5.2: HELD`, **exit 0** |
 | `audit-politeness`, `--breached` corpus | `§5.2: BREACHED`, **exit 1** |
 
 No `ANTHROPIC_API_KEY` was set at any point, which is what CI enforces and what
 made this unit separable from M5 in the first place.
+
+## 12b. CI caught a defect the local suite could not — and it is M1.64's shape
+
+**The first CI run on this branch failed both pytest jobs while the same suite
+was green locally.** Not flakiness — a real defect I introduced:
+
+```
+sqlite3.OperationalError: no such table: run
+FAILED tests/test_llm_anthropic.py::PricesCommand::test_the_reservation_refuses_to_guess_without_a_key
+```
+
+`llm-prices --reserve` now opens the database, and the pre-existing test invoked
+it on the **default path**. This machine has a `data/portal.db` from 17 August;
+a CI runner has none, so `db.connect` created an empty file and the ledger query
+hit a schema that was not there. **The local pass was an artifact of the
+developer's environment**, which is exactly M1.64 — the defect Unit 5 fixed —
+one level down, and it is the second time this project has produced it.
+
+Two things came out of it, both kept:
+
+- **The ledger was right and the CLI was wrong.** `check_ceiling` deliberately
+  lets `sqlite3.Error` propagate rather than reading a missing table as `$0`
+  (§9). But the CLI let it out as a traceback. It now refuses with exit 2 and
+  names the fix — *"the §7 control 2 ledger is not readable … run `portal init`
+  … an unreadable ledger and an empty one look alike"*. Fail-closed either way;
+  the difference is whether an operator can act on it.
+- **The test now builds its own database** instead of borrowing whatever the
+  machine has, and two tests were added: one proving the ledger is consulted
+  **before** the key is even looked for, one proving an uninitialised database
+  refuses rather than pricing a call.
+
+**Reproduced locally after the fix by removing `data/` and running as CI does**
+(`env -u ANTHROPIC_API_KEY python -m pytest -q`): **576 passed, 2 skipped**. That
+check is the one I should have run before the first push, and not running it is
+the process error in this unit.
 
 ## 13. Still open
 
@@ -358,6 +393,11 @@ working around.
    The brief was right to ask for them to be verified rather than accepted, and
    right on both counts (M1.69, M1.70). Recorded here as the one place where
    "check my reading" was the instruction that found the defect.
+
+**One error of mine, not the brief's**, recorded because §12b is where it
+belongs and this section is where a reader looks for it: I ran the full suite
+locally and called it green without reproducing CI's environment, and the
+project's own `data/` directory hid the defect. See §12b.
 
 **And one judgement call the brief did not cover.** `ledger.py` needs a UTC
 timestamp, and `artifacts.utc_now()` already produces exactly the format
