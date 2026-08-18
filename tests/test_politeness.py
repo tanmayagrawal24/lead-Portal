@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 
 from portal import audit, cli, db, fetch, migrate, net, urls
+from portal.addresses import AddressPolicy
 from portal.net import Fetcher, HostRateLimiter
 from tests import fixture_corpus, shopfixtures
 from tests.fixture_server import (
@@ -183,7 +184,10 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
         site.add("/de/produkt/alpha/", shopfixtures.product_html("alpha"))
 
         with FixtureServer(site) as server:
-            fetcher = Fetcher(limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS))
+            fetcher = Fetcher(
+                addresses=AddressPolicy.loopback_permitted(),
+                limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
+            )
             self.addCleanup(fetcher.close)
             response = fetcher.get(
                 f"{server.base}/produkt/alpha", hop_allowed=net.RobotsExempt
@@ -221,7 +225,10 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
         server.site.add("/de/", "<html><body>ok</body></html>")
 
         with server:
-            fetcher = Fetcher(limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS))
+            fetcher = Fetcher(
+                addresses=AddressPolicy.loopback_permitted(),
+                limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
+            )
             self.addCleanup(fetcher.close)
             response = fetcher.get(
                 f"http://{FIXTURE_APEX}:{server.port}/",
@@ -249,7 +256,10 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
             site.add_redirect(f"/hop{hop}", f"/hop{hop + 1}")
 
         with FixtureServer(site) as server:
-            fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+            fetcher = Fetcher(
+                addresses=AddressPolicy.loopback_permitted(),
+                limiter=HostRateLimiter.unthrottled(),
+            )
             self.addCleanup(fetcher.close)
             response = fetcher.get(f"{server.base}/hop0", hop_allowed=net.RobotsExempt)
 
@@ -274,7 +284,10 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
         with FixtureServer(elsewhere, address="127.0.0.2") as other:
             site.add_redirect("/", f"{other.base}/")
             with FixtureServer(site) as server:
-                fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+                fetcher = Fetcher(
+                    addresses=AddressPolicy.loopback_permitted(),
+                    limiter=HostRateLimiter.unthrottled(),
+                )
                 self.addCleanup(fetcher.close)
                 response = fetcher.get(f"{server.base}/", hop_allowed=net.RobotsExempt)
 
@@ -291,7 +304,10 @@ class TestRedirectsAreRateLimited(unittest.TestCase):
         quietly permitting a hop at runtime. Exempting a fetch has to be
         written down as `RobotsExempt`, where a reviewer can see it.
         """
-        fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+        fetcher = Fetcher(
+            addresses=AddressPolicy.loopback_permitted(),
+            limiter=HostRateLimiter.unthrottled(),
+        )
         self.addCleanup(fetcher.close)
         with self.assertRaises(TypeError):
             fetcher.get("http://127.0.0.1:1/")  # type: ignore[call-arg]
@@ -334,7 +350,10 @@ class TestOneRequestPerSecondPerHost(PolitenessTestCase):
         server = self.serve("127.0.0.1", tracker)
         company_id = self.add_company("127.0.0.1")
 
-        fetcher = Fetcher(limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS))
+        fetcher = Fetcher(
+            addresses=AddressPolicy.loopback_permitted(),
+            limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
+        )
         self.addCleanup(fetcher.close)
         fetch.run(
             self.conn,
@@ -367,7 +386,10 @@ class TestConcurrencyCeiling(PolitenessTestCase):
         servers = {a: self.serve(a, tracker, delay=0.15) for a in addresses}
         targets = [(self.add_company(a), a) for a in addresses]
 
-        fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+        fetcher = Fetcher(
+            addresses=AddressPolicy.loopback_permitted(),
+            limiter=HostRateLimiter.unthrottled(),
+        )
         self.addCleanup(fetcher.close)
         fetch.run(
             self.conn,
@@ -394,7 +416,10 @@ class TestConcurrencyCeiling(PolitenessTestCase):
         servers = {a: self.serve(a, tracker, delay=0.3) for a in addresses}
         targets = [(self.add_company(a), a) for a in addresses]
 
-        fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+        fetcher = Fetcher(
+            addresses=AddressPolicy.loopback_permitted(),
+            limiter=HostRateLimiter.unthrottled(),
+        )
         self.addCleanup(fetcher.close)
         fetch.run(
             self.conn,
@@ -430,6 +455,7 @@ class TestRequestLogAndAudit(unittest.TestCase):
 
         with FixtureServer(site) as server:
             fetcher = Fetcher(
+                addresses=AddressPolicy.loopback_permitted(),
                 limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
                 log=net.RequestLog(path),
             )
@@ -451,6 +477,7 @@ class TestRequestLogAndAudit(unittest.TestCase):
 
         with FixtureServer(site) as server:
             fetcher = Fetcher(
+                addresses=AddressPolicy.loopback_permitted(),
                 limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
                 log=net.RequestLog(path),
             )
@@ -498,6 +525,7 @@ class TestRequestLogAndAudit(unittest.TestCase):
         path = self._log_path()
         with FixtureServer(site) as server:
             fetcher = Fetcher(
+                addresses=AddressPolicy.loopback_permitted(),
                 limiter=HostRateLimiter(net.MIN_INTERVAL_SECONDS),
                 log=net.RequestLog(path),
             )

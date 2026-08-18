@@ -110,3 +110,16 @@ def path_of(url: str) -> str:
 
 def has_query(url: str) -> bool:
     return bool(urlsplit(url).query)
+
+
+def hostname_of(url: str) -> str | None:
+    """The bare hostname — no port, no brackets around an IPv6 literal.
+
+    Distinct from `authority_of`, which keeps the port because it answers a
+    permission question, and from `host_of`, which strips `www.` because it
+    answers a budget question. This one answers *what do we resolve?*, so a
+    port would make every lookup fail and IPv6 brackets are not part of the
+    name. `urlsplit().hostname` also lowercases, which every comparison here
+    already assumes.
+    """
+    return urlsplit(url).hostname

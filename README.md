@@ -49,6 +49,14 @@ User-Agent, robots.txt honoured. The CLI refuses an `--interval` below the floor
 or a `--max-hosts` above the ceiling. Seed-file format is in `seeds/README.md`;
 **real prospect lists need the operator's approval before any crawl.**
 
+Redirects are followed one hop at a time, and **every** hop is checked twice:
+against the robots.txt of the origin it lands on, and against its **address**
+(M1.68). The second check is there because the first one asks the target's own
+server for permission — a service on `127.0.0.1` or `169.254.169.254` has no
+robots.txt, and "no rules stated" reads as "everything permitted". Loopback,
+private, link-local and reserved destinations are refused before a socket
+opens; the refusal is recorded in `artifact.error` like any other failed fetch.
+
 ```bash
 portal serve                # http://127.0.0.1:8000
 ```

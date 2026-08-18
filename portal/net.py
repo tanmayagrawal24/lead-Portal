@@ -25,6 +25,15 @@ robots-disallowed pages on the first real crawl — via a different path on one
 domain, and via a path differing from the `Disallow` rule only in case on the
 other. The callback's name says "hop", not "cross host", for that reason.
 
+**And robots is the wrong authority to ask about the address.** `hop_allowed`
+asks the *target's own server* whether we may fetch it, which is exactly the
+wrong question when the target is `127.0.0.1:8009` or `169.254.169.254`: those
+answer 404 to a robots probe, and a 404 means "no rules stated" and therefore
+"everything permitted". So a second gate, on the address rather than the path,
+is applied to **every** URL this transport is handed — the first one as well as
+every hop, since a seed row can name an address just as a `Location` header can.
+See `portal.addresses` for the measurement that produced it (M1.68).
+
 Two keys, deliberately: the limiter is keyed on `urls.host_of` (apex and www
 share one budget, because they are one machine) and the vouching check on
 `urls.authority_of` (apex and www are separate origins, and may serve separate
@@ -45,6 +54,7 @@ from typing import Self
 
 import httpx
 
+from portal.addresses import AddressPolicy
 from portal.urls import absolutise, authority_of, host_of
 
 USER_AGENT = "CreativePotatoesBot/1.0 (+https://creative-potato.global)"
@@ -243,6 +253,12 @@ class Fetcher:
     #: Where every issued request is logged (M1.19). None disables logging;
     #: the tests that measure politeness at the fixture server do not need it.
     log: RequestLog | None = None
+    #: H2/M1.68. Default refuses loopback, private, link-local and reserved
+    #: destinations. The whole test suite fetches from loopback and therefore
+    #: passes `AddressPolicy.loopback_permitted()` — one greppable token per
+    #: call site, in `HostRateLimiter.unthrottled`'s idiom, rather than a
+    #: boolean nobody can find.
+    addresses: AddressPolicy = field(default_factory=AddressPolicy)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -276,8 +292,23 @@ class Fetcher:
         """
         assert self._client is not None
         current = url
+        #: The status of the redirect that sent us here, so a refusal carries
+        #: the hop that produced it exactly as `redirect_refused` does. None on
+        #: the first URL, which arrived from a caller and not from a `Location`.
+        arrived_by: int | None = None
 
         for _hop in range(MAX_REDIRECT_HOPS + 1):
+            # Before the limiter, because a request we will not issue must not
+            # spend a second of the host's politeness budget — and before the
+            # request, because the point is that it never goes out. Applied here
+            # rather than in the caller's `hop_allowed` for the reason the
+            # module docstring gives: robots is the target's own account of
+            # itself, and this gate exists precisely for targets whose account
+            # of themselves cannot be trusted.
+            verdict = self.addresses.verdict_for(current)
+            if not verdict.permitted:
+                return Response(url=current, status=arrived_by, error=verdict.reason)
+
             self.limiter.wait(host_of(current))
             issued = time.monotonic()
             issued_at = datetime.now(UTC).isoformat(timespec="milliseconds")
@@ -326,6 +357,7 @@ class Fetcher:
                     status=response.status_code,
                     error=f"redirect_refused: {target}",
                 )
+            arrived_by = response.status_code
             current = target
 
         return Response(
