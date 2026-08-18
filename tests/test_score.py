@@ -10,6 +10,7 @@ cases are pinned first, because they are the ones that fail silently.
 
 from __future__ import annotations
 
+import shutil
 import socket
 import sqlite3
 import tempfile
@@ -751,17 +752,66 @@ class TestScoreDateIsPinned(ScoreStageTestCase):
             stage._persist(orphan)
         self.assertIn("M1.74", str(caught.exception))
 
-    def test_existing_rows_are_not_backfilled(self) -> None:
-        """Migration 010 adds no UPDATE. A pre-010 row reads NULL, which is true;
-        inferring `date(computed_at)` would be right almost always and wrong
-        exactly at the midnight-UTC boundary the column exists for."""
-        company_id = self.company()
-        self.conn.execute(
+    def test_a_row_that_predates_migration_010_is_not_backfilled(self) -> None:
+        """Migration 010 adds no UPDATE, and this proves it **on a row that
+        existed before 010 ran**.
+
+        The obvious version of this test is vacuous and was written first: if
+        the row is inserted after `apply_pending` has already run, the migration
+        updated an empty table and a backfilling 010 passes it. Caught by the
+        negative control, not by review. So the database here is taken to 009,
+        given a score row, and only then advanced to 010.
+
+        The ruling under test: inferring `date(computed_at)` would be right
+        almost always — nothing injects `today` outside tests — and wrong
+        exactly at the midnight-UTC boundary the column exists for. A fabricated
+        measurement that is usually right is worse than a NULL, because a NULL
+        can be seen.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        upto_009 = Path(tmp.name) / "migrations"
+        upto_009.mkdir()
+        for number, path in migrate.discover():
+            if number < 10:
+                shutil.copy(path, upto_009 / path.name)
+
+        old_db = db.connect(Path(tmp.name) / "pre010.db")
+        self.addCleanup(old_db.close)
+        migrate.apply_pending(old_db, upto_009)
+        self.assertEqual(migrate.current_version(old_db), 9)
+        self.assertNotIn(
+            "evaluated_on", [r[1] for r in old_db.execute("PRAGMA table_info(score)")]
+        )
+
+        run_id = int(
+            old_db.execute(
+                "INSERT INTO run (started_at, stage, finished_at) "
+                "VALUES ('2026-08-17T23:59:00Z','score_p1','2026-08-17T23:59:00Z')"
+            ).lastrowid
+        )
+        company_id = int(
+            old_db.execute(
+                "INSERT INTO company (domain, discovery_source, discovered_at) "
+                "VALUES ('alt.de','seed_csv','2026-08-17T00:00:00Z')"
+            ).lastrowid
+        )
+        # 23:59 UTC: the exact case a backfill from `computed_at` gets wrong.
+        old_db.execute(
             "INSERT INTO score (company_id, run_id, phase, total, band, "
             "ruleset_version, computed_at) VALUES (?,?,1,0,'D','v3',?)",
-            (company_id, self.run_id, "2026-08-17T23:59:00Z"),
+            (company_id, run_id, "2026-08-17T23:59:00Z"),
         )
-        self.assertIsNone(self.score_row(company_id)["evaluated_on"])
+        old_db.commit()
+
+        self.assertEqual(migrate.apply_pending(old_db), [10])
+        row = old_db.execute(
+            "SELECT evaluated_on FROM score WHERE company_id = ?", (company_id,)
+        ).fetchone()
+        self.assertIsNone(
+            row["evaluated_on"],
+            "migration 010 backfilled a date nobody observed — see §4's ruling",
+        )
 
 
 class TestContactBlock(ScoreStageTestCase):
