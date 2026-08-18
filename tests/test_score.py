@@ -666,6 +666,104 @@ class TestPersistence(ScoreStageTestCase):
         self.assertIn("Nicht bewertbar", row["raised_note"])
 
 
+class TestScoreDateIsPinned(ScoreStageTestCase):
+    """M1.74, closing M1.66.
+
+    A band is a function of `(signals, today)`. Before this, `score` recorded
+    only `computed_at` — a clock read taken in `_persist` — while the rules ran
+    against `ScoreStage.today`, and a stage given `today=2020-03-07` wrote
+    `computed_at=2026-08-18` with the evaluation date **recorded nowhere**.
+
+    **The test that would have caught it** is the first one below: inject a
+    `today` far from the wall clock and assert the *stored* value is the
+    injected one. Everything else here defends the property that they are one
+    expression rather than two that happen to agree.
+    """
+
+    #: Deliberately six years from any wall clock this will ever run on. A date
+    #: near today would pass against a second clock read and prove nothing.
+    INJECTED = date(2020, 3, 7)
+
+    def score_row(self, company_id: int):
+        return self.conn.execute(
+            "SELECT * FROM score WHERE run_id = ? AND company_id = ?",
+            (self.run_id, company_id),
+        ).fetchone()
+
+    def test_the_stored_date_is_the_injected_one_not_the_wall_clock(self) -> None:
+        company_id = self.company()
+        stage = score.ScoreStage(self.conn, self.run_id, 1, self.INJECTED)
+        stage.run_company({"company_id": company_id, "domain": "muster.de"})
+        row = self.score_row(company_id)
+
+        self.assertEqual(row["evaluated_on"], "2020-03-07")
+        # And the two columns are genuinely different facts, not a copy: the row
+        # was written now, and evaluated against 2020.
+        self.assertTrue(row["computed_at"].startswith("20"))
+        self.assertNotEqual(row["computed_at"][:10], row["evaluated_on"])
+
+    def test_the_stored_date_is_the_one_the_rules_were_given(self) -> None:
+        """The property, stated directly: whatever `evaluate` saw is what is
+        stored. Asserted against `evaluate`'s own return rather than against a
+        constant, so it holds for any date without the test being rewritten."""
+        for injected in (date(2020, 3, 7), date(2031, 12, 31), date(2026, 8, 18)):
+            with self.subTest(today=injected):
+                company_id = self.company(f"d{injected.year}.de")
+                profile = {"company_id": company_id, "domain": f"d{injected.year}.de"}
+                result = score.evaluate(profile, injected)
+                self.assertEqual(result.evaluated_on, injected)
+
+                stage = score.ScoreStage(self.conn, self.run_id, 1, injected)
+                stage.run_company(profile)
+                self.assertEqual(
+                    self.score_row(company_id)["evaluated_on"],
+                    result.evaluated_on.isoformat(),
+                )
+
+    def test_a_recompute_updates_the_date_rather_than_keeping_the_first(
+        self,
+    ) -> None:
+        """`_persist` is an upsert (§5, `uq_score_identity`). Re-scoring the
+        same run against a different date must move the stored date with it, or
+        the row would claim a band was evaluated on a day it was not."""
+        company_id = self.company()
+        profile = {"company_id": company_id, "domain": "muster.de"}
+        score.ScoreStage(self.conn, self.run_id, 1, date(2020, 3, 7)).run_company(
+            profile
+        )
+        self.assertEqual(self.score_row(company_id)["evaluated_on"], "2020-03-07")
+
+        score.ScoreStage(self.conn, self.run_id, 1, date(2024, 1, 1)).run_company(
+            profile
+        )
+        self.assertEqual(self.score_row(company_id)["evaluated_on"], "2024-01-01")
+
+    def test_persisting_a_result_with_no_date_is_refused(self) -> None:
+        """The schema column is nullable **only** so pre-010 rows can say "never
+        recorded". A row written now with no date would be a fresh instance of
+        the defect M1.74 closed, so it fails loudly instead of inserting a NULL
+        that reads like history."""
+        company_id = self.company()
+        stage = score.ScoreStage(self.conn, self.run_id, 1, self.INJECTED)
+        orphan = score.ScoreResult(domain="muster.de", company_id=company_id)
+        self.assertIsNone(orphan.evaluated_on)
+        with self.assertRaises(ValueError) as caught:
+            stage._persist(orphan)
+        self.assertIn("M1.74", str(caught.exception))
+
+    def test_existing_rows_are_not_backfilled(self) -> None:
+        """Migration 010 adds no UPDATE. A pre-010 row reads NULL, which is true;
+        inferring `date(computed_at)` would be right almost always and wrong
+        exactly at the midnight-UTC boundary the column exists for."""
+        company_id = self.company()
+        self.conn.execute(
+            "INSERT INTO score (company_id, run_id, phase, total, band, "
+            "ruleset_version, computed_at) VALUES (?,?,1,0,'D','v3',?)",
+            (company_id, self.run_id, "2026-08-17T23:59:00Z"),
+        )
+        self.assertIsNone(self.score_row(company_id)["evaluated_on"])
+
+
 class TestContactBlock(ScoreStageTestCase):
     """Migration 008. A7's third axis: an abstention that leaves the score too
     *high* refuses outbound contact until a human resolves it."""

@@ -90,6 +90,14 @@ class PendingTransient:
 class ScoreResult:
     domain: str
     company_id: int
+    #: The date `evaluate` was actually run against (M1.74, closing M1.66).
+    #: Set by `evaluate` from its own `today` parameter and by nothing else, so
+    #: the stored evaluation date and the date the rules saw are **one
+    #: expression**. Writing `self.today` in `_persist` would have been a second
+    #: expression for one fact, which is the defect this closes (M1.42's shape).
+    #: A band is a function of `(signals, today)`; without this the band is not
+    #: reproducible, which is why it precedes any spend against a band.
+    evaluated_on: date | None = None
     total: int = 0
     band: str = "D"
     components: list[Component] = field(default_factory=list)
@@ -109,6 +117,24 @@ class ScoreResult:
     @property
     def abstentions(self) -> list[Component]:
         return [c for c in self.components if c.state == ABSTAINS]
+
+
+def _evaluated_on_or_fail(result: ScoreResult) -> str:
+    """The evaluation date as stored, refusing to write a row without one.
+
+    `evaluated_on` is nullable in the schema **only** so that rows written
+    before migration 010 can say "never recorded" (§4). A row written *now*
+    with no date would be a new instance of exactly the defect M1.74 closed, so
+    it fails loudly here rather than inserting a NULL that reads like history.
+    """
+    if result.evaluated_on is None:
+        raise ValueError(
+            f"{result.domain or result.company_id}: refusing to persist a score "
+            f"with no evaluation date (M1.74). A band is a function of "
+            f"(signals, today); a row without its date cannot be reproduced. "
+            f"`evaluate` sets this — construct the result through it."
+        )
+    return result.evaluated_on.isoformat()
 
 
 def band_of(total: int) -> str:
@@ -135,6 +161,8 @@ def evaluate(
     result = ScoreResult(
         domain=str(profile.get("domain") or ""),
         company_id=int(profile["company_id"]),  # type: ignore[arg-type]
+        # The same object the rules below are handed. Not a copy, not a re-read.
+        evaluated_on=today,
     )
     settled: set[str] = set()
 
@@ -282,13 +310,15 @@ class ScoreStage:
         self.conn.execute(
             """
             INSERT INTO score
-                (company_id, run_id, phase, total, band, ruleset_version, computed_at)
-            VALUES (?,?,?,?,?,?,?)
+                (company_id, run_id, phase, total, band, ruleset_version,
+                 computed_at, evaluated_on)
+            VALUES (?,?,?,?,?,?,?,?)
             ON CONFLICT (run_id, company_id, phase) DO UPDATE SET
                 total = excluded.total,
                 band = excluded.band,
                 ruleset_version = excluded.ruleset_version,
-                computed_at = excluded.computed_at
+                computed_at = excluded.computed_at,
+                evaluated_on = excluded.evaluated_on
             """,
             (
                 result.company_id,
@@ -297,7 +327,10 @@ class ScoreStage:
                 result.total,
                 result.band,
                 RULESET_VERSION,
+                # Two different facts, deliberately in two columns: when the row
+                # was written, and the day the rules were run against.
                 utc_now(),
+                _evaluated_on_or_fail(result),
             ),
         )
         score_id = self.conn.execute(
