@@ -21,7 +21,25 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from portal import cli, llm, llm_anthropic
+from portal import cli, ledger, llm, llm_anthropic
+
+
+def _cleared() -> ledger.LedgerClearance:
+    """A §7 control 2 clearance for tests that are not testing the ledger.
+
+    Constructed directly rather than through `check_ceiling`, which needs a
+    database these tests have no reason to open. That the dataclass is
+    constructible is deliberate and is not the hole it looks like: the gate
+    exists to stop a paid path being reached **without anyone deciding**, and
+    writing `spend_usd=0.0` by hand is a decision. `tests/test_cost_ledger.py`
+    is where the gate itself is tested.
+    """
+    return ledger.LedgerClearance(
+        spend_usd=0.0,
+        ceiling_usd=ledger.MONTHLY_CEILING_USD,
+        window_days=ledger.WINDOW_DAYS,
+        taken_at="2026-08-18T12:00:00Z",
+    )
 
 
 class FakeError(Exception):
@@ -153,7 +171,9 @@ class Submission(unittest.TestCase):
     def test_a_successful_submit_returns_the_provider_batch_id(self) -> None:
         client = FakeClient()
         provider = llm_anthropic.AnthropicProvider(client=client)
-        self.assertEqual(provider.submit_batch([_request()]), "msgbatch_fake")
+        self.assertEqual(
+            provider.submit_batch([_request()], clearance=_cleared()), "msgbatch_fake"
+        )
         self.assertEqual(client.submitted[0]["custom_id"], "snocks.com")
 
     def test_a_dry_key_at_submit_raises_its_own_exception(self) -> None:
@@ -162,7 +182,7 @@ class Submission(unittest.TestCase):
         client = FakeClient(submit_error=FakeError("billing_error", 403))
         provider = llm_anthropic.AnthropicProvider(client=client)
         with self.assertRaises(llm_anthropic.BalanceExhausted) as caught:
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
         self.assertIn("prepaid balance", str(caught.exception))
 
     def test_the_error_type_is_read_from_the_body_when_absent_on_the_exception(
@@ -171,19 +191,19 @@ class Submission(unittest.TestCase):
         client = FakeClient(submit_error=FakeErrorWithBody("billing_error", 403))
         provider = llm_anthropic.AnthropicProvider(client=client)
         with self.assertRaises(llm_anthropic.BalanceExhausted):
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
 
     def test_a_permission_error_is_not_reported_as_a_dry_key(self) -> None:
         client = FakeClient(submit_error=FakeError("permission_error", 403))
         provider = llm_anthropic.AnthropicProvider(client=client)
         with self.assertRaises(FakeError):
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
 
     def test_an_overload_propagates_unchanged(self) -> None:
         client = FakeClient(submit_error=FakeError("overloaded_error", 529))
         provider = llm_anthropic.AnthropicProvider(client=client)
         with self.assertRaises(FakeError):
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
 
 
 class Polling(unittest.TestCase):
@@ -309,6 +329,7 @@ class UsageReading(unittest.TestCase):
             provider=provider.name,
             model=provider.model,
             count_tokens=provider.token_counter(),
+            clearance=_cleared(),
         )
         self.assertEqual(client.counted[0][0], "claude-haiku-4-5")
         self.assertEqual(estimate.input_tokens, 12_345)
@@ -323,7 +344,7 @@ class NoKey(unittest.TestCase):
             mock.patch.dict(os.environ, {llm_anthropic.API_KEY_ENV: ""}, clear=False),
             self.assertRaises(llm_anthropic.MissingKeyError),
         ):
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
 
 
 class PricesCommand(unittest.TestCase):

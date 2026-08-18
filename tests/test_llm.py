@@ -25,7 +25,25 @@ from __future__ import annotations
 import unittest
 from datetime import date
 
-from portal import llm
+from portal import ledger, llm
+
+
+def _cleared() -> ledger.LedgerClearance:
+    """A §7 control 2 clearance for tests that are not testing the ledger.
+
+    Constructed directly rather than through `check_ceiling`, which needs a
+    database these tests have no reason to open. That the dataclass is
+    constructible is deliberate and is not the hole it looks like: the gate
+    exists to stop a paid path being reached **without anyone deciding**, and
+    writing `spend_usd=0.0` by hand is a decision. `tests/test_cost_ledger.py`
+    is where the gate itself is tested.
+    """
+    return ledger.LedgerClearance(
+        spend_usd=0.0,
+        ceiling_usd=ledger.MONTHLY_CEILING_USD,
+        window_days=ledger.WINDOW_DAYS,
+        taken_at="2026-08-18T12:00:00Z",
+    )
 
 
 def _price(**kw) -> llm.Price:
@@ -215,6 +233,7 @@ class Estimation(unittest.TestCase):
             provider="anthropic",
             model="claude-haiku-4-5",
             count_tokens=counter,
+            clearance=_cleared(),
         )
         self.assertEqual(len(calls), 2)
         self.assertEqual(est.input_tokens, 20_000)
@@ -235,6 +254,7 @@ class Estimation(unittest.TestCase):
                 provider="anthropic",
                 model="claude-haiku-4-5",
                 count_tokens=counter,
+                clearance=_cleared(),
             )
 
     def test_output_above_the_model_cap_is_refused(self) -> None:
@@ -245,6 +265,7 @@ class Estimation(unittest.TestCase):
                 provider="anthropic",
                 model="claude-haiku-4-5",
                 count_tokens=lambda **_: 10,
+                clearance=_cleared(),
             )
 
     def test_input_above_the_context_window_is_refused(self) -> None:
@@ -254,6 +275,7 @@ class Estimation(unittest.TestCase):
                 provider="anthropic",
                 model="claude-haiku-4-5",
                 count_tokens=lambda **_: 500_000,
+                clearance=_cleared(),
             )
 
 

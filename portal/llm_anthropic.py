@@ -165,8 +165,21 @@ class AnthropicProvider:
 
         return count
 
-    def submit_batch(self, requests: Sequence[llm.BatchRequest]) -> str:
+    @llm.requires_ledger_clearance
+    def submit_batch(
+        self,
+        requests: Sequence[llm.BatchRequest],
+        *,
+        clearance: llm.LedgerClearance,
+    ) -> str:
         """Submit, and classify a submit-time failure rather than re-raising raw.
+
+        **This is where money is actually committed**, and so it carries §7
+        control 2's gate in its own right rather than trusting that
+        `reserve_batch` ran first (M1.71). Gating only the reservation would
+        have made the assertion decorative: `reserve_batch` spends nothing — it
+        is arithmetic — while `messages.batches.create` below is irrevocable the
+        moment it returns.
 
         This is one of M1.53's two seams. If a prepaid balance surfaces here, it
         arrives as a `billing_error` on this call and the batch never exists —
@@ -291,3 +304,31 @@ def _usage(message: Any) -> llm.Usage:
         # extraction; the field exists because the same Usage carries §5.5c.
         web_searches=int(getattr(server, "web_search_requests", 0) or 0),
     )
+
+
+# ── §7 control 2, asserted at import for the provider too (M1.71) ───────
+#
+# The same mechanism `llm.py` applies to itself, pointed at the class that
+# holds the only irrevocable call in the project. The free list is written out
+# so that adding a method here is a build failure until somebody has decided
+# whether it spends money.
+
+#: `submit_batch` is the only call that commits spend. `count_input_tokens` and
+#: `token_counter` reach the network and are **free** — `count_tokens` is not a
+#: paid endpoint (M1.52) — and `poll_batch` reads a result already paid for.
+PAID_SURFACES: tuple[str, ...] = ("submit_batch",)
+FREE_SURFACES: tuple[str, ...] = (
+    "build_params",
+    "count_input_tokens",
+    "limits",
+    "poll_batch",
+    "price",
+    "token_counter",
+)
+
+llm.assert_ledger_guarded(
+    AnthropicProvider,
+    paid=PAID_SURFACES,
+    free=FREE_SURFACES,
+    where="portal.llm_anthropic.AnthropicProvider",
+)

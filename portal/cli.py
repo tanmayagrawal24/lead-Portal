@@ -23,6 +23,7 @@ from portal import (
     extract,
     fetch,
     impressum_audit,
+    ledger,
     llm,
     llm_anthropic,
     migrate,
@@ -350,14 +351,18 @@ def cmd_audit_impressum_candidates(path: Path, show_values: bool) -> int:
     return 0
 
 
-def cmd_llm_prices(reserve_kb: float | None) -> int:
+def cmd_llm_prices(database: Path, reserve_kb: float | None) -> int:
     """§7 controls 4, 10 and 11, made readable before any of them spends anything.
 
     Prints the two declared tables — prices with their as-of dates, and the
     per-model limits M1.50 says an interface must not generalise away — plus the
-    §7.1 arithmetic derived from them. It touches no database and issues no paid
-    call, so it can be run at any time to answer "what does this tool currently
-    believe a call costs, and as of when".
+    §7.1 arithmetic derived from them. The tables issue no paid call, so this can
+    be run at any time to answer "what does this tool currently believe a call
+    costs, and as of when".
+
+    **`--reserve` now opens the database, and that is the point.** It performs a
+    real §7 control 4 reservation, and a real reservation is one the §7 control 2
+    ledger has cleared — the printed tables still touch nothing.
 
     `--reserve KB` performs a real §7 control 4 reservation over a page of that
     size, which means a real `count_tokens` call and therefore a key. Without
@@ -431,6 +436,26 @@ def cmd_llm_prices(reserve_kb: float | None) -> int:
         return 0
 
     print(f"\n§7 control 4 reservation over a {reserve_kb:g} KB page:")
+
+    # §7 control 2 before §7 control 4, in that order: the outer bound decides
+    # whether there is anything to price, and pricing first would mean the
+    # runaway has already been measured before the guard that exists to stop it
+    # is asked. `check_ceiling` raises on an unreadable ledger rather than
+    # reading it as zero.
+    conn = db.connect(database)
+    try:
+        clearance = ledger.check_ceiling(conn)
+    except ledger.CeilingExceeded as exc:
+        print(f"  refused: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    print(
+        f"  §7 control 2: ${clearance.spend_usd:.2f} of "
+        f"${clearance.ceiling_usd:.2f} used over {clearance.window_days} rolling "
+        f"days; ${clearance.headroom_usd:.2f} headroom"
+    )
+
     provider = llm_anthropic.AnthropicProvider()
     # A page of the given size, capped as §5.5b caps every real input at 60 KB.
     body = "Impressum. " * int(reserve_kb * 1024 / 11)
@@ -447,6 +472,7 @@ def cmd_llm_prices(reserve_kb: float | None) -> int:
             provider=provider.name,
             model=provider.model,
             count_tokens=provider.token_counter(),
+            clearance=clearance,
         )
     except llm_anthropic.MissingKeyError as exc:
         print(f"  cannot measure: {exc}")
@@ -723,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_audit_impressum_candidates(path, args.show_values)
 
     if args.command == "llm-prices":
-        return cmd_llm_prices(args.reserve)
+        return cmd_llm_prices(path, args.reserve)
 
     raise AssertionError(f"unhandled command: {args.command}")  # pragma: no cover
 
