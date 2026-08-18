@@ -17,11 +17,31 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from portal import cli, llm, llm_anthropic
+from portal import cli, db, ledger, llm, llm_anthropic, migrate
+
+
+def _cleared() -> ledger.LedgerClearance:
+    """A §7 control 2 clearance for tests that are not testing the ledger.
+
+    Constructed directly rather than through `check_ceiling`, which needs a
+    database these tests have no reason to open. That the dataclass is
+    constructible is deliberate and is not the hole it looks like: the gate
+    exists to stop a paid path being reached **without anyone deciding**, and
+    writing `spend_usd=0.0` by hand is a decision. `tests/test_cost_ledger.py`
+    is where the gate itself is tested.
+    """
+    return ledger.LedgerClearance(
+        spend_usd=0.0,
+        ceiling_usd=ledger.MONTHLY_CEILING_USD,
+        window_days=ledger.WINDOW_DAYS,
+        taken_at="2026-08-18T12:00:00Z",
+    )
 
 
 class FakeError(Exception):
@@ -153,7 +173,9 @@ class Submission(unittest.TestCase):
     def test_a_successful_submit_returns_the_provider_batch_id(self) -> None:
         client = FakeClient()
         provider = llm_anthropic.AnthropicProvider(client=client)
-        self.assertEqual(provider.submit_batch([_request()]), "msgbatch_fake")
+        self.assertEqual(
+            provider.submit_batch([_request()], clearance=_cleared()), "msgbatch_fake"
+        )
         self.assertEqual(client.submitted[0]["custom_id"], "snocks.com")
 
     def test_a_dry_key_at_submit_raises_its_own_exception(self) -> None:
@@ -162,7 +184,7 @@ class Submission(unittest.TestCase):
         client = FakeClient(submit_error=FakeError("billing_error", 403))
         provider = llm_anthropic.AnthropicProvider(client=client)
         with self.assertRaises(llm_anthropic.BalanceExhausted) as caught:
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
         self.assertIn("prepaid balance", str(caught.exception))
 
     def test_the_error_type_is_read_from_the_body_when_absent_on_the_exception(
@@ -171,19 +193,19 @@ class Submission(unittest.TestCase):
         client = FakeClient(submit_error=FakeErrorWithBody("billing_error", 403))
         provider = llm_anthropic.AnthropicProvider(client=client)
         with self.assertRaises(llm_anthropic.BalanceExhausted):
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
 
     def test_a_permission_error_is_not_reported_as_a_dry_key(self) -> None:
         client = FakeClient(submit_error=FakeError("permission_error", 403))
         provider = llm_anthropic.AnthropicProvider(client=client)
         with self.assertRaises(FakeError):
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
 
     def test_an_overload_propagates_unchanged(self) -> None:
         client = FakeClient(submit_error=FakeError("overloaded_error", 529))
         provider = llm_anthropic.AnthropicProvider(client=client)
         with self.assertRaises(FakeError):
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
 
 
 class Polling(unittest.TestCase):
@@ -309,6 +331,7 @@ class UsageReading(unittest.TestCase):
             provider=provider.name,
             model=provider.model,
             count_tokens=provider.token_counter(),
+            clearance=_cleared(),
         )
         self.assertEqual(client.counted[0][0], "claude-haiku-4-5")
         self.assertEqual(estimate.input_tokens, 12_345)
@@ -323,11 +346,23 @@ class NoKey(unittest.TestCase):
             mock.patch.dict(os.environ, {llm_anthropic.API_KEY_ENV: ""}, clear=False),
             self.assertRaises(llm_anthropic.MissingKeyError),
         ):
-            provider.submit_batch([_request()])
+            provider.submit_batch([_request()], clearance=_cleared())
 
 
 class PricesCommand(unittest.TestCase):
     """`portal llm-prices` — the tables made readable before anything spends."""
+
+    def setUp(self) -> None:
+        # `--reserve` consults the §7 control 2 ledger, so it needs a real
+        # database. This used to pass on any machine that happened to have run
+        # `portal init` and failed in CI, which is M1.64's shape: a test whose
+        # result depends on the developer's environment.
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = Path(self._tmp.name) / "portal.db"
+        conn = db.connect(self.db)
+        migrate.apply_pending(conn)
+        conn.close()
 
     def run_cli(self, *argv: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -351,10 +386,42 @@ class PricesCommand(unittest.TestCase):
 
     def test_the_reservation_refuses_to_guess_without_a_key(self) -> None:
         with mock.patch.dict(os.environ, {llm_anthropic.API_KEY_ENV: ""}, clear=False):
-            code, text = self.run_cli("llm-prices", "--reserve", "40")
+            code, text = self.run_cli(
+                "--db", str(self.db), "llm-prices", "--reserve", "40"
+            )
         self.assertEqual(code, 2)
         self.assertIn("cannot measure", text)
         self.assertIn("heuristic is refused", text)
+
+    def test_the_ledger_is_consulted_before_the_key_is_even_looked_for(self) -> None:
+        """§7 control 2 before §7 control 4. A runaway that is allowed to price
+        itself first has already made the call the ceiling exists to refuse."""
+        conn = db.connect(self.db)
+        conn.execute(
+            "INSERT INTO run (started_at, stage, est_cost_usd) "
+            "VALUES (datetime('now','-1 days'), 'extract_p2', ?)",
+            (ledger.MONTHLY_CEILING_USD * 20,),
+        )
+        conn.close()
+        with mock.patch.dict(os.environ, {llm_anthropic.API_KEY_ENV: ""}, clear=False):
+            code, text = self.run_cli(
+                "--db", str(self.db), "llm-prices", "--reserve", "40"
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("§7 control 2", text)
+        self.assertIn("runaway guard", text)
+        # The key error is never reached: the ledger refused first.
+        self.assertNotIn("cannot measure", text)
+
+    def test_an_unreadable_ledger_refuses_rather_than_reading_as_zero(self) -> None:
+        """A database with no `run` table is not a database with no spend.
+        Fails closed, and names the fix instead of raising a traceback —
+        this is the case that passed locally and failed in CI."""
+        missing = Path(self._tmp.name) / "never-initialised.db"
+        code, text = self.run_cli("--db", str(missing), "llm-prices", "--reserve", "40")
+        self.assertEqual(code, 2)
+        self.assertIn("not readable", text)
+        self.assertIn("portal init", text)
 
 
 if __name__ == "__main__":  # pragma: no cover

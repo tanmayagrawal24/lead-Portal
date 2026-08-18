@@ -34,11 +34,16 @@ the writer that sets it, in M5 — a schema value no code path ever writes is
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import functools
+import inspect
+import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from typing import Any, Protocol
+
+from portal.ledger import LedgerBypass, LedgerClearance
 
 TOKENS_PER_MTOK = 1_000_000
 
@@ -272,6 +277,132 @@ def assert_declared(
             )
 
 
+# ── §7 control 2's gate, asserted at import (M1.71) ─────────────────────
+#
+# §7's preamble: "implemented as code, not as discipline". A ledger nobody is
+# obliged to consult is discipline. These three pieces make it a mechanism:
+# `requires_ledger_clearance` refuses the call, the SURFACES tuples force every
+# callable to be classified as paid or free, and `assert_ledger_guarded` runs
+# both checks at import — before there is a caller, so M5 is written against
+# the gate's presence rather than its absence.
+
+
+def requires_ledger_clearance(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Mark a paid surface, and refuse to run it without a `LedgerClearance`.
+
+    The clearance is keyword-only and required, so Python rejects a call that
+    omits it before this wrapper runs; the wrapper is what rejects a call that
+    passes `None`, or a look-alike, to get past the signature. Only
+    `ledger.check_ceiling` constructs a real one.
+    """
+
+    @functools.wraps(fn)
+    def guarded(*args: Any, **kwargs: Any) -> Any:
+        if not isinstance(kwargs.get("clearance"), LedgerClearance):
+            raise LedgerBypass(
+                f"{fn.__qualname__} is a paid surface and was called without a "
+                f"§7 control 2 ledger clearance. Call `ledger.check_ceiling(conn)` "
+                f"and pass what it returns; there is no way to opt out, because "
+                f"an opt-out is the bypass this gate exists to prevent."
+            )
+        return fn(*args, **kwargs)
+
+    guarded._ledger_guarded = True  # type: ignore[attr-defined]
+    return guarded
+
+
+#: Callables that reserve or commit spend. Each must carry the decorator.
+PAID_SURFACES: tuple[str, ...] = ("reserve_batch",)
+
+#: Callables that provably cost nothing: pure arithmetic over the tables, or
+#: reads of a result already paid for. Listed rather than inferred, so that a
+#: new callable is a **build failure** until somebody decides which it is.
+FREE_SURFACES: tuple[str, ...] = (
+    "assert_declared",
+    "assert_ledger_guarded",
+    "cache_write_observed",
+    "classify_api_error",
+    "estimate_cost",
+    "index_by_custom_id",
+    "limits_for",
+    "price_for",
+    "requires_ledger_clearance",
+    "resolve_batch_status",
+    "resubmittable",
+    "strict_json_schema",
+)
+
+
+def assert_ledger_guarded(
+    namespace: Any,
+    *,
+    paid: tuple[str, ...],
+    free: tuple[str, ...],
+    where: str,
+) -> None:
+    """Startup assertion over the paid/free split, mirroring `assert_declared`.
+
+    Three checks, each for a way this goes wrong rather than for completeness:
+    a paid surface missing its decorator (a gate written and not attached), a
+    name in either tuple that no longer exists (a registry describing code that
+    was deleted — B7's shape, a row that reads as implemented), and a callable
+    in neither tuple (**the one that matters**: the new paid path nobody
+    classified). The third is why the free list is written out longhand.
+    """
+    overlap = set(paid) & set(free)
+    if overlap:
+        raise LLMConfigError(f"{where}: {sorted(overlap)} listed as both paid and free")
+
+    declared = set(paid) | set(free)
+    members = {
+        name for name, obj in _module_callables(namespace) if not name.startswith("_")
+    }
+
+    for name in sorted(declared - members):
+        raise LLMConfigError(
+            f"{where}: '{name}' is registered as a {'paid' if name in paid else 'free'} "
+            f"surface but no such callable exists — a registry that describes "
+            f"absent code reads as implemented (B7's shape)"
+        )
+
+    for name in sorted(members - declared):
+        raise LLMConfigError(
+            f"{where}: '{name}' is classified as neither paid nor free. Add it to "
+            f"PAID_SURFACES (and decorate it with @requires_ledger_clearance) or "
+            f"to FREE_SURFACES. §7 control 2 cannot gate a path nobody declared."
+        )
+
+    for name in sorted(paid):
+        target = dict(_module_callables(namespace))[name]
+        if not getattr(target, "_ledger_guarded", False):
+            raise LLMConfigError(
+                f"{where}: '{name}' is a paid surface with no §7 control 2 gate. "
+                f"Decorate it with @requires_ledger_clearance — the ledger is a "
+                f"mechanism only while every paid path is obliged to consult it."
+            )
+
+
+def _module_callables(namespace: Any) -> list[tuple[str, Any]]:
+    """The functions *defined by* `namespace`, ignoring anything it imported.
+
+    A module is filtered on `__module__` so that `dataclass` and `functools`
+    do not read as undeclared paid paths; a class is filtered on its own
+    `vars`, and `__init__` is excluded because constructing a provider spends
+    nothing — the call does.
+    """
+    if inspect.ismodule(namespace):
+        return [
+            (name, obj)
+            for name, obj in vars(namespace).items()
+            if inspect.isfunction(obj) and obj.__module__ == namespace.__name__
+        ]
+    return [
+        (name, obj)
+        for name, obj in vars(namespace).items()
+        if inspect.isfunction(obj) and name != "__init__"
+    ]
+
+
 # ── the failure taxonomy (§7 control 11, M1.51, M1.53) ──────────────────
 
 
@@ -481,7 +612,9 @@ class LLMProvider(Protocol):
 
     def count_input_tokens(self, request: BatchRequest) -> int: ...
 
-    def submit_batch(self, requests: Sequence[BatchRequest]) -> str: ...
+    def submit_batch(
+        self, requests: Sequence[BatchRequest], *, clearance: LedgerClearance
+    ) -> str: ...
 
     def poll_batch(self, provider_batch_id: str) -> BatchResult: ...
 
@@ -510,14 +643,23 @@ def estimate_cost(
     return CostEstimate(input_tokens, output_tokens, web_searches, price, total)
 
 
+@requires_ledger_clearance
 def reserve_batch(
     requests: Sequence[BatchRequest],
     *,
     provider: str,
     model: str,
     count_tokens: TokenCounter,
+    clearance: LedgerClearance,
 ) -> CostEstimate:
     """The §7 control 4 reservation, measured rather than guessed (M1.52).
+
+    **`clearance` is §7 control 2's, and it is required** (M1.71). The outer
+    bound is consulted *before* the per-batch arithmetic, not after: control 2
+    is what stops a runaway, and a runaway that is allowed to price itself
+    first has already made the call this ceiling exists to refuse. The token is
+    threaded rather than re-checked here so the ledger is read once per attempt
+    and the reading can be reported — see `LedgerClearance`.
 
     Input tokens come from `count_tokens` for the model actually being called.
     Output is bounded by each request's own `max_tokens`: the reservation must
@@ -657,11 +799,16 @@ def strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 assert_declared()
+assert_ledger_guarded(
+    sys.modules[__name__], paid=PAID_SURFACES, free=FREE_SURFACES, where="portal.llm"
+)
 
 
 __all__ = [
     "ASSUMED_BALANCE_FAILURE_POINT",
+    "FREE_SURFACES",
     "LIMITS",
+    "PAID_SURFACES",
     "PRICES",
     "WEB_SEARCH_PER_SEARCH_USD",
     "BalanceFailurePoint",
@@ -680,12 +827,14 @@ __all__ = [
     "TokenCounter",
     "Usage",
     "assert_declared",
+    "assert_ledger_guarded",
     "cache_write_observed",
     "classify_api_error",
     "estimate_cost",
     "index_by_custom_id",
     "limits_for",
     "price_for",
+    "requires_ledger_clearance",
     "reserve_batch",
     "resolve_batch_status",
     "resubmittable",
