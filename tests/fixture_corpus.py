@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 from portal import config, db, fetch, migrate
+from portal.addresses import AddressPolicy
 from portal.net import Fetcher, HostRateLimiter, RequestLog
 from tests import shopfixtures
 from tests.fixture_server import FixtureServer, Site
@@ -66,6 +67,11 @@ def build(destination: Path, *, breached: bool = False) -> Path:
         with server:
             company_id = _seed_company(conn, server.address)
             fetcher = Fetcher(
+                # The corpus is a loopback fixture server, so it needs the
+                # same named exemption every test uses (M1.68). It widens
+                # loopback alone: a redirect to 169.254.169.254 is refused
+                # here exactly as it is in production.
+                addresses=AddressPolicy.loopback_permitted(),
                 # The real floor. `audit.spacing` judges every host against
                 # 1.0s unless it stated a Crawl-delay, so a corpus built any
                 # faster would fail its own audit.

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from portal import cli, db, migrate, seeds
+from portal.addresses import AddressPolicy
 from tests import shopfixtures
 from tests.fixture_server import FixtureServer, Site
 
@@ -184,7 +185,10 @@ class TestFetchCli(SeedTestCase):
         from portal import fetch
         from portal.net import Fetcher, HostRateLimiter
 
-        fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+        fetcher = Fetcher(
+            addresses=AddressPolicy.loopback_permitted(),
+            limiter=HostRateLimiter.unthrottled(),
+        )
         self.addCleanup(fetcher.close)
         _run_id, results = fetch.run(
             conn,

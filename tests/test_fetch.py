@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from portal import db, fetch, migrate, net, sitemap
+from portal.addresses import AddressPolicy
 from portal.artifacts import ArtifactStore
 from portal.net import Fetcher, HostRateLimiter
 from tests import shopfixtures
@@ -40,7 +41,10 @@ class FetchTestCase(unittest.TestCase):
         self.addCleanup(self.conn.close)
         migrate.apply_pending(self.conn)
         self.artifacts = self.root / "artifacts"
-        self.fetcher = Fetcher(limiter=HostRateLimiter.unthrottled())
+        self.fetcher = Fetcher(
+            addresses=AddressPolicy.loopback_permitted(),
+            limiter=HostRateLimiter.unthrottled(),
+        )
         self.addCleanup(self.fetcher.close)
 
     def serve(self, build, address: str = "127.0.0.1") -> FixtureServer:
