@@ -34,7 +34,6 @@ from portal.net import (
     MAX_CRAWL_DELAY_SECONDS,
     Fetcher,
     Response,
-    RobotsExempt,
 )
 
 # A7b's N, imported rather than restated. The policy is one number and two
@@ -42,6 +41,7 @@ from portal.net import (
 # by a second expression that can disagree with the first.
 from portal.ruleset import PERSISTENT_FETCH
 from portal.score import PERSISTENT_RUNS
+from portal.sitepolicies import SitePolicies
 from portal.urls import (
     authority_of,
     default_base,
@@ -424,10 +424,10 @@ class FetchStage:
         # lead and this is a fact about one afternoon, so nothing is written to
         # `company` — the run simply produces no bodies for this shop, with the
         # reason on the result where an operator reading the run output sees it.
-        # Every later request is gated on `allowed()`, which an `unavailable`
-        # policy already refuses, so returning here is belt and braces; it is
-        # here so the shop is not billed 40 refusal rows per run for a state
-        # that is about our reading and not about its pages.
+        # Every later request is gated on `SitePolicies.allows`, which an
+        # `unavailable` policy already refuses, so returning here is belt and
+        # braces; it is here so the shop is not billed 40 refusal rows per run
+        # for a state that is about our reading and not about its pages.
         if policy.unavailable is not None:
             result.notes.append(f"{policy.unavailable} — nothing fetched for {domain}")
             self._flag_persistent_robots_failure(
@@ -445,95 +445,31 @@ class FetchStage:
         # authority we asked and the one that answered — the same, unless the
         # robots fetch was itself redirected within the site, in which case this
         # policy governs both and its Crawl-delay has to reach both too.
+        #
+        # The memo and the two policy questions live in `SitePolicies` (M1.67).
+        # The seeded fetch stays here because its failure modes are the
+        # company's and not an authority's: an unreadable one stops the run
+        # above, and a `Crawl-delay` over the cap on the seeded host excludes
+        # the company outright, which is a verdict `SitePolicies` may not take.
         seeded = {
             authority_of(base): base,
             authority_of(robots_response.url): robots_response.url,
         }
-        policies: dict[str, robots_mod.RobotsPolicy] = dict.fromkeys(seeded, policy)
+        site_policies = SitePolicies(
+            self.fetcher,
+            record_robots=lambda probe: result.artifacts.append(
+                self._record(company_id, domain, "robots", probe)
+            ),
+            crawl_delay_refusal=self._apply_crawl_delay,
+            note=result.notes.append,
+        )
+        for authority in seeded:
+            site_policies.seed(authority, policy)
         for url in seeded.values():
             if (reason := self._apply_crawl_delay(url, policy)) is not None:
                 self._exclude(company_id, reason)
                 result.excluded_reason = reason
                 return result
-
-        unfetchable: dict[str, str] = {}  # authority → why we will not fetch it
-
-        def policy_for(url: str) -> robots_mod.RobotsPolicy:
-            """The rules of the authority that answers for `url`, read on first
-            sight of that authority.
-
-            Keyed on authority rather than on the politeness key: apex and www
-            share a budget but not necessarily a robots.txt, so each is asked
-            for its own (§5.2 states this as two questions with two keys). The
-            lookup is memoised, so a chain that keeps landing on one origin
-            costs one robots.txt fetch.
-
-            **Fetching here, rather than only on a redirect hop, is M1.14's
-            doing.** Until anchor text could hand this stage a URL on a host
-            nothing had visited — `blog.zecplus.de` — every request was either
-            on the seeded authority or arrived through a hop, which loaded the
-            file itself. A first request to an unvisited authority used to fall
-            back to the seeded policy, which is `zecplus.de`'s file applied to
-            somebody else's origin: the one thing §5.2 says twice not to do.
-            """
-            authority = authority_of(url)
-            if authority not in policies:
-                probe = self.fetcher.get(
-                    f"{origin_of(url)}/robots.txt", hop_allowed=RobotsExempt
-                )
-                result.artifacts.append(
-                    self._record(company_id, domain, "robots", probe)
-                )
-                policies[authority] = robots_mod.for_response(probe)
-                # M1.59, the same tri-state one authority out. A blog host or a
-                # redirect target whose robots.txt 503s is `unfetchable` for the
-                # rest of this run — routed through the dict that already exists
-                # for `crawl_delay_too_high`, because both mean the same thing
-                # here: this authority is off limits and the reason is recorded.
-                # §5.2's rule that a blog host refusing us is a missing signal
-                # and never an exclusion holds unchanged.
-                if (why := policies[authority].unavailable) is not None:
-                    unfetchable[authority] = why
-                    result.notes.append(f"{authority} not fetched — {why}")
-                    return policies[authority]
-                refusal = self._apply_crawl_delay(url, policies[authority])
-                if refusal is not None:
-                    unfetchable[authority] = refusal
-                    result.notes.append(f"{authority} not fetched — {refusal}")
-            return policies[authority]
-
-        def hop_allowed(_from_url: str, to_url: str) -> bool:
-            """§5.2: "fetch and honour robots.txt before anything else" applies
-            to a redirect hop too, because the hop is itself a request.
-
-            Asked for **every** hop, not only those that change authority
-            (M1.12). A same-authority hop takes the fast path — its rules are
-            already in `policies` — and is then checked against them exactly
-            like any other target. That check is the whole fix: `/impressum`
-            being allowed says nothing about the `/policies/legal-notice` it
-            redirects to, and it was the unchecked same-host hop that fetched
-            two disallowed pages on the first crawl.
-            """
-            rules = policy_for(to_url)
-            if authority_of(to_url) in unfetchable:
-                return False
-            if rules.allows(to_url):
-                return True
-            result.notes.append(
-                f"redirect refused by robots.txt on {authority_of(to_url)}: {to_url}"
-            )
-            return False
-
-        def allowed(url: str) -> bool:
-            """The policy of the authority the URL is on, not the seeded one.
-
-            After a move is adopted (M1.18) every later request goes to a host
-            the seeded robots.txt says nothing about; checking `lampenflut.de`
-            URLs against `germanelectronic.de`'s rules would be applying the
-            wrong file.
-            """
-            rules = policy_for(url)
-            return authority_of(url) not in unfetchable and rules.allows(url)
 
         #: Every document this company yielded, by the URL asked for **and** the
         #: URL it landed on. `_write_sample_signal` resolves its citation
@@ -561,10 +497,10 @@ class FetchStage:
                 stored[record.url] = record
                 return record
 
-            if not allowed(url):
+            if not site_policies.allows(url):
                 keep(Response(url=url, error=robots_mod.disallowed_reason(url)))
                 return None
-            response = self.fetcher.get(url, hop_allowed=hop_allowed)
+            response = self.fetcher.get(url, hop_allowed=site_policies.hop_allowed)
             if response.ok and accept is not None and (why := accept(response)):
                 response = Response(url=url, status=response.status, error=why)
             keep(response)
