@@ -106,6 +106,148 @@ class ImpressumAuditTestCase(unittest.TestCase):
         self.assertEqual([i.artifact_id for i in inputs], [newest])
         self.assertEqual(skipped, [])
 
+    def test_a_sibling_origins_robots_does_not_govern_this_body(self) -> None:
+        """M1.61/M1.75 — `zecplus.de`, in miniature and with the polarity that
+        matters: the sibling's file is **permissive** and the body's own origin
+        is the one that forbids it.
+
+        Under the ratified "newest stored robots.txt for the company" the
+        permissive `blog.` file was newest and let the body through. Keyed on
+        the origin, `www.`'s own file decides, and it disallows.
+        """
+        company_id = self.company("zec.example")
+        self.artifact(
+            company_id,
+            "zec.example",
+            "robots",
+            ROBOTS_DENY_POLICIES,
+            url="https://www.zec.example/robots.txt",
+        )
+        # Newer, permissive, and from a different authority.
+        self.artifact(
+            company_id,
+            "zec.example",
+            "robots",
+            ROBOTS_ALLOW_ALL,
+            url="https://blog.zec.example/robots.txt",
+        )
+        self.artifact(
+            company_id,
+            "zec.example",
+            "impressum",
+            IMPRESSUM,
+            url="https://www.zec.example/policies/impressum",
+        )
+        inputs, skipped = impressum_audit.select_inputs(self.conn, self.root)
+        self.assertEqual(inputs, [])
+        self.assertEqual(
+            [s.reason for s in skipped], ["robots-disallowed body (M1.44)"]
+        )
+
+    def test_an_origin_with_no_robots_on_disk_is_not_verifiable(self) -> None:
+        """The `smoke2u.de` shape. The apex robots.txt is permissive and on
+        disk; the body is on `www.`, whose fetch a content-hash collapse
+        absorbed. The answer must be *not verifiable* — never *allowed*.
+
+        The reason string is checked because it is the deliverable: "we cannot
+        tell whose file this was" and "the shop stated no rules" send an
+        operator to different places, and the ratified code returned the second
+        for both.
+        """
+        company_id = self.company("smoke.example")
+        self.artifact(
+            company_id,
+            "smoke.example",
+            "robots",
+            ROBOTS_ALLOW_ALL,
+            url="https://smoke.example/robots.txt",
+        )
+        self.artifact(
+            company_id,
+            "smoke.example",
+            "impressum",
+            IMPRESSUM,
+            url="https://www.smoke.example/impressum",
+        )
+        inputs, skipped = impressum_audit.select_inputs(self.conn, self.root)
+        self.assertEqual(inputs, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("robots_unavailable", skipped[0].reason)
+        self.assertIn("www.smoke.example", skipped[0].reason)
+        self.assertIn("M1.75", skipped[0].reason)
+
+    def test_not_verifiable_is_distinguishable_from_no_rules_stated(self) -> None:
+        """Both allow-nothing and allow-everything are wrong answers to the
+        wrong question. These are the two states that must not collapse."""
+        stated = self.company("stated.example")
+        self.artifact(
+            stated,
+            "stated.example",
+            "robots",
+            "",  # a robots.txt that was read and states nothing
+            url="https://stated.example/robots.txt",
+        )
+        self.artifact(
+            stated,
+            "stated.example",
+            "impressum",
+            IMPRESSUM,
+            url="https://stated.example/impressum",
+        )
+        unknown = self.company("unknown.example")
+        self.artifact(
+            unknown,
+            "unknown.example",
+            "impressum",
+            IMPRESSUM,
+            url="https://unknown.example/impressum",
+        )
+        inputs, skipped = impressum_audit.select_inputs(self.conn, self.root)
+
+        # Read and empty: the shop declared nothing, and the page is measured.
+        self.assertEqual([i.domain for i in inputs], ["stated.example"])
+        # Nothing on disk for the origin: refused, and the reason says why.
+        self.assertEqual([s.domain for s in skipped], ["unknown.example"])
+        self.assertIn("robots_unavailable", skipped[0].reason)
+        self.assertNotIn("disallowed", skipped[0].reason)
+
+    def test_a_company_with_two_origins_gets_two_policies(self) -> None:
+        """The cache is keyed on the authority, not the company. A company
+        whose first-seen origin is permissive must not have that answer reused
+        for a second origin that forbids."""
+        company_id = self.company("two.example")
+        self.artifact(
+            company_id,
+            "two.example",
+            "robots",
+            ROBOTS_ALLOW_ALL,
+            url="https://two.example/robots.txt",
+        )
+        self.artifact(
+            company_id,
+            "two.example",
+            "robots",
+            ROBOTS_DENY_POLICIES,
+            url="https://shop.two.example/robots.txt",
+        )
+        allowed = self.artifact(
+            company_id,
+            "two.example",
+            "impressum",
+            IMPRESSUM,
+            url="https://two.example/policies/impressum",
+        )
+        # Newest, and disallowed by its own origin's file.
+        self.artifact(
+            company_id,
+            "two.example",
+            "impressum",
+            NEWER,
+            url="https://shop.two.example/policies/impressum",
+        )
+        inputs, _ = impressum_audit.select_inputs(self.conn, self.root)
+        self.assertEqual([i.artifact_id for i in inputs], [allowed])
+
     def test_an_impressum_that_is_the_homepage_is_excluded(self) -> None:
         """M1.43. The guard is structural — the hash, not the URL — so it catches
         a mis-filed page however it was mis-filed."""

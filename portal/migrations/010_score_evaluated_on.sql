@@ -1,0 +1,41 @@
+-- 010 — `score.evaluated_on`: the date the rules were actually run against.
+--
+-- **THE NUMBER 010 HAS BEEN USED ONCE BEFORE, FOR A DIFFERENT AND
+-- UNRECOVERABLE FILE.** The interrupted M5 work (stashed 2026-08-17 at
+-- `6a5e266`, lost with its container — §10.4b) carried a `010_phase2_writers.sql`
+-- creating `llm_batch_request`, a table with no writer and no registration in
+-- the spec. That file no longer exists anywhere and cannot be recovered. This
+-- is a *different* migration 010, and it is recorded here so that a later
+-- reference to "migration 010" in the Unit 5 report or in §10.4b is not matched
+-- to this file. Nothing here relates to batching.
+--
+-- **M1.74, closing M1.66.** `evaluate` is a function of `(signals, today)`, so a
+-- band has no meaning without the date it was evaluated against. `score` had one
+-- temporal column, `computed_at`, written from `utc_now()` inside `_persist`
+-- while `today` came from `ScoreStage.today` — two expressions for what is
+-- assumed to be one fact, which is M1.42's shape. Measured before it was fixed:
+-- a stage given `today=date(2020, 3, 7)` wrote `computed_at=2026-08-18T21:17:27Z`
+-- and recorded 2020-03-07 nowhere at all. A run straddling midnight UTC produces
+-- the same divergence with nothing injected.
+--
+-- **NULLABLE, AND NOT BACKFILLED — a ruling, not an omission.** The value could
+-- be inferred for existing rows as `date(computed_at)`, and the inference would
+-- be right almost always, because nothing injects `today` outside tests. It is
+-- refused because it would be wrong **exactly at the boundary this column exists
+-- for**: a run crossing midnight UTC is the one case where the two genuinely name
+-- different days. A fabricated measurement that is usually right is worse than a
+-- NULL, because a NULL can be seen and a plausible wrong date cannot.
+--
+-- Direction of error: NULL says *this row's evaluation date was never recorded*,
+-- which is true, and sends a reader to re-score — free, since §4 makes scoring
+-- recomputable at zero API cost. The rejected direction asserts a day nobody
+-- observed and is unfalsifiable afterwards. §10.3's instinct and A7's.
+--
+-- `score_component` gets no equivalent column: `_persist` deletes and reinserts
+-- every component alongside its parent row, so a component's evaluation date is
+-- its parent's, and a second copy would be the defect this migration fixes.
+
+ALTER TABLE score ADD COLUMN evaluated_on TEXT;
+
+-- Existing rows keep `evaluated_on IS NULL` deliberately. There is no UPDATE
+-- here, and its absence is the point of the header above.

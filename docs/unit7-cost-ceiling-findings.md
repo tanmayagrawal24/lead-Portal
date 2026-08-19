@@ -354,9 +354,18 @@ the process error in this unit.
 - **M3 — the repository is still PUBLIC.** Fourth unit to record it. The
   operator's to make; no tool in this session can perform it.
 - **The first external audit's "LLM-generated / hallucination signals" section
-  is still missing — missing, not empty — and that audit is not closed. THREE
-  units have now passed it over: Unit 5, Unit 6 and Unit 7.** It belongs with
-  M5, the stage that generates the content the section is about. Not closed here.
+  is still missing — missing, not empty — and that audit is not closed.** It
+  belongs with M5, the stage that generates the content the section is about.
+  Not closed here.
+
+  > **Corrected by Unit 8 (M1.73).** This line originally read *"THREE units have
+  > now passed it over: Unit 5, Unit 6 and Unit 7"*. Both halves were wrong: the
+  > membership omitted **Unit 4**, which also passed it over, and the count was
+  > recounted on a definition different from the one Units 5 and 6 had used. The
+  > count is no longer stated here. **It is defined once, in the spec's Unit 2a
+  > amendment, as a named list with the grep that derives it** — currently Units
+  > 4, 5, 6 and 7, four. Restating the number in a report is the mechanism that
+  > broke it.
 - **M1.72** — control 4's two writes must commit together. Specified, not built;
   needs M5's caller.
 - **M1.66** (score-date pinning) and **M1.61** (origin-keyed robots lookup)
