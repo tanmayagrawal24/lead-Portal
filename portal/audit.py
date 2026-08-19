@@ -23,7 +23,9 @@ unrestricted policy, so the pages that followed were spaced against the
 *default* interval and this audit passed — the instrument built to verify
 politeness could not see the one failure that makes politeness wrong, because
 the failure changes which pages may be fetched and not how fast they arrive.
-`robots_coverage` reads the artifact table for that, and `report` fails on it
+`robots_coverage` reads the artifact table for that, and `report` fails on it.
+`unverifiable_origins` reports the class it cannot see (M1.75): an origin with
+stored bodies and no robots.txt filed under it at all
 the way it already fails on a spacing breach (M1.19's instinct: a rule should
 be enforceable, not stated).
 """
@@ -37,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from portal.net import MAX_CONCURRENT_HOSTS
+from portal.urls import authority_of
 
 
 @dataclass(frozen=True)
@@ -128,7 +131,10 @@ class RobotsArtifact:
     status: int | None
     has_body: bool
     error: str | None
-    bodies_for_company: int
+    #: Bodies stored on **this row's own authority** (M1.75). Company-wide was
+    #: the wrong denominator: it counted pages a sibling origin's robots.txt
+    #: governs, which is the same key error M1.61 found in `impressum_audit`.
+    bodies_for_origin: int
 
     @property
     def readable(self) -> bool:
@@ -147,7 +153,7 @@ class RobotsArtifact:
 
     @property
     def breach(self) -> bool:
-        return self.unavailable and self.bodies_for_company > 0
+        return self.unavailable and self.bodies_for_origin > 0
 
 
 def robots_coverage(conn: sqlite3.Connection) -> list[RobotsArtifact]:
@@ -161,13 +167,11 @@ def robots_coverage(conn: sqlite3.Connection) -> list[RobotsArtifact]:
     rows = conn.execute(
         """
         SELECT c.domain               AS domain,
+               a.company_id           AS company_id,
                a.url                  AS url,
                a.http_status          AS status,
                a.content_hash IS NOT NULL AS has_body,
-               a.error                AS error,
-               (SELECT count(*) FROM artifact b
-                 WHERE b.company_id = a.company_id AND b.kind <> 'robots'
-                   AND b.content_hash IS NOT NULL) AS bodies
+               a.error                AS error
         FROM artifact a JOIN company c ON c.id = a.company_id
         WHERE a.kind = 'robots'
           AND NOT (a.http_status = 200 AND a.content_hash IS NOT NULL)
@@ -181,9 +185,92 @@ def robots_coverage(conn: sqlite3.Connection) -> list[RobotsArtifact]:
             status=row["status"],
             has_body=bool(row["has_body"]),
             error=row["error"],
-            bodies_for_company=int(row["bodies"]),
+            bodies_for_origin=len(
+                _body_urls(conn, int(row["company_id"]), authority_of(str(row["url"])))
+            ),
         )
         for row in rows
+    ]
+
+
+def _body_urls(conn: sqlite3.Connection, company_id: int, authority: str) -> list[str]:
+    """Stored body URLs for one company on one authority.
+
+    Filtered in Python on `authority_of` rather than by SQL on `url`, for the
+    reason `impressum_audit` gives: it is the project's one expression for
+    "whose robots.txt governs this", and a `LIKE` pattern beside it would be a
+    second one (M1.42).
+    """
+    return [
+        str(row["url"])
+        for row in conn.execute(
+            "SELECT url FROM artifact WHERE company_id = ? AND kind <> 'robots' "
+            "AND content_hash IS NOT NULL",
+            (company_id,),
+        )
+        if authority_of(str(row["url"])) == authority
+    ]
+
+
+@dataclass(frozen=True)
+class UnverifiableOrigin:
+    """An authority with stored bodies and **no robots.txt row of its own at all**.
+
+    The class `robots_coverage` cannot see (M1.75). That function reports stored
+    robots rows that failed; this one reports an origin with no row at all — and
+    on the 17-August corpus that was the larger finding: 26 bodies across
+    `www.smoke2u.de` and `www.propellerdiscount.de`, neither of which appears in
+    the table, while `robots_coverage` returned nothing for either.
+
+    **"No row" is not "never fetched."** Both of those hosts *were* fetched, 200,
+    three times each; they served bytes identical to their apex sibling and
+    `uq_artifact_identity` collapsed the pair into one row keyed on the apex. So
+    what this reports is exactly what it says: the table cannot establish whose
+    file governed these bodies. Only a re-fetch can.
+    """
+
+    domain: str
+    authority: str
+    bodies: int
+
+
+def unverifiable_origins(conn: sqlite3.Connection) -> list[UnverifiableOrigin]:
+    """Every authority carrying stored bodies with no robots artifact of its own.
+
+    This is the audit-side statement of the same rule `impressum_audit._policy`
+    applies per body: where the origin cannot be established the answer is *not
+    verifiable*, never *allowed*. Reported separately from `robots_coverage`'s
+    two classes because it sends a person somewhere else — not "this host failed
+    us" but "we never filed this host's rules under this host".
+    """
+    # Any robots row at all covers its origin, whatever it says. A 200 was read;
+    # a 404 is RFC 9309 §2.3.1.2's "no rules stated"; a 503 is unread and fails —
+    # but it fails as `robots_coverage`'s *unavailable* class, which already
+    # reports it. Requiring a 200 here would redden every 404 shop and double-
+    # report every 5xx, and a check that cries wolf is one nobody reads. What is
+    # left for this function is the case with no row of any kind.
+    covered: dict[int, set[str]] = {}
+    for row in conn.execute(
+        "SELECT company_id, url FROM artifact WHERE kind = 'robots'"
+    ):
+        covered.setdefault(int(row["company_id"]), set()).add(
+            authority_of(str(row["url"]))
+        )
+
+    counts: dict[tuple[str, str], int] = {}
+    for row in conn.execute(
+        "SELECT c.domain AS domain, a.company_id AS company_id, a.url AS url "
+        "FROM artifact a JOIN company c ON c.id = a.company_id "
+        "WHERE a.kind <> 'robots' AND a.content_hash IS NOT NULL"
+    ):
+        authority = authority_of(str(row["url"]))
+        if authority in covered.get(int(row["company_id"]), set()):
+            continue
+        key = (str(row["domain"]), authority)
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        UnverifiableOrigin(domain=domain, authority=authority, bodies=bodies)
+        for (domain, authority), bodies in sorted(counts.items())
     ]
 
 
@@ -206,6 +293,7 @@ def robots_report(conn: sqlite3.Connection) -> tuple[str, bool]:
     findings = robots_coverage(conn)
     unavailable = [f for f in findings if f.unavailable]
     absent = [f for f in findings if not f.unavailable]
+    unverifiable = unverifiable_origins(conn)
 
     lines = ["", f"robots.txt coverage: {len(findings)} stored artifacts are not 200"]
     if not findings:
@@ -215,18 +303,24 @@ def robots_report(conn: sqlite3.Connection) -> tuple[str, bool]:
     for finding in unavailable:
         lines.append(
             f"  *** UNREAD *** {finding.domain:28} HTTP {finding.status} "
-            f"{finding.error or ''} — {finding.bodies_for_company} bodies stored "
-            f"for this company{' (BREACH)' if finding.breach else ''}"
+            f"{finding.error or ''} — {finding.bodies_for_origin} bodies stored "
+            f"on this origin{' (BREACH)' if finding.breach else ''}"
         )
     for finding in absent:
         lines.append(
             f"  no file       {finding.domain:28} HTTP {finding.status} "
             f"{finding.error or ''} — RFC 9309 §2.3.1.2, not a breach"
         )
-    ok = not unavailable
+    for origin in unverifiable:
+        lines.append(
+            f"  NOT VERIFIABLE {origin.authority:27} no robots.txt stored for this "
+            f"origin — {origin.bodies} bodies under rules we cannot show were read"
+        )
+    ok = not unavailable and not unverifiable
     lines.append(
         f"§5.2 robots: {'HELD' if ok else 'BREACHED'} — "
-        f"{len(unavailable)} unread, {len(absent)} stating no file"
+        f"{len(unavailable)} unread, {len(unverifiable)} not verifiable, "
+        f"{len(absent)} stating no file"
     )
     return "\n".join(lines), ok
 

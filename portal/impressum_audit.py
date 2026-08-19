@@ -22,7 +22,12 @@ it. A second expression describing what the first one does is the defect class
 this project has now found five times (M1.40, M1.42, M1.43, M1.44). The rule it
 implements is A2 §7 as amended: the newest 200-with-body `impressum` artifact,
 excluding any whose content hash matches that company's homepage (M1.43) and any
-whose URL that company's newest stored robots.txt disallows (M1.44).
+whose URL the robots.txt **served by that body's own origin** disallows (M1.44 as
+re-keyed by M1.75). "That company's newest robots.txt" was the ratified wording
+and it is what produced `zecplus.de`'s vacuity: a permissive 173-byte file from
+`blog.zecplus.de` applied to bodies on `www.zecplus.de`. Where no robots.txt for
+a body's own origin is on disk the policy is `unavailable`, which allows
+nothing — see `_policy`.
 
 **These are pattern-presence counts, not extraction accuracy** (§10.4). A
 USt-IdNr shape on the page may belong to a payment provider; an e-mail may be in
@@ -39,6 +44,7 @@ from pathlib import Path
 
 from portal import robots as robots_mod
 from portal.parsers import provider_block, visible_text
+from portal.urls import authority_of
 
 # Named separately because `plz_ort_values` reads it directly: A2 item 10's
 # accuracy check is about this one candidate.
@@ -108,6 +114,12 @@ OBSERVED_2026_08_16: dict[str, int] = {
     "Geschaeftsfuehrer label": 5,
     "PLZ + Ort shape": 8,
 }
+#: The 2026-08-16 baseline, kept at its measured value. **It predates M1.75 and
+#: the current corpus yields 9, not 11**: `smoke2u.de` and `propellerdiscount.de`
+#: were measured under their apex sibling's robots.txt and are now refused as not
+#: verifiable. The number is not moved to match, because it is a record of what
+#: was observed on a date and the divergence is the finding — the report prints
+#: `<-- was n/11` and an operator should see it.
 OBSERVED_PAGES = 11
 
 # Newest 200-with-body impressum artifact per company, minus the homepage-hash
@@ -128,11 +140,15 @@ WHERE a.kind = 'impressum'
 ORDER BY c.domain, a.id DESC
 """
 
+# Every readable robots.txt the company has, newest first. The origin match is
+# applied in Python because `authority_of` is the project's single expression for
+# it (`urls.authority_of`, and `fetch.py` filters the same way); re-deriving it
+# in SQL would be a second expression for one fact, which is M1.42's shape.
 _ROBOTS_SQL = """
-SELECT body_path FROM artifact
+SELECT url, body_path FROM artifact
 WHERE company_id = ? AND kind = 'robots' AND http_status = 200
   AND body_path IS NOT NULL
-ORDER BY id DESC LIMIT 1
+ORDER BY id DESC
 """
 
 
@@ -161,13 +177,41 @@ class Audit:
     in_block: dict[str, int]  # pattern -> pages where it appears in the block
 
 
-def _policy(conn: sqlite3.Connection, company_id: int, root: Path):
-    row = conn.execute(_ROBOTS_SQL, (company_id,)).fetchone()
-    if row is None:
-        return None
-    return robots_mod.parse(
-        (root / row["body_path"]).read_text(encoding="utf-8", errors="replace")
-    )
+def _policy(
+    conn: sqlite3.Connection, company_id: int, url: str, root: Path
+) -> robots_mod.RobotsPolicy:
+    """The robots.txt **served by `url`'s own origin**, or a policy that allows
+    nothing because we cannot tell whose file governed it (M1.75).
+
+    Never returns None, and never falls back to a sibling origin. `authority_of`
+    keys the match, so `www.zecplus.de` and `blog.zecplus.de` are separate
+    authorities that do not stand in for one another — which is RFC 9309's rule
+    and was the whole of M1.61.
+
+    The two negative outcomes are different objects and must stay that way:
+
+    * `unrestricted` — a robots.txt for this origin was read and states no rules.
+      The shop declared nothing, and everything is allowed.
+    * `unavailable` — **no robots.txt for this origin is on disk.** We cannot
+      establish whose file this was. Nothing is allowed, and the reason names the
+      authority so an operator knows which host to go and fetch.
+
+    Collapsing those two would restore exactly the vacuity this closes: the
+    permissive reading is the one that lets a body through under a policy nobody
+    read (H1), and it is the reading `None` used to produce.
+    """
+    authority = authority_of(url)
+    for row in conn.execute(_ROBOTS_SQL, (company_id,)):
+        if authority_of(str(row["url"])) != authority:
+            continue
+        return robots_mod.parse(
+            (root / row["body_path"]).read_text(encoding="utf-8", errors="replace")
+        )
+    # M1.75. A content-hash collapse can absorb this origin's fetch into a
+    # sibling's row, so "no row" does not mean "never fetched" — it means the
+    # table cannot say, and only a re-fetch can. Over-reporting here costs a
+    # company a run and says why; under-reporting it is H1.
+    return robots_mod.unavailable(f"no robots.txt stored for origin {authority}")
 
 
 def select_inputs(
@@ -181,17 +225,27 @@ def select_inputs(
     """
     chosen: dict[int, Input] = {}
     rejected: dict[int, str] = {}
-    policies: dict[int, object] = {}
+    policies: dict[tuple[int, str], robots_mod.RobotsPolicy] = {}
     for row in conn.execute(_CANDIDATE_SQL):
         company_id = int(row["company_id"])
         if company_id in chosen:
             continue  # ORDER BY a.id DESC — the first survivor is the newest
-        if company_id not in policies:
-            policies[company_id] = _policy(conn, company_id, root)
-        policy = policies[company_id]
-        if policy is not None and not policy.allows(row["url"]):
-            # M1.44: fetched before the redirect guard existed, still on disk.
-            rejected.setdefault(company_id, "robots-disallowed body (M1.44)")
+        # Keyed on the body's own origin (M1.75), so the cache key is the
+        # authority and not the company — a company with two origins has two
+        # policies and they do not substitute for each other.
+        url = str(row["url"])
+        key = (company_id, authority_of(url))
+        if key not in policies:
+            policies[key] = _policy(conn, company_id, url, root)
+        policy = policies[key]
+        if not policy.allows(url):
+            if policy.unavailable is not None:
+                # Not "this was disallowed" — "we cannot tell what governed it".
+                # A different finding, and it sends a person somewhere else.
+                rejected.setdefault(company_id, f"{policy.unavailable} (M1.75)")
+            else:
+                # M1.44: fetched before the redirect guard existed, still on disk.
+                rejected.setdefault(company_id, "robots-disallowed body (M1.44)")
             continue
         chosen[company_id] = Input(
             company_id=company_id,
@@ -244,7 +298,8 @@ def report(result: Audit) -> str:
         f"Impressum Phase-1 candidates — {n} page(s), one per company",
         "selection: newest 200-with-body impressum artifact, excluding any whose",
         "content hash matches that company's homepage (M1.43) and any whose URL",
-        "its newest stored robots.txt disallows (M1.44).",
+        "the robots.txt served by its own origin disallows (M1.44/M1.75).",
+        "An origin with no robots.txt on disk is NOT VERIFIABLE, not allowed.",
         "",
         "PATTERN PRESENCE, NOT EXTRACTION ACCURACY (§10.4).",
         "",

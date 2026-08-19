@@ -622,6 +622,78 @@ class TestRobotsCoverageAudit(unittest.TestCase):
         self.assertIn("*** UNREAD ***", text)
         self.assertIn("BREACH", text)
 
+    # ---- M1.75: the origin key -----------------------------------------
+
+    def test_bodies_on_an_origin_with_no_robots_row_are_not_verifiable(self) -> None:
+        """M1.61's second finding, and the one `robots_coverage` could not see.
+
+        On the 17-August corpus this was 26 bodies on `www.smoke2u.de` and
+        `www.propellerdiscount.de`: both were fetched 200, both served bytes
+        identical to their apex sibling, and `uq_artifact_identity` collapsed
+        the pair into a single row keyed on the apex. The audit reported
+        nothing, because nothing had failed — the row was a healthy 200.
+        """
+        self._artifact("robots", "https://muster.example/robots.txt", 200, "aaa")
+        self._artifact("impressum", "https://www.muster.example/impressum", 200, "bbb")
+
+        # Nothing failed, so the class that reports failures stays empty.
+        self.assertEqual(audit.robots_coverage(self.conn), [])
+
+        origins = audit.unverifiable_origins(self.conn)
+        self.assertEqual([o.authority for o in origins], ["www.muster.example"])
+        self.assertEqual(origins[0].bodies, 1)
+
+        text, ok = audit.robots_report(self.conn)
+        self.assertFalse(ok, text)
+        self.assertIn("NOT VERIFIABLE", text)
+        self.assertIn("www.muster.example", text)
+
+    def test_apex_and_www_are_separate_authorities(self) -> None:
+        """RFC 9309 keys robots.txt to the origin. A file served by the apex
+        does not speak for `www.`, which is the whole of M1.61 — and is why
+        this cannot be settled by a suffix match."""
+        self._artifact("robots", "https://muster.example/robots.txt", 200, "aaa")
+        self._artifact("robots", "https://www.muster.example/robots.txt", 200, "ccc")
+        self._artifact("impressum", "https://www.muster.example/impressum", 200, "bbb")
+        self.assertEqual(audit.unverifiable_origins(self.conn), [])
+        _, ok = audit.robots_report(self.conn)
+        self.assertTrue(ok)
+
+    def test_a_404_covers_its_origin_but_a_sibling_does_not(self) -> None:
+        """The two negatives are different. A 404 is RFC 9309 §2.3.1.2 — the
+        shop stated no rules, and that origin is answered for. A sibling's file
+        answers for nothing, however permissive it is."""
+        self._artifact(
+            "robots", "https://muster.example/robots.txt", 404, None, "http_404"
+        )
+        self._artifact("impressum", "https://muster.example/impressum", 200, "bbb")
+        self.assertEqual(audit.unverifiable_origins(self.conn), [])
+
+        # Same company, a body on a sibling origin the 404 does not answer for.
+        self._artifact("blog_index", "https://shop.muster.example/blog", 200, "ddd")
+        self.assertEqual(
+            [o.authority for o in audit.unverifiable_origins(self.conn)],
+            ["shop.muster.example"],
+        )
+
+    def test_the_breach_denominator_is_the_origin_not_the_company(self) -> None:
+        """`audit.py` joined `b.company_id = a.company_id`, so a 503 on one
+        origin counted bodies a *different* origin's robots.txt governs. The
+        row is still a breach here — but on its own two bodies, not on four."""
+        self._artifact(
+            "robots", "https://muster.example/robots.txt", 503, None, "http_503"
+        )
+        self._artifact("impressum", "https://muster.example/impressum", 200, "b1")
+        self._artifact("homepage", "https://muster.example/", 200, "b2")
+        self._artifact("robots", "https://blog.muster.example/robots.txt", 200, "ccc")
+        self._artifact("blog_index", "https://blog.muster.example/blog", 200, "b3")
+        self._artifact("product_page", "https://blog.muster.example/p", 200, "b4")
+
+        findings = audit.robots_coverage(self.conn)
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0].breach)
+        self.assertEqual(findings[0].bodies_for_origin, 2)
+
     def test_a_429_and_a_transport_failure_both_fail(self) -> None:
         for status, error in ((429, "http_429"), (None, "ConnectTimeout: x")):
             with self.subTest(status=status):
