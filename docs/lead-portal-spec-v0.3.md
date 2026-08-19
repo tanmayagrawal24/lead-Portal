@@ -257,11 +257,12 @@ Remaining findings (A1–A4, B1, B3.2–B3.3, B5–B7, C1–C4) are still open a
 > docs/unit5-portability-and-ci-findings.md
 > docs/unit6-address-guard-findings.md
 > docs/unit7-cost-ceiling-findings.md
+> docs/unit8-m5-prerequisites-findings.md
 > ```
 >
 > It matches the **section's title**, not the word *hallucination*, and that is deliberate: **M5's report will discuss hallucination signals substantively**, because that is what the missing section is about, and a looser grep would enrol it as having passed the section over while it was closing it. The optional space accommodates Unit 7's spelling (`LLM-generated / hallucination`) against Units 4–6's (`LLM-generated/hallucination`). Verified to return exactly one match in each of the four files and none in `unit0`.
 >
-> **Members, as of Unit 8 (2026-08-18): Unit 4, Unit 5, Unit 6, Unit 7 — four.**
+> **Members, as of Unit 8 (2026-08-19): Unit 4, Unit 5, Unit 6, Unit 7, Unit 8 — five.** Unit 8 added itself by re-running the grep above and confirming the existing four first, which is what the rule below requires; the number was never computed as "four plus one".
 >
 > **To extend:** add your unit to this list when your own findings document records the section as outstanding, having first re-run the grep above and confirmed the existing membership. A unit's `## Still open` section should **point here** rather than restate a number, because restating it is the mechanism that broke it.
 
