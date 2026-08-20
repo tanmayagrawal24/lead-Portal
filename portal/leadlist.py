@@ -402,7 +402,24 @@ class LeadList:
         """The signal behind each key, from the same authoritative run
         `company_profile` reads — so the evidence shown under a component is the
         evidence the rule was actually evaluated against, not a later or a
-        partial observation (M1.39)."""
+        partial observation (M1.39).
+
+        **It differs from the view in exactly one way, deliberately: there is no
+        `confidence` predicate here** (migration 012, M1.79). The view drops
+        `confidence = 0` because scoring must not read a value the tool verified
+        and rejected. §9 must still *show* it — that is what makes the rejection
+        visible rather than silent, and A4's whole direction-of-error argument
+        rests on the operator being able to see it. Adding the filter here would
+        close the loop the filter was designed to leave open.
+
+        **That this is a second expression for the view's resolution is a known
+        cost, recorded rather than hidden.** The CTEs below are a hand-copy of
+        `company_profile`'s, and a hand-copy drifts — this one already has, in
+        the one place it is supposed to. Parsing the view's own SQL is what
+        `_profile_columns` does above for a different question; doing it here
+        would mean parsing a query in order to *remove* a clause from it, which
+        is worse. Named so the next reader knows the difference is a decision.
+        """
         rows = self.conn.execute("""
             WITH observed AS (
                 SELECT s.*, r.stage, r.finished_at, r.aborted_reason

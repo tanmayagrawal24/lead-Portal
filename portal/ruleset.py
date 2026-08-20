@@ -118,6 +118,19 @@ class Rule:
     reads: tuple[str, ...]
     phase2_reachable: bool
     evaluate: Callable[[Profile, date], Outcome]
+    #: *Has Phase 2 already answered this, for **this** company?* — a different
+    #: question from `phase2_reachable`'s *could it, for anyone?*, and the one
+    #: §5.4's bound needs (M1.82). Required on every Phase-2-reachable rule and
+    #: refused on every other; `assert_declared` enforces both directions.
+    #:
+    #: **Deliberately not derived from outcomes.** `evaluate` records no
+    #: component at all for a rule that DECLINES, and `assert_declared` refuses
+    #: a rule worth zero, so `score_component` holds fired rules and abstentions
+    #: and nothing else. A Phase-2 `false` — the commonest outcome, and exactly
+    #: the one that should tighten the bound — is a decline, and would be
+    #: invisible to any outcome-based reading and indistinguishable from *never
+    #: evaluated*.
+    phase2_input_settled: Callable[[Profile], bool] | None = None
     #: Ladder membership (§6.2). Rules sharing a chain are evaluated in
     #: declaration order and the first that does not decline stops the chain.
     chain: str | None = None
@@ -152,6 +165,66 @@ def _day(profile: Profile, key: str) -> date | None:
 def _dates(profile: Profile, key: str) -> list[date]:
     raw = _text(profile, key)
     return [date.fromisoformat(part) for part in raw.split(",") if part]
+
+
+# ── §5.4's settledness predicates (M1.82) ───────────────────────────────
+#
+# These read A2's **stage facts** — `llm.homepage_extracted` and
+# `llm.impressum_extracted`, written whenever the extraction ran whatever it
+# returned — and nothing else can answer what they answer. Every A7 guard in
+# this project works by declining to write, so without a positive fact beside
+# the silence there is no way to tell *the model read the page and could not
+# tell* from *Phase 2 never ran here*, and those two states must move the bound
+# in opposite ways.
+
+
+def _homepage_read(profile: Profile) -> bool:
+    """`qual.own_brand`'s only input is the homepage extraction."""
+    return _num(profile, "homepage_extracted") == 1
+
+
+def _impressum_read(profile: Profile) -> bool:
+    return _num(profile, "impressum_extracted") == 1
+
+
+def _owner_operated_settled(profile: Profile) -> bool:
+    """Disjuncts 2 and 3 are Phase 2's, and they read *different pages* — the
+    Impressum for `gf_count`, the homepage for `owner_named`. The rule is
+    settled only when both have been read: one page alone leaves a disjunct
+    that could still award the +15, and dropping it from the bound then would
+    stop a company on points that are genuinely still available.
+    """
+    return _impressum_read(profile) and _homepage_read(profile)
+
+
+def _never_settled(_profile: Profile) -> bool:
+    """`opp.ai_invisible`'s input is M6's, not M5's. Declared explicitly rather
+    than left off, because `assert_declared` refuses a Phase-2-reachable rule
+    with no declaration and *"M6 has not run"* is a real answer to the question
+    the field asks — not an omission. Revisit when M6 writes `ai.checked_at`.
+    """
+    return False
+
+
+def _slow_site_settled(profile: Profile) -> bool:
+    """§5.5a's PageSpeed measurement is a number or it is nothing: there is no
+    *ran and could not tell* state, so a written score settles the rule and an
+    absent one does not. It needs no stage fact of its own — unlike the two
+    booleans, where the value and the fact of having looked are separable.
+    """
+    return _num(profile, "lighthouse_perf") is not None
+
+
+def _has_agency_settled(profile: Profile) -> bool:
+    """`neg.has_agency` contributes `max(0, -20) = 0` to the bound, so this can
+    never change an admission. Declared anyway, because `assert_declared`
+    requires it of every Phase-2-reachable rule and an exemption for "it does
+    not matter here" is how the next −20 rule slips through undeclared.
+
+    It reads the homepage fact rather than `agency.footer_credit_llm`, because
+    M1.77 gives that key no reader — including this one.
+    """
+    return _homepage_read(profile)
 
 
 # ── §6.1 qualification ──────────────────────────────────────────────────
@@ -192,9 +265,21 @@ def _owner_operated(profile: Profile, _today: date) -> Outcome:
             f"Das Impressum nennt {named} – eine überschaubare "
             "Führungsstruktur, in der Entscheidungen kurz sind."
         )
-    if _num(profile, "owner_named") == 1:
+    named = _num(profile, "owner_named")
+    if named == 1:
         return fires(
             "Die Inhaberin bzw. der Inhaber ist auf der Website namentlich genannt."
+        )
+    # Disjunct 3, three-state (M1.81). Reached ONLY when disjuncts 1 and 2 have
+    # both declined — a company that already won its +15 on `legal_form` or
+    # `gf_count` has nothing to abstain about, and flagging it would be a queue
+    # item with no action behind it.
+    if named is None and _homepage_read(profile):
+        return abstains(
+            "Nicht bewertbar: Die Startseite wurde ausgewertet, ob dort eine "
+            "Inhaberin oder ein Inhaber namentlich genannt ist, ließ sich "
+            "daraus aber nicht bestimmen.",
+            review_reason="owner_named_undetermined",
         )
     return declines()
 
@@ -209,10 +294,52 @@ def _product_depth(profile: Profile, _today: date) -> Outcome:
     )
 
 
-def _own_brand(_profile: Profile, _today: date) -> Outcome:
-    # Phase 2 only: the judgement needs the LLM extraction (§5.5b). It never
-    # fires in Phase 1 and its +10 therefore stays in `remaining_upside`.
-    return declines()
+def _own_brand(profile: Profile, _today: date) -> Outcome:
+    """§6.1's +10, in three states rather than two (M1.81).
+
+    Until M1.76 this returned `declines()` unconditionally with `reads=()`, and
+    the reason was not that the answer is no — **no signal key existed to
+    read**. A2 ruled the mapping on 2026-08-16 and the ruling lived in a
+    proposal document; `brand.own_brand` and its view column arrive with
+    migration 011.
+
+    The third state is the one that needed the ruling. §5.5b instructs the model
+    to return `null` for a field it cannot find, and a `null` after the
+    extraction has run is A7's shape exactly: a measurement exists, it cannot
+    carry the rule, so the rule fires in neither direction and a person is told.
+    Collapsing it to `false` would read *unverified* as *absent* on a rule that
+    awards points; collapsing it to a decline would leave the company showing
+    nothing, because a decline records no component at all.
+
+    **Direction: the abstention errs too low** — a withheld award, which the
+    queue repairs — so it blocks nothing (migration 013). It is the *unverified
+    value* that errs high, and §6.1's verification gate is what stops that value
+    ever reaching a score.
+    """
+    if not _homepage_read(profile):
+        # Phase 2's turn has not come. A rule whose turn has not come has not
+        # abstained, and abstaining here would put "Phase 2 has not run yet" in
+        # the review queue for every company in the corpus — §6.4's
+        # "a queue that refills itself stops being read", manufactured.
+        return declines()
+    own_brand = _num(profile, "own_brand")
+    if own_brand is None:
+        # Reached two ways: the model returned `null`, or it returned a boolean
+        # whose `_evidence` span failed verification and migration 012's
+        # confidence filter removed the row. One reason for both, deliberately —
+        # they send a person to the same page to answer the same question.
+        return abstains(
+            "Nicht bewertbar: Die Startseite wurde ausgewertet, ob der Shop "
+            "eigene Marken führt oder ausschließlich weiterverkauft, ließ sich "
+            "daraus aber nicht bestimmen.",
+            review_reason="own_brand_undetermined",
+        )
+    if own_brand != 1:
+        return declines()
+    return fires(
+        "Der Shop führt eigene Marken statt reiner Handelsware – ein "
+        "Sortiment, über das sich eigenständig Inhalte aufbauen lassen."
+    )
 
 
 def _own_domain_shop(profile: Profile, _today: date) -> Outcome:
@@ -488,14 +615,31 @@ RULES: tuple[Rule, ...] = (
         "qual.owner_operated",
         15,
         "6.1",
-        ("legal_form", "gf_count", "owner_named"),
+        (
+            "legal_form",
+            "gf_count",
+            "owner_named",
+            "impressum_extracted",
+            "homepage_extracted",
+        ),
         True,
         _owner_operated,
+        _owner_operated_settled,
     ),
     Rule(
         "qual.product_depth", 10, "6.1", ("product_url_count",), False, _product_depth
     ),
-    Rule("qual.own_brand", 10, "6.1", (), True, _own_brand),
+    # `reads=()` and `assert_declared`'s named exemption for it are BOTH gone
+    # (M1.76): the exemption existed only because A2's key did not.
+    Rule(
+        "qual.own_brand",
+        10,
+        "6.1",
+        ("own_brand", "homepage_extracted"),
+        True,
+        _own_brand,
+        _homepage_read,
+    ),
     Rule(
         "qual.own_domain_shop",
         5,
@@ -573,11 +717,28 @@ RULES: tuple[Rule, ...] = (
         ("ai_queries_checked", "ai_brand_mentions"),
         True,
         _ai_invisible,
+        _never_settled,
     ),
-    Rule("opp.slow_site", 10, "6.2", ("lighthouse_perf",), True, _slow_site),
+    Rule(
+        "opp.slow_site",
+        10,
+        "6.2",
+        ("lighthouse_perf",),
+        True,
+        _slow_site,
+        _slow_site_settled,
+    ),
     Rule("opp.de_only", 5, "6.2", ("hreflang_count",), False, _de_only),
     # §6.3
-    Rule("neg.has_agency", -20, "6.3", ("agency_credit",), True, _has_agency),
+    Rule(
+        "neg.has_agency",
+        -20,
+        "6.3",
+        ("agency_credit",),
+        True,
+        _has_agency,
+        _has_agency_settled,
+    ),
     Rule(
         "neg.active_content",
         -25,
@@ -613,10 +774,27 @@ def assert_declared(rules: tuple[Rule, ...] = RULES) -> None:
             raise RulesetError(f"{rule.id} is worth nothing and cannot matter")
         if not callable(rule.evaluate):
             raise RulesetError(f"{rule.id} has no predicate")
-        if not rule.reads and rule.id != "qual.own_brand":
-            # `own_brand` is the one rule with no Phase-1 input at all; every
-            # other rule reading nothing would be a rule that cannot fire.
+        if not rule.reads:
+            # The named exemption for `qual.own_brand` is GONE (M1.76). It
+            # existed only because A2's mapping had never been transcribed into
+            # the spec, so the rule had no key to read — the one check built to
+            # catch a rule that cannot fire had the instance written into it as
+            # a special case. `brand.own_brand` exists now (migration 011), so
+            # the rule reads, and the exemption goes with the gap.
             raise RulesetError(f"{rule.id} reads no signal and cannot fire")
+        settled = rule.phase2_input_settled
+        if rule.phase2_reachable and not callable(settled):
+            raise RulesetError(
+                f"{rule.id} is phase2_reachable and does not declare "
+                f"phase2_input_settled — §5.4's bound would keep offering its "
+                f"points for a question Phase 2 has already answered (M1.82)"
+            )
+        if not rule.phase2_reachable and settled is not None:
+            raise RulesetError(
+                f"{rule.id} is not phase2_reachable and declares "
+                f"phase2_input_settled — a Phase-1 rule cannot have an input "
+                f"Phase 2 settles, and asserting it hides the mistake"
+            )
         if rule.section not in ("6.1", "6.2", "6.3"):
             raise RulesetError(f"{rule.id} names no section")
 

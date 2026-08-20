@@ -279,10 +279,50 @@ class TestEvidence(ServeTestCase):
 
 
 class TestLlmMarking(ServeTestCase):
-    """§9: LLM-derived fields marked, `confidence = 0` in red. Nothing writes an
-    LLM signal yet (M5), so both halves are pinned now — including the half that
-    must **not** fire, since every signal in the database is `confidence IS
-    NULL` and painting those red would make the whole page red."""
+    """§9: LLM-derived fields marked, `confidence = 0` in red.
+
+    **These tests were rewritten in 9a, and the reason is a finding (M1.85).**
+    They used to give `platform.detected` — a deterministic Phase-1 key — a
+    synthetic `method='llm', confidence=0`, because when they were written no
+    writer produced an LLM signal at all and any key would do. Migration 012's
+    confidence filter turned that combination into a value the read model does
+    not serve, so the rule declined, no `score_component` was written, and there
+    was no component for the red evidence to render *under*. The test went red
+    on a behaviour change it was not about.
+
+    That exposed the real dependency, which the placeholder had hidden: **§9
+    renders evidence beneath components, so a rejected value is only visible if
+    its rule still produces one.** For every §5.5b key that any rule reads, it
+    does — the three-state predicates abstain, and an abstention *is* a
+    component worth 0 points (M1.81). The visibility A4's direction-of-error
+    argument rests on therefore holds **through the abstention**, not
+    independently of it, and these tests now exercise that path on a key that
+    will really carry `confidence = 0`.
+    """
+
+    def _own_brand_company(self, **signal_args) -> HTMLParser:
+        """A company whose homepage extraction ran, on `brand.own_brand`."""
+        company_id = self.company()
+        homepage = self.artifact(
+            company_id, "homepage", "https://muster.de/", "<html></html>"
+        )
+        self.signal(
+            company_id,
+            "llm.homepage_extracted",
+            num=1,
+            artifact_id=homepage,
+            method="llm",
+            confidence=1.0,
+        )
+        self.signal(
+            company_id,
+            "brand.own_brand",
+            num=1,
+            artifact_id=homepage,
+            **signal_args,
+        )
+        self.score_now()
+        return HTMLParser(self.client().get(f"/company/{company_id}/detail").text)
 
     def _company_with(self, **signal_args) -> HTMLParser:
         company_id = self.company()
@@ -305,14 +345,23 @@ class TestLlmMarking(ServeTestCase):
         self.assertEqual(len(tree.css(".unverified")), 0)
 
     def test_an_llm_signal_is_marked(self) -> None:
-        tree = self._company_with(method="llm", confidence=0.9)
+        tree = self._own_brand_company(method="llm", confidence=0.9)
         self.assertTrue(tree.css(".v.llm"))
         self.assertEqual(len(tree.css(".unverified")), 0)
 
-    def test_confidence_zero_is_red(self) -> None:
-        tree = self._company_with(method="llm", confidence=0.0)
+    def test_confidence_zero_is_red_under_the_abstention_it_causes(self) -> None:
+        """The rejected value is not scored (migration 012) **and is still on
+        the page** — under `qual.own_brand`'s abstention, which is what carries
+        it there. Both halves matter: a value the tool rejected must not score,
+        and a rejection nobody can see is a silence."""
+        tree = self._own_brand_company(method="llm", confidence=0.0)
         self.assertTrue(tree.css(".v.unverified"))
         self.assertIn("nicht verifiziert", tree.text())
+        self.assertIn("Nicht bewertbar", tree.text())
+
+    def test_a_rejected_value_scores_nothing(self) -> None:
+        tree = self._own_brand_company(method="llm", confidence=0.0)
+        self.assertNotIn("+10", tree.text())
 
 
 class TestContactBlock(ServeTestCase):
