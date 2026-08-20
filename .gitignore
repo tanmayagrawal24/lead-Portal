@@ -22,3 +22,10 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# Not this project's: a stray `@github/copilot-sdk` manifest was in the working
+# tree at Unit 9a and was swept into a commit by `git add -A`. The project has
+# no Node dependency and §10's standing rule is that a unit adds none.
+package.json
+package-lock.json
+node_modules/
