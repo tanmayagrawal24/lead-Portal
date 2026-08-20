@@ -58,11 +58,17 @@ class LedgerTestCase(unittest.TestCase):
     def add_batch(
         self, run_id: int, *, est: float, actual: float | None = None
     ) -> None:
-        """A batch as §7 control 4 leaves it: reserved into `llm_batch` too."""
+        """A batch as §7 control 4 leaves it: reserved into `llm_batch` too.
+
+        `reserved_at` is migration 014's, and it is separate from `submitted_at`
+        because the two are separate moments — the window between them is where
+        a crash costs the provider id.
+        """
         self.conn.execute(
             "INSERT INTO llm_batch (provider_batch_id, run_id, purpose, "
-            "request_count, est_cost_usd, actual_cost_usd, status, submitted_at, "
-            "reconciled_at) VALUES (?,?,?,?,?,?,?,datetime('now'),?)",
+            "request_count, est_cost_usd, actual_cost_usd, status, reserved_at, "
+            "submitted_at, reconciled_at) "
+            "VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now'),?)",
             (
                 f"msgbatch_{run_id}_{next(LedgerTestCase._batch_seq)}",
                 run_id,

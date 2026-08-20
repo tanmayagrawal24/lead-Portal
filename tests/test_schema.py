@@ -26,6 +26,11 @@ SPEC_TABLES = {
     "outreach",
     "run",
     "llm_batch",
+    # Migration 015 (M1.86): the request SET, because §5.6 fact 2 is a rule
+    # about one — "every one of its requests has a terminal disposition" — and
+    # `llm_batch.request_count` is a number. It ships with its writer, which is
+    # the reservation in `extract_p2` and the collector in `reconcile`.
+    "llm_batch_request",
     # Migration 008: which review reasons refuse outbound contact, as data
     # rather than as a branch repeated across four triggers.
     "contact_blocking_reason",

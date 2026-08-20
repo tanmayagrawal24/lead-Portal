@@ -612,6 +612,13 @@ class LLMProvider(Protocol):
 
     def count_input_tokens(self, request: BatchRequest) -> int: ...
 
+    #: Added when M5's reservation caller landed (9b). `reserve_batch` asks for
+    #: a `TokenCounter`, so the provider that owns the tokenizer supplies one —
+    #: rather than the caller synthesising a throwaway `BatchRequest` to reach
+    #: `count_input_tokens`, which would be a second expression for "how many
+    #: tokens is this" living at the call site (M1.42).
+    def token_counter(self) -> TokenCounter: ...
+
     def submit_batch(
         self, requests: Sequence[BatchRequest], *, clearance: LedgerClearance
     ) -> str: ...
@@ -697,7 +704,9 @@ def reserve_batch(
     )
 
 
-def resolve_batch_status(items: Sequence[BatchResultItem]) -> BatchStatus:
+def resolve_batch_status(
+    items: Sequence[BatchResultItem], *, expected: Sequence[str]
+) -> BatchStatus:
     """What a batch's status becomes once its results have been read (M1.51).
 
     **This is the function that stops a partially-processed batch being marked
@@ -706,8 +715,32 @@ def resolve_batch_status(items: Sequence[BatchResultItem]) -> BatchStatus:
     were never extracted — partial-ness arriving through the success path, which
     is not where anyone looks for it.
 
-    A batch is `reconciled` only when every request succeeded or failed in a way
-    that resubmitting cannot change. Anything still owed keeps the batch open.
+    **`expected` is required, and it is 9b's amendment to this function (M1.86).**
+    §5.6 fact 2 is a rule about a SET — *"a batch moves to `reconciled` only when
+    EVERY ONE of its requests has a terminal disposition"* — and the returned
+    items are not that set. Measured on the version that took only `items`: ten
+    requests sent, eight succeeded results returned, and this function said
+    `RECONCILED` while `resubmittable` said `()`. Two companies silently
+    unextracted, named nowhere. That is M1.51's own failure arriving as an
+    ABSENT member rather than an expired one, which no guard built for the first
+    shape can see. Making the parameter required rather than defaulted is the
+    point: a caller that does not know what it sent has to say so at the call
+    site, rather than getting the weaker answer silently.
+
+    The four terminal batch states are distinguished rather than collapsed,
+    because they need different operator responses and two of them
+    (`expired`, `failed`) were declared in §4 and reachable from nothing:
+
+    * `BALANCE_EXHAUSTED` — the key ran dry (§7 control 11). Not an engineering
+      task, and never folded into `failed`.
+    * `COMPLETED` — the batch ended and some request has no disposition at all.
+      Still owed; the batch stays open.
+    * `EXPIRED` — every request is settled and some ran past the 24-hour
+      maximum. **Terminal for this batch**: nothing more will arrive from it,
+      and §5.6 re-submits those members as new spend that §7 reserves afresh.
+    * `FAILED` — every request is settled and some failed provider-side.
+      Terminal for the same reason; a retry is a new batch.
+    * `RECONCILED` — every request settled, nothing owed, nothing to retry.
     """
     if not items:
         # An empty result set is not a finished batch. It is a batch we have not
@@ -716,10 +749,14 @@ def resolve_batch_status(items: Sequence[BatchResultItem]) -> BatchStatus:
     outcomes = {item.outcome for item in items}
     if RequestOutcome.BALANCE_EXHAUSTED in outcomes:
         return BatchStatus.BALANCE_EXHAUSTED
-    if any(o.retryable for o in outcomes):
-        # Expired or server-errored members are still owed. The batch stays
-        # open, and §7 reserves their re-submission as the new spend it is.
+    if set(expected) - {item.custom_id for item in items}:
+        # A request that came back as nothing at all. Terminal for neither the
+        # request nor the batch, and invisible without `expected`.
         return BatchStatus.COMPLETED
+    if RequestOutcome.EXPIRED in outcomes:
+        return BatchStatus.EXPIRED
+    if RequestOutcome.SERVER_ERROR in outcomes:
+        return BatchStatus.FAILED
     return BatchStatus.RECONCILED
 
 

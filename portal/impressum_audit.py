@@ -27,7 +27,7 @@ re-keyed by M1.75). "That company's newest robots.txt" was the ratified wording
 and it is what produced `zecplus.de`'s vacuity: a permissive 173-byte file from
 `blog.zecplus.de` applied to bodies on `www.zecplus.de`. Where no robots.txt for
 a body's own origin is on disk the policy is `unavailable`, which allows
-nothing — see `_policy`.
+nothing — see `policy_for`.
 
 **These are pattern-presence counts, not extraction accuracy** (§10.4). A
 USt-IdNr shape on the page may belong to a payment provider; an e-mail may be in
@@ -177,7 +177,7 @@ class Audit:
     in_block: dict[str, int]  # pattern -> pages where it appears in the block
 
 
-def _policy(
+def policy_for(
     conn: sqlite3.Connection, company_id: int, url: str, root: Path
 ) -> robots_mod.RobotsPolicy:
     """The robots.txt **served by `url`'s own origin**, or a policy that allows
@@ -236,7 +236,7 @@ def select_inputs(
         url = str(row["url"])
         key = (company_id, authority_of(url))
         if key not in policies:
-            policies[key] = _policy(conn, company_id, url, root)
+            policies[key] = policy_for(conn, company_id, url, root)
         policy = policies[key]
         if not policy.allows(url):
             if policy.unavailable is not None:
