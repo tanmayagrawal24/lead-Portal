@@ -3,8 +3,9 @@
 Each pipeline stage is its own subcommand, independently re-runnable (§5).
 Built so far: `init`, `fetch`, `extract-p1`, `score`, `serve`, plus the
 inspection commands `diff-signals`, `audit-politeness`,
-`audit-impressum-candidates` and `llm-prices`. `extract-p2` and `reconcile`
-arrive with M5; `discover` with M8.
+`audit-impressum-candidates`, `llm-prices` and `extract-p2 --dry-run`.
+`extract-p2`'s **submitting** half and `reconcile` arrive with M5 phase 9b;
+`discover` with M8.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from portal import (
     db,
     diff,
     extract,
+    extract_p2,
     fetch,
     impressum_audit,
     ledger,
@@ -176,6 +178,56 @@ def cmd_extract_p1(path: Path) -> int:
             print(f"      note: {note}")
         for flag in result.review_flags:
             print(f"      review: {flag}")
+    return 0
+
+
+def cmd_extract_p2(path: Path, dry_run: bool) -> int:
+    """§5.5b's paid extraction — **and 9a ships only the half that spends nothing.**
+
+    `--dry-run` is required today, and refusing without it is the honest shape:
+    the submitting path needs §7 control 4's reservation, whose two writes must
+    commit together (M1.72), and that is 9b's. A command that silently did the
+    free half when asked for the paid one would be a stage reporting success for
+    work it did not do.
+
+    What the dry run prints is what would be sent: which stored artifact was
+    selected for each company, how large the cleaned text is, whether the 60 KB
+    cap truncated it, and which companies have no usable Impressum at all —
+    which is a finding (`snocks.com`'s state after A2 item 9's repairs), not an
+    empty row. **No request, no key, no cost.**
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    if not dry_run:
+        print(
+            "extract-p2 can only be run with --dry-run today. The submitting "
+            "path needs §7 control 4's reservation, whose two writes must "
+            "commit in one transaction (M1.72); that is M5 phase 9b, and "
+            "phase 9c is the first real spend and needs written authorisation.",
+            file=sys.stderr,
+        )
+        return 2
+    conn = db.connect(path)
+    try:
+        prepared, skipped = extract_p2.prepare(conn, config.artifacts_root(path))
+        requests = extract_p2.build_requests(prepared)
+    finally:
+        conn.close()
+
+    print(f"extract-p2 --dry-run: {len(prepared)} companies would be sent\n")
+    for page, request in zip(prepared, requests, strict=True):
+        size = len(page.sent_text.encode("utf-8"))
+        note = "  (truncated at 60 KB, §5.5b)" if page.truncated else ""
+        print(f"  {page.domain:28} {request.custom_id}")
+        print(f"      {page.url}")
+        print(f"      {size:,} bytes of cleaned visible text{note}")
+    for entry in skipped:
+        print(f"  {entry.domain:28} SKIPPED — {entry.reason}")
+    print(
+        f"\n{len(requests)} batch request(s) built. Nothing was sent and nothing "
+        "was reserved; §7 control 4 is 9b's."
+    )
     return 0
 
 
@@ -688,6 +740,17 @@ def build_parser() -> argparse.ArgumentParser:
         "(A2 item 10). Writes nothing. Do not paste the output anywhere.",
     )
 
+    p2_parser = sub.add_parser(
+        "extract-p2",
+        help="§5.5b's paid extraction. Only --dry-run works today: the "
+        "submitting path needs §7 control 4's reservation (9b)",
+    )
+    p2_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be sent and send nothing. Required today.",
+    )
+
     prices_parser = sub.add_parser(
         "llm-prices",
         help="the declared price and model-limit tables with their as-of dates; "
@@ -743,6 +806,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "extract-p1":
         return cmd_extract_p1(path)
+
+    if args.command == "extract-p2":
+        return cmd_extract_p2(path, args.dry_run)
 
     if args.command == "score":
         return cmd_score(path, args.phase)
