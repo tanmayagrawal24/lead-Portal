@@ -1188,3 +1188,115 @@ class TheEstimateToActualCorrection(ReconcileTestCase):
             reconcile._correct_the_reservation(self.conn, batch, actual=0.0)
         self.assertIn("below zero", str(caught.exception))
         self.assertGreater(reservation.estimate.total_usd, 0)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# (d) M1.85 — confidence = 0 IN §9, settled
+# ══════════════════════════════════════════════════════════════════════
+
+
+class ARejectedValueIsVisible(ReconcileTestCase):
+    """**M1.85, and 9b's settlement of it.**
+
+    9a found that §9 renders a rejected value's red evidence *beneath its
+    `score_component`*, and that `evaluate` writes no component for a rule that
+    declines (A7) — so A4's *"the loss is visible"* argument holds **through**
+    M1.81's abstention rather than independently of it. What 9a did not settle
+    is the other half: for a key **no rule reads**, no component is produced on
+    any path, so the row stayed queryable in `signal` and invisible on the page.
+
+    Nine §8/§9-only Impressum fields are in that class and `impressum.legal_name`
+    is one of them — the value that goes in the letter, and the single worst
+    thing to be wrong about (§5.5b). So it is closed with a second render path
+    rather than recorded as a gap.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from fastapi.testclient import TestClient
+
+        from portal import serve as serve_mod
+
+        self.serve_mod = serve_mod
+        self.client = TestClient(serve_mod.create_app(self.db_path, self.artifacts))
+
+    def _detail(self) -> str:
+        return self.client.get(f"/company/{self.company_id}/detail").text
+
+    def _reconcile(self, payload: dict[str, object], purpose="impressum") -> None:
+        provider = FakeProvider()
+        self.submit(provider, purpose=purpose)
+        provider.will_return(succeeded(self.custom_id(purpose), payload))
+        reconcile.run(self.conn, provider, self.artifacts)
+        self.conn.commit()
+
+    def _score(self) -> None:
+        score.run(self.conn, phase=2, today=dt.date(2026, 8, 20))
+        self.conn.commit()
+
+    def test_a_rejected_value_on_a_key_no_rule_reads_is_rendered(self) -> None:
+        """The gap 9a left, closed. `impressum.legal_name` is read by **no §6
+        rule** — §5.5b's mapping says so, in the *"the rule that reads it"*
+        column — so before this it could not appear on the page at all."""
+        self._reconcile(impressum_payload(legal_name="Erfundene Handels AG"))
+        self._score()
+
+        html = self._detail()
+        self.assertIn("Verworfene LLM-Werte", html)
+        self.assertIn("Erfundene Handels AG", html)
+        self.assertIn("impressum.legal_name", html)
+        self.assertIn("nicht verifiziert", html)
+
+    def test_it_renders_even_where_no_score_exists_at_all(self) -> None:
+        """The render path does not hang off `score_component`, and this is the
+        assertion that says so: with no scoring run at all there are no
+        components, and the rejected value is still on the page."""
+        self._reconcile(impressum_payload(legal_name="Erfundene Handels AG"))
+        html = self._detail()
+        self.assertNotIn("<h3>Bewertung</h3>", html.replace("\n", ""))
+        self.assertIn("Erfundene Handels AG", html)
+
+    def test_a_value_a_rule_reads_is_rendered_once_under_its_component(
+        self,
+    ) -> None:
+        """The two paths must not both fire. A scored key renders beneath its
+        rule's abstention — which is M1.81's component — and is excluded from
+        the second panel, so the panel above stays the place a scored value is
+        explained."""
+        self._reconcile(
+            homepage_payload(own_brand_evidence="frei erfunden"), purpose="homepage"
+        )
+        self._score()
+        html = self._detail()
+
+        self.assertIn("qual.own_brand", html)
+        self.assertIn("Enthaltung", html)
+        # `brand.own_brand` renders under the abstention, not in the second
+        # panel — the reason M1.85's guarantee holds THROUGH the abstention.
+        self.assertNotIn("Verworfene LLM-Werte", html)
+
+    def test_what_a_reviewer_still_cannot_see_is_written_down(self) -> None:
+        """The residual, named rather than left implicit: a rejected value is
+        visible, and **which of the two routes it arrived by is not**. M1.81
+        already rules that the model returning `null` and its span failing
+        verification take the same review reason deliberately, because both send
+        a person to the same page; the difference lives in `signal` and in
+        `raised_note`, not on the row."""
+        self._reconcile(
+            homepage_payload(own_brand_evidence="frei erfunden"), purpose="homepage"
+        )
+        self._score()
+        flags = {
+            str(r["reason"])
+            for r in self.conn.execute(
+                "SELECT reason FROM review_flag WHERE company_id = ?",
+                (self.company_id,),
+            )
+        }
+        self.assertIn("own_brand_undetermined", flags)
+        # The rejected row is what distinguishes the two, and it is queryable.
+        rejected = self.conn.execute(
+            "SELECT value_text FROM signal WHERE key = 'brand.own_brand' "
+            "AND confidence = 0"
+        ).fetchone()
+        self.assertEqual(rejected["value_text"], "frei erfunden")

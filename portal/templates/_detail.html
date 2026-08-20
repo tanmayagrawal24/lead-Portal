@@ -108,6 +108,53 @@
     {% endif %}
   </section>
 
+  {% if lead.rejected_unread %}
+    {#- **M1.85, settled in 9b.** The other §9 render path for `confidence = 0`,
+        and it deliberately does NOT hang off `score_component`.
+
+        Evidence above renders beneath a component, and `evaluate` writes no
+        component for a rule that declines (A7). For every §5.5b key a rule
+        reads, M1.81's three-state predicates abstain on a rejected value and
+        the abstention IS a component, so the red row has somewhere to render.
+        For the keys NO rule reads — the §8/§9-only Impressum fields and
+        `agency.footer_credit_llm` — there was nothing, and the worst of them is
+        `impressum.legal_name`, which is the value that goes in the letter.
+
+        Only values not already rendered above appear here, so a value is shown
+        once and the panel above stays the place a scored value is explained. -#}
+    <section>
+      <h3>Verworfene LLM-Werte</h3>
+      <p class="notice">
+        Diese Werte hat das Modell geliefert und die Substring-Prüfung
+        (§5.5b) hat sie auf der gesendeten Seite <strong>nicht</strong>
+        gefunden. Sie fließen in keine Bewertung ein und gehören in keinen
+        Brief, ohne dass die Quelle geprüft wurde. Zu keiner dieser Angaben
+        gibt es eine Regel, unter der sie oben erscheinen könnte — deshalb
+        stehen sie hier.
+      </p>
+      <ul class="evidence">
+        {% for item in lead.rejected_unread %}
+          <li>
+            <span class="k">{{ item.key }}</span>
+            <span class="v llm unverified"
+                  title="LLM-gestützt · confidence {{ item.confidence }} · {{ item.evidence_url }}">
+              {{- item.value|truncate(90) -}}
+            </span>
+            <span class="tag tag-block">nicht verifiziert</span>
+            {% if item.artifact_id %}
+              <a href="/artifact/{{ item.artifact_id }}" target="_blank" rel="noopener"
+                 title="Die gespeicherten Bytes, gegen die geprüft wurde">Beleg</a>
+            {% endif %}
+            {% if item.evidence_url %}
+              <a href="{{ item.evidence_url }}" target="_blank" rel="noopener noreferrer"
+                 class="muted" title="{{ item.evidence_url }}">live</a>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+
   <section>
     <h3>Prüfmarker</h3>
     {% if not lead.flags %}
