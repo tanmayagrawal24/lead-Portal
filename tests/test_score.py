@@ -125,13 +125,22 @@ class TestRulesetIsData(unittest.TestCase):
             },
         )
 
-    def test_own_brand_is_the_only_rule_with_no_phase_1_input(self) -> None:
-        """§10.6's sharpest row, and the one the auditor read as dead code.
-        `assert_declared` carries a named exemption for exactly this rule; the
-        exemption is the documentation, and this is what stops a second rule
-        quietly acquiring it."""
+    def test_no_rule_reads_nothing_and_the_exemption_is_gone(self) -> None:
+        """**This test is the inverse of the one it replaces (M1.76).**
+
+        It used to assert that `qual.own_brand` is the *only* rule reading
+        nothing, and that `assert_declared` carries a named exemption for it —
+        *"the exemption is the documentation"*. It was true, and it documented
+        the wrong thing. The rule read nothing because **A2's mapping had never
+        been transcribed into the spec**, so no signal key existed for it: the
+        one check built to catch a rule that cannot fire had the live instance
+        written into it as a special case, and a test pinned the special case in
+        place. `brand.own_brand` exists now, so the exemption goes with the gap.
+        """
+        self.assertEqual({r.id for r in ruleset.RULES if not r.reads}, set())
         self.assertEqual(
-            {r.id for r in ruleset.RULES if not r.reads}, {"qual.own_brand"}
+            ruleset.RULES[[r.id for r in ruleset.RULES].index("qual.own_brand")].reads,
+            ("own_brand", "homepage_extracted"),
         )
 
 
@@ -804,7 +813,12 @@ class TestScoreDateIsPinned(ScoreStageTestCase):
         )
         old_db.commit()
 
-        self.assertEqual(migrate.apply_pending(old_db), [10])
+        # `assertIn`, not `assertEqual([10])`: the assertion under test is that
+        # **010 ran** over a pre-existing row, and pinning the whole return list
+        # couples this test to the project's migration count — it went red on
+        # migration 011 for a reason that has nothing to do with backfilling.
+        applied = migrate.apply_pending(old_db)
+        self.assertIn(10, applied)
         row = old_db.execute(
             "SELECT evaluated_on FROM score WHERE company_id = ?", (company_id,)
         ).fetchone()

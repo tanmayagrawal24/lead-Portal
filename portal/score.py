@@ -164,16 +164,20 @@ def evaluate(
         # The same object the rules below are handed. Not a copy, not a re-read.
         evaluated_on=today,
     )
-    settled: set[str] = set()
+    # Renamed from `settled` (M1.82). This tracks which §6.2 ladder chains have
+    # stopped; `phase2_input_settled` below asks a completely different
+    # question, and two meanings under one name in one function is how the next
+    # reader gets it wrong.
+    chains_settled: set[str] = set()
 
     for rule in rules:
-        if rule.chain and rule.chain in settled:
+        if rule.chain and rule.chain in chains_settled:
             continue
         outcome = rule.evaluate(profile, today)
         if outcome.state == DECLINES:
             continue
         if rule.chain:
-            settled.add(rule.chain)
+            chains_settled.add(rule.chain)
         points = rule.points if outcome.state != ABSTAINS else 0
         result.total += points
         result.components.append(
@@ -192,12 +196,32 @@ def evaluate(
 
     result.band = band_of(result.total)
 
-    # §5.4's per-company gate. A rule already awarded in Phase 1 cannot be
-    # awarded again, so it leaves the bound — which is the whole reason a
-    # per-company gate is tighter than any safe global constant.
+    # §5.4's per-company gate. A rule leaves the bound two ways, and until
+    # M1.82 only the first was counted.
+    #
+    #   BANKED   — Phase 1 already awarded it, so Phase 2 cannot award it again.
+    #              This is what makes a per-company gate tighter than any safe
+    #              global constant.
+    #
+    #   SETTLED  — Phase 2 has already ANSWERED it for this company, and the
+    #              answer was no. Reproduced before it was fixed: a company
+    #              whose extraction had run and returned `false` for both
+    #              booleans still carried upside=50 and was still admitted, so
+    #              the gate offered 25 points for two closed questions and
+    #              re-admitted the company to paid extraction on them. **A gate
+    #              that only loosens is a gate that pays twice for one answer.**
+    #
+    # Settledness is DECLARED, never derived from `result.components`: a rule
+    # that declines writes no component at all, so a Phase-2 `false` — the
+    # commonest case — is invisible to any outcome-based reading and
+    # indistinguishable from "never evaluated".
     banked = {c.rule_id for c in result.components if c.points > 0}
     result.remaining_upside = sum(
-        rule.upside for rule in rules if rule.phase2_reachable and rule.id not in banked
+        rule.upside
+        for rule in rules
+        if rule.phase2_reachable
+        and rule.id not in banked
+        and not (rule.phase2_input_settled and rule.phase2_input_settled(profile))
     )
     result.admitted = result.total + result.remaining_upside >= BAND_FLOOR["B"]
     return result
