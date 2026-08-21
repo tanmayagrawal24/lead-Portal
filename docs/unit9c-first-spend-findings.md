@@ -1,12 +1,22 @@
 # Unit 9c — the corpus rebuilt, two guards met a real server, and the per-run ceiling
 
-**Dollars spent: $0.00 so far.** The crawl is free by construction — Phase 1 is
-deterministic and makes no paid call. Steps 4 and 5 are reported in §6.
+**DOLLARS SPENT: $0.00.** No batch was submitted. The corpus was rebuilt (free
+by construction — Phase 1 is deterministic and makes no paid call), §7 control 3
+was built and proved to refuse, and both gates were run — and the unit stopped at
+the submit call because **`ANTHROPIC_API_KEY` is unset on this machine and the
+two available workarounds are both forbidden by rulings this project wrote one
+unit ago** (M1.52, M1.99). §7.4 is the full account.
+
+**What is done:** the prep merged, the corpus rebuilt and its deltas reported,
+both live guards measured, control 3 built with seven tests, Gate A run, Gate B's
+structural checks passed. **What is not:** steps 4 and 5 — submit, restart
+survival against a real batch, reconcile, and the hallucination evidence that
+only a real run produces.
 
 Measured 2026-08-21 on `claude/unit9c-first-spend`, branched from `95d3281`
 (merged `main`, carrying 9c-prep's M1.95–M1.100).
 
-Migration taken: none yet. Amendments: see §7.
+Migrations taken: none. Amendments: **M1.101–M1.104**.
 
 ---
 
@@ -350,3 +360,276 @@ Seven, in `tests/test_cost_ledger.py::ThePerRunCeiling` and
 | `test_an_oversized_reservation_leaves_no_batch_row_and_no_charge` | the refusal rolls back M1.72's transaction — **nothing on the books** |
 
 Suite: **705 passed, 2 skipped, 139 subtests** (was 698 before this unit).
+
+---
+
+## 7. GATE A — the dry run, and where this unit stopped
+
+### 7.1 What the gate shows
+
+**9 of 13 companies would be sent. 12 of 13 clear §5.4's gate**; the difference
+is four companies that clear the gate and are then refused for a reason that is
+not about their score.
+
+| # | company | artifact | source | sent bytes |
+|---|---|---|---|---|
+| 1 | smile-store.de | 31 | `https://www.smile-store.de/impressum` | 7,288 |
+| 2 | zecplus.de | 17 | `https://www.zecplus.de/policies/legal-notice` | 5,970 |
+| 3 | doonails.de | 49 | `https://www.doonails.com/policies/legal-notice` | 12,656 |
+| 4 | navucko.com | 63 | `https://navucko.com/pages/impressum` | 17,962 |
+| 5 | blackpolish.de | 72 | `https://blackpolish.de/policies/legal-notice` | 2,363 |
+| 7 | bio-fleischer-laden.de | 96 | `https://bio-fleischer-laden.de/policies/legal-notice` | 3,657 |
+| 9 | opulent-wohnen.com | 203 | `https://www.opulent-wohnen.com/Impressum` | 11,665 |
+| 11 | verpackungskoenig.de | 221 | `https://verpackungskoenig.de/Impressum` | 21,187 |
+| 12 | germanelectronic.de | 223 | `https://lampenflut.de/Impressum` | 11,521 |
+| | **9 requests** | | | **94,269** |
+
+**Why the other four are not sent:**
+
+| company | reason | clears §5.4? |
+|---|---|---|
+| `propellerdiscount.de` | `robots_unavailable` — origin `www.propellerdiscount.de` (M1.75) | **no** — 0 + 50 against a floor of 55 |
+| `smoke2u.de` | `robots_unavailable` — origin `www.smoke2u.de` (M1.75) | yes — band B at 55 |
+| `ekomia.de` | no 200 Impressum artifact with a body | yes |
+| `snocks.com` | no 200 Impressum artifact with a body | yes |
+
+`ekomia.de` and `snocks.com` both returned **429** or **404** on every Impressum
+candidate — real host behaviour at the §5.2 floor, recorded as observed. Note
+that `germanelectronic.de` is sent, and the artifact it reads is on
+`lampenflut.de`: the adopted moved domain (P2/M1.18) carrying through to Phase 2.
+
+### 7.2 The ledger before — its first production read
+
+```
+monthly_spend_usd = $0.0000
+clearance: spend=$0.0000  ceiling=$45.00  headroom=$45.0000  window=30d
+RUN_CEILING_USD = $5.00
+llm_batch rows: 0
+run rows: 3 (fetch, extract-p1, score-p1), all est_cost_usd = 0.0
+```
+
+**`ledger.monthly_spend_usd` has now returned a number in production, and the
+number is `$0.0000`.** That is the "before" the brief asked for. It has still
+never returned a non-zero one, because nothing has ever been reserved.
+
+### 7.3 GATE B — the two structural checks pass; the priced check is blocked
+
+Gate B names three things a large reservation would mean. Two are checkable
+without pricing, and both pass:
+
+- **The 60 KB cap is applying.** `extract_p2.INPUT_CAP_BYTES = 61,440`, and the
+  largest single request is **21,187 bytes** — 34% of the cap. No request
+  approaches it, so a runaway input is not present.
+- **No company is prepared twice.** Nine requests carry nine distinct
+  `company_id`s.
+- **`count_tokens` reading the wrong text** — not checkable here; see below.
+
+**Sanity bound, and it is NOT the reservation.** 94,269 bytes of German visible
+text is on the order of 25–30k input tokens in total; at the declared batch rate
+of **$0.50/MTok** that is roughly **$0.015**, and 9 × 2,048 max output tokens at
+**$2.50/MTok** bounds output at **$0.046**. So an upper bound in the region of
+**$0.06**, comfortably inside the brief's $0.05–$0.30 expectation and far below
+Gate B's $1.00 stop. §7.1's own check is consistent: it prices *30k tokens per
+advancing company* at $0.0150, and this batch is ~30k tokens for **all nine**.
+
+**This arithmetic may not be used as the reservation, and is not.** M1.52 is
+explicit: the estimate comes from `count_tokens` for the model actually being
+called, never from a heuristic, because a character-length rule of thumb is a
+second expression describing what the first one does (M1.42's shape). The
+paragraph above exists to answer *"is this obviously wrong?"* — it is not — and
+for nothing else.
+
+### 7.4 Where this unit stopped, and why
+
+**`ANTHROPIC_API_KEY` is UNSET on this machine.** Confirmed before the first
+command of this unit and unchanged since; there is no `ant` CLI, no credential
+file, and no `ANTHROPIC` name in any of the five Codespaces secret stores
+(checked names only, values never read). §7 control 9 as amended by M1.99
+forbids substituting the CLI subscription OAuth token that is present, and that
+ruling was written by this project one unit ago for exactly this moment.
+
+**Three things follow, and none of them is a judgement call:**
+
+1. **`count_tokens` is a network call** (`llm_anthropic.py:137-150`) and it needs
+   a client, which needs a key. It is free, but it is not local.
+2. **M1.52 forbids the fallback.** *"A failure propagates and aborts the
+   submission rather than falling back to an estimate."* So there is no
+   compliant way to produce the reservation figure without the key.
+3. **§10.7b's precondition is also unmet.** The open batch question — *was a
+   batch ever submitted?* — closes with `messages.batches.list` on a machine
+   with a key, and 9c-prep ruled that listing must **precede** any work that
+   could submit, because a batch that exists is committed spend and resubmitting
+   doubles it. That listing still cannot be run.
+
+**Steps 4 and 5 of the brief are therefore not done: no batch was submitted, no
+`provider_batch_id` exists, restart survival was not exercised against a real
+batch, and nothing was reconciled. Dollars spent by this unit: $0.00.**
+
+This is reported rather than worked around. The alternatives available were to
+price the batch with a heuristic (forbidden by M1.52), or to use the OAuth token
+(forbidden by M1.99, written one unit ago). Both would have produced a number
+and neither would have produced a measurement.
+
+---
+
+## 8. §8 — what Phase 2 would store, and what erasure would take today
+
+Step 5's last item, and it is answerable from the schema without the run.
+
+**`contact` is the table Phase 2 writes, and every column but two is personal
+data:**
+
+```sql
+CREATE TABLE contact (
+    id, company_id,
+    full_name         TEXT,   -- a natural person's name
+    role              TEXT,   -- 'Geschäftsführer', 'Inhaber', …
+    email             TEXT,
+    phone             TEXT,
+    postal_address    TEXT,
+    source_url        TEXT NOT NULL,   -- must be the Impressum URL
+    collected_at      TEXT NOT NULL,
+    art14_notice_sent_at TEXT,         -- GDPR Art. 14 information duty
+    purge_after       TEXT NOT NULL    -- collected_at + 12 months;
+                                       -- enforced by `portal purge` (§8)
+);
+```
+
+**`portal purge` does not exist. Neither does `portal forget`.** `git grep` for
+either returns nothing in `portal/`, and the CLI's subcommand list is `init,
+fetch, extract-p1, score, diff-signals, serve, audit-politeness,
+audit-impressum-candidates, extract-p2, reconcile, llm-prices`.
+
+**This is M1.45(c)'s shape in the schema itself**: `purge_after` is `NOT NULL`,
+so every contact row this project ever writes will carry a deletion deadline,
+and the column's own comment names a command that has never been written. A
+reader of the schema would conclude erasure is handled. It is not.
+
+**What honouring a deletion request would take today**, written out because
+"M7 is unbuilt" is not an answer to a person who asks:
+
+1. **Find the subject.** There is no index on `full_name` or `email`, and no
+   command that searches them. It is a manual `SELECT` against `contact`.
+2. **Delete the contact row.** `ON DELETE CASCADE` appears 9 times in the schema
+   and every one hangs off `company(id)` — so deleting a *company* cascades, and
+   deleting a *contact* does not cascade to anything, because nothing references
+   `contact`. A single `DELETE FROM contact WHERE id = ?` is sufficient for that
+   row.
+3. **The copies the cascade does not reach, and this is the part that matters.**
+   The person's name is also in:
+   - **`signal.value_text`** — §5.5b writes the extracted value as a signal with
+     its confidence, and `signal` references `company`, not `contact`.
+   - **`signal.evidence_url`** and `contact.source_url` — the Impressum URL,
+     which for a sole trader is frequently identifying on its own.
+   - **the stored artifact body on disk** under `data/artifacts/`, which is the
+     Impressum page in full and is what §5.5b verifies against.
+   - **`llm_batch_request.sent_text_sha256`** — a hash, not the text, so this one
+     is arguably fine; it is listed because "we kept a digest" is a question a
+     regulator asks and the answer should not have to be re-derived.
+   - **the provider's side.** A submitted batch's inputs and results sit with
+     Anthropic for **29 days** (§5.6), and nothing in this project can delete
+     them.
+4. **The request log.** `data/requests.jsonl` records every URL fetched,
+   appended across runs and never truncated by design (`config.py`).
+
+**So: today, honouring an erasure request means a hand-written multi-table
+`DELETE`, a file deletion under `data/artifacts/`, an edit to an append-only log
+that was deliberately made append-only, and an unaddressable 29-day window at
+the provider.** None of it is impossible; none of it is one command; and the
+schema currently claims otherwise.
+
+**This is recorded and not fixed**, because M7 is a milestone and this unit's
+scope is the first spend — but it is recorded *now* rather than when M7 starts,
+because the first `contact` row is what makes it real, and this unit came within
+one API key of writing nine of them. See M1.104.
+
+---
+
+## 9. Still open
+
+- **Was a batch ever submitted? (§10.7b, M1.100.)** Unchanged and still OPEN.
+  This unit could not run `messages.batches.list` for the same reason it could
+  not submit. **It is still not zero.**
+- **The first real spend.** Steps 4 and 5 of the brief. Everything up to the
+  submit call is built, tested and dry-run; what is missing is a credential.
+- **`count_tokens` against a live model**, and with it §7 control 4's reservation
+  arithmetic end to end. The seam is exercised only by fakes.
+- **M1.53's prepaid-balance assumption** — `llm-prices` still prints
+  *"UNVERIFIED — it needs a live key."*
+- **M1.68's true-positive rate.** The address guard has now refused 0 of 249
+  real addresses. It has still never refused a real server, so nothing here says
+  it fires when it should.
+- **M1.68's DNS residual** (resolve, then httpx resolves again). Untouched.
+- **M1.103's recurring cost** — every crawl of a shop serving identical
+  robots.txt from apex and `www.` loses that shop to `robots_unavailable`.
+- **M1.104** — no erasure path. M7.
+- **§10.2's lever.** Not observable in this unit: it needs what the model reads
+  about owner-operation, and the model was not called. The deterministic
+  predicate's side is measurable and unchanged — `legal_form ∈ {e.K.,
+  Einzelunternehmen, GbR}` still matches **none** of the corpus.
+- **§10.3's calibration block.** Still binding. This unit re-scored and changed
+  no weight, band, threshold or selector.
+
+## 10. Where the instructions were wrong
+
+**The brief said "make the first real spend" and it was not possible.** Not
+because of a defect — because there is no API credential on this machine, and
+the two ways to proceed anyway are both forbidden by rulings this project wrote
+one unit ago: M1.52 (no heuristic estimate) and M1.99 (the OAuth token is not an
+API key). **The rulings did their job.** M1.99 was written on 2026-08-21 with
+the sentence *"written now, before 9c needs a real key, because the moment
+someone wants one the convenient credential will be sitting right there"* — and
+that is exactly the position this unit reached.
+
+**The brief said "Do not split it further" and "the default is finish it".**
+Steps 0–3 are complete and pushed; 4–5 are blocked on a credential rather than
+on work. Per the brief's own escape clause — *"If something genuinely blocks,
+push what works and say what blocked"* — that is what happened.
+
+**The brief said `extract-p2 --dry-run` would report the reservation in
+dollars.** It cannot, and that is correct behaviour rather than a gap: the
+reservation is `count_tokens`-derived by M1.52, `count_tokens` is a network
+call, and the dry run deliberately makes none.
+
+**The brief said `ledger.monthly_spend_usd` "has never returned a non-zero
+number in production".** True, and it still has not — but it has now returned
+`$0.0000` in production, against a real database, which it had not done before.
+
+**The brief predicted the crawl's numbers would differ from §10.7a and said not
+to treat differences as regressions.** Correct — and two rows came out
+*identical* (`propellerdiscount.de` 0+50, `germanelectronic.de` 5+50=55), which
+the brief did not anticipate. Handled the same way: recorded as new measurements
+dated today, with §10.7a's rows left marked.
+
+## 11. Open items register — only the rows this unit touched
+
+Per the brief: not re-derived in full. Four rows changed.
+
+| Item | Was | Now | Why |
+|---|---|---|---|
+| The 13-company corpus | GONE; ruled disposable | **REBUILT** 2026-08-21 — 13 companies, 228 artifacts, 201 bodies | §10.4b's recovery procedure executed, unmodified (§1) |
+| §7 control 3 | Specified, not implemented | **BUILT** — `RUN_CEILING_USD`, `charge_run`, 7 tests | M1.101 (§6) |
+| `run.est_cost_usd`'s second writer | Unstated | **RULED** — reconciliation is never refused by control 3 | M1.102, `ledger.reconcile_run` (§6.4) |
+| §8 erasure path | Not previously registered | **OPEN, with the manual procedure written out** | M1.104 (§8) |
+
+**Unchanged and explicitly re-checked:** the batch question (§10.7b) is still
+open and still not zero; `interrupted-M5-remnant` is still stashed and
+unapplied; `portal/pagespeed.py` is still unbuilt; `run.pagespeed_calls` still
+exists nowhere; `llm_batch.status = 'balance_exhausted'` is still ahead of its
+writer. **Next free migration: `016`. Next free amendment: `M1.<105>`** (angle
+brackets per M1.94, so this line is not a citation).
+
+## 12. The counter (M1.73)
+
+Re-run after this document existed, as the convention requires:
+
+```
+$ git grep -ohE 'M1\.[0-9]+' -- docs/ portal/ tests/ README.md .github/ \
+    | sed 's/M1\.//' | sort -n | uniq | tail -1
+104
+$ grep -c '^| M1\.' docs/lead-portal-spec-v0.3.md
+104
+```
+
+**Cited maximum and declared row count agree at 104.** M1.91's check passes,
+which is the mechanism rather than the assertion.
