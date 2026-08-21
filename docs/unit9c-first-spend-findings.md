@@ -249,3 +249,104 @@ Review flags raised: `blog_cadence_unmeasurable` 5, `catalog_not_measurable` 3,
 `snocks.com` returned **429** on nine requests including every Impressum
 candidate — recorded as observed behaviour of a real host at the §5.2 floor, not
 as a defect in the crawler.
+
+---
+
+## 6. §7 control 3 — built, and proved to refuse (M1.101, M1.102)
+
+### 6.1 The gap, reproduced first
+
+On `95d3281`, through the real reservation write (`extract_p2._charge_run`):
+
+```
+§7 control 3 says: per-run ceiling, default $5.00, checked before every call.
+The only ceiling constant in the tree: MONTHLY_CEILING_USD = 45.0
+grep for a per-run constant: NOTHING
+
+Charging one run, $2.00 at a time:
+  call 1: run.est_cost_usd = $ 2.00
+  call 2: run.est_cost_usd = $ 4.00
+  call 3: run.est_cost_usd = $ 6.00  <-- PAST $5.00
+  call 4: run.est_cost_usd = $ 8.00  <-- PAST $5.00
+  call 5: run.est_cost_usd = $10.00  <-- PAST $5.00
+  call 6: run.est_cost_usd = $12.00  <-- PAST $5.00
+
+Nothing raised. Control 2 is consulted and is content:
+  monthly_spend_usd = $12.00  headroom = $33.00  (ceiling $45.00)
+```
+
+**One run reserved $12.00 against a stated per-run ceiling of $5.00, and the
+only guard in the tree cleared it — correctly, because it is the outer bound.**
+
+Control 2's own text names the gap: *"`run.est_cost_usd` resets on every
+invocation, so ten aborted-and-retried runs cost ten times the per-run limit."*
+That is an argument for why control 2 is needed **as well**. It had been
+available to read for two units as though it made control 3 optional.
+
+### 6.2 What was built
+
+`ledger.RUN_CEILING_USD = 5.0`, `ledger.RunCeilingExceeded`,
+`ledger.charge_run`, `ledger.run_reserved_usd`, `ledger.reconcile_run`.
+
+**It composes with `LedgerClearance` rather than replacing it.** `charge_run`
+takes a clearance, and a clearance is unforgeable — `check_ceiling` is the only
+thing that constructs one. So control 3 cannot be applied *instead of* control
+2 by a caller who preferred the smaller number. `test_it_cannot_be_applied_
+without_consulting_control_2` asserts the `TypeError`.
+
+**Enforced at the single write.** `_charge_run` is the only path by which a
+reservation reaches `run.est_cost_usd`, and it now delegates to `charge_run`.
+That is what makes it unbypassable: a future second caller gets the ceiling by
+construction instead of by remembering.
+
+### 6.3 Direction of error, stated
+
+- **It fails closed, and over-counts while doing so.** The estimate is written
+  *before* the call, so a crash between reservation and submission leaves money
+  reserved that was never spent — a conservatively aborted run, not silent
+  overspend. Control 3's own wording requires this ordering.
+- **A wrongly-refused run costs one retry with a raised cap. A wrongly-cleared
+  one costs money that is already gone.**
+- **The check is on the post-charge total, not the increment**, so a single
+  reservation larger than the whole ceiling is refused outright. Otherwise the
+  guard's first call is free — and the first call is the one most likely to be
+  the pathological one.
+- **`RunCeilingExceeded` is not a `CeilingExceeded`.** Control 2 firing means
+  something is wrong; this firing is ordinary. A shared type lets an `except
+  CeilingExceeded` written for the runaway case swallow the routine one, which
+  is the direction that spends money.
+
+### 6.4 The finding the build produced (M1.102)
+
+`run.est_cost_usd` has **two** writers, and control 3's wording covers only one.
+
+The second is `reconcile`, applying the estimate-to-actual delta to the
+**submitting** run (B3.1, M1.90). Applied there, a per-run ceiling inverts: the
+money is already spent, and refusing the correction leaves the column holding a
+number known to be wrong. Control 2 sums that column — so **a per-run guard that
+blocks its own bookkeeping makes the guard that actually bounds spend read a
+falsehood**, in the under-counting direction, which is M1.69's argument arriving
+through a different door.
+
+`ledger.reconcile_run` exists so that this is a **ruling and not an accident of
+one call site**. `reconcile` previously wrote the column with an inline
+`UPDATE`; control 3 not applying to it would have been true by omission and
+undocumented. A test drives an actual that takes a run to **$7.90**, past the
+$5.00 ceiling, and asserts it lands.
+
+### 6.5 The tests
+
+Seven, in `tests/test_cost_ledger.py::ThePerRunCeiling` and
+`::TheReservationPathEnforcesControl3`:
+
+| Test | Proves |
+|---|---|
+| `test_a_run_is_refused_at_the_per_run_ceiling` | four charges of $1.20 pass, the fifth is refused, **and the accumulator has not moved** |
+| `test_the_check_is_on_the_total_not_the_increment` | a single $9.99 call is refused outright |
+| `test_control_2_is_not_replaced_by_control_3` | ten runs of $4.50 are each legal under control 3 and together trip control 2 |
+| `test_it_cannot_be_applied_without_consulting_control_2` | the clearance is required |
+| `test_a_run_that_does_not_exist_is_refused_not_treated_as_empty` | an absent run is not read as having spent nothing |
+| `test_reconciliation_is_never_refused_by_the_per_run_ceiling` | M1.102's ruling, both directions of delta |
+| `test_an_oversized_reservation_leaves_no_batch_row_and_no_charge` | the refusal rolls back M1.72's transaction — **nothing on the books** |
+
+Suite: **705 passed, 2 skipped, 139 subtests** (was 698 before this unit).
