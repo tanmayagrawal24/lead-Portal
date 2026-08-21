@@ -290,12 +290,22 @@ class BatchDisposition(unittest.TestCase):
             _item("a", llm.RequestOutcome.SUCCEEDED),
             _item("b", llm.RequestOutcome.EXPIRED),
         ]
-        self.assertIs(llm.resolve_batch_status(items), llm.BatchStatus.COMPLETED)
+        # 9b: `expired` now CLOSES the batch rather than leaving it "completed"
+        # (M1.86). Nothing more arrives from this batch; §5.6 re-submits `b` as
+        # new spend in a new batch that §7 reserves like any other. `expired` and
+        # `failed` were declared in §4 and reachable from nothing before this.
+        self.assertIs(
+            llm.resolve_batch_status(items, expected=["a", "b"]),
+            llm.BatchStatus.EXPIRED,
+        )
         self.assertEqual(llm.resubmittable(items), ("b",))
 
     def test_all_succeeded_reconciles(self) -> None:
         items = [_item("a", llm.RequestOutcome.SUCCEEDED)]
-        self.assertIs(llm.resolve_batch_status(items), llm.BatchStatus.RECONCILED)
+        self.assertIs(
+            llm.resolve_batch_status(items, expected=["a"]),
+            llm.BatchStatus.RECONCILED,
+        )
         self.assertEqual(llm.resubmittable(items), ())
 
     def test_invalid_request_owes_nothing_and_closes_the_batch(self) -> None:
@@ -305,12 +315,19 @@ class BatchDisposition(unittest.TestCase):
             _item("a", llm.RequestOutcome.SUCCEEDED),
             _item("b", llm.RequestOutcome.INVALID_REQUEST),
         ]
-        self.assertIs(llm.resolve_batch_status(items), llm.BatchStatus.RECONCILED)
+        self.assertIs(
+            llm.resolve_batch_status(items, expected=["a", "b"]),
+            llm.BatchStatus.RECONCILED,
+        )
         self.assertEqual(llm.resubmittable(items), ())
 
-    def test_server_error_keeps_the_batch_open(self) -> None:
+    def test_server_error_closes_the_batch_as_failed(self) -> None:
+        """9b: terminal for THIS batch, and distinct from `expired` because the
+        two send an operator to different places — one waits, one retries."""
         items = [_item("a", llm.RequestOutcome.SERVER_ERROR)]
-        self.assertIs(llm.resolve_batch_status(items), llm.BatchStatus.COMPLETED)
+        self.assertIs(
+            llm.resolve_batch_status(items, expected=["a"]), llm.BatchStatus.FAILED
+        )
         self.assertEqual(llm.resubmittable(items), ("a",))
 
     def test_balance_exhausted_is_its_own_status_not_a_failure(self) -> None:
@@ -320,11 +337,29 @@ class BatchDisposition(unittest.TestCase):
             _item("b", llm.RequestOutcome.BALANCE_EXHAUSTED),
         ]
         self.assertIs(
-            llm.resolve_batch_status(items), llm.BatchStatus.BALANCE_EXHAUSTED
+            llm.resolve_batch_status(items, expected=["a", "b"]),
+            llm.BatchStatus.BALANCE_EXHAUSTED,
         )
 
     def test_no_results_read_is_not_a_finished_batch(self) -> None:
-        self.assertIs(llm.resolve_batch_status([]), llm.BatchStatus.SUBMITTED)
+        self.assertIs(
+            llm.resolve_batch_status([], expected=["a"]), llm.BatchStatus.SUBMITTED
+        )
+
+    def test_a_request_with_no_result_at_all_keeps_the_batch_open(self) -> None:
+        """**M1.86, measured before it was fixed.** Ten sent, eight returned:
+        the version that took only `items` said RECONCILED and `resubmittable`
+        said nothing, so two companies went unextracted with nothing naming
+        them. §5.6 fact 2 is a rule about a SET and `request_count` is a number.
+        """
+        sent = [f"impressum:{i}:{i}" for i in range(10)]
+        returned = [_item(cid, llm.RequestOutcome.SUCCEEDED) for cid in sent[:8]]
+        self.assertIs(
+            llm.resolve_batch_status(returned, expected=sent),
+            llm.BatchStatus.COMPLETED,
+        )
+        # And the guard M1.51 built cannot see it: nothing is retryable.
+        self.assertEqual(llm.resubmittable(returned), ())
 
     def test_both_balance_failure_seams_are_representable(self) -> None:
         """M1.53 — which one is real is unverified, so both must exist and the

@@ -4,8 +4,10 @@ Each pipeline stage is its own subcommand, independently re-runnable (§5).
 Built so far: `init`, `fetch`, `extract-p1`, `score`, `serve`, plus the
 inspection commands `diff-signals`, `audit-politeness`,
 `audit-impressum-candidates`, `llm-prices` and `extract-p2 --dry-run`.
-`extract-p2`'s **submitting** half and `reconcile` arrive with M5 phase 9b;
-`discover` with M8.
+`extract-p2`'s **submitting** half is built (9b) and is **not reachable from
+here**: `extract-p2` still exits 2 without `--dry-run`, and stays that way until
+9c is authorised in writing. `reconcile` is a subcommand as of 9b and collects
+whatever batches the database holds. `discover` arrives with M8.
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ from portal import (
     ruleset,
     score,
     seeds,
+)
+from portal import (
+    reconcile as reconcile_mod,
 )
 from portal import (
     serve as serve_mod,
@@ -228,6 +233,83 @@ def cmd_extract_p2(path: Path, dry_run: bool) -> int:
         f"\n{len(requests)} batch request(s) built. Nothing was sent and nothing "
         "was reserved; §7 control 4 is 9b's."
     )
+    return 0
+
+
+def cmd_reconcile(path: Path, model: str) -> int:
+    """§5.6. Poll every open batch, verify what came back, write it down.
+
+    **Finds its work in `llm_batch` and nowhere else**, which is what makes it
+    survivable: a batch takes up to 24 hours and its results stay retrievable
+    for 29 days, so the process that submitted it is routinely gone. Nothing is
+    handed over.
+
+    It needs `ANTHROPIC_API_KEY`, because polling is a call — a free one, on a
+    result already paid for, but a call. It commits no new spend: every path
+    here either reads a result or writes what a reservation already committed.
+
+    **Today it will find nothing in production**, because `extract-p2` refuses
+    to submit until 9c is authorised. That is the same order the ledger shipped
+    in (M1.69–M1.71): the collector exists before the thing that gives it work,
+    so the work is written against its presence.
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    conn = db.connect(path)
+    try:
+        open_batches = reconcile_mod.open_batches(conn)
+        reserved = reconcile_mod.reserved_batches(conn)
+        if not open_batches and not reserved:
+            print("reconcile: no open batches. Nothing to collect.")
+            return 0
+        provider = llm_anthropic.AnthropicProvider(model=model)
+        result = reconcile_mod.run(conn, provider, config.artifacts_root(path))
+    except llm_anthropic.MissingKeyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+
+    print(f"reconcile: run {result.run_id}, {len(result.batches)} batch(es) polled\n")
+    for report in result.batches:
+        arrow = f"{report.status_before} -> {report.status_after}"
+        print(f"  batch {report.batch_id} ({report.purpose}) {arrow}")
+        print(f"      {report.provider_batch_id}")
+        if report.dispositions:
+            summary = ", ".join(
+                f"{n}x {name}" for name, n in sorted(report.dispositions.items())
+            )
+            print(f"      {summary}")
+        print(
+            f"      {report.signals_written} signal(s), "
+            f"{report.contacts_written} contact(s)"
+        )
+        if report.actual_cost_usd is not None:
+            print(
+                f"      reserved ${report.est_cost_usd:.4f}, "
+                f"measured ${report.actual_cost_usd:.4f}, "
+                f"ledger {report.ledger_delta_usd:+.4f} on run"
+            )
+        if report.still_owed:
+            # M1.86: a request with no result at all. Named, because
+            # `request_count` cannot name it and nothing else would.
+            print(f"      STILL OWED: {', '.join(report.still_owed)}")
+        if report.resubmittable:
+            print(
+                f"      resubmittable as NEW spend (§5.6): "
+                f"{', '.join(report.resubmittable)}"
+            )
+        if report.note:
+            print(f"      {report.note}")
+    for batch in result.reserved_unknown:
+        # Migration 014. The money is counted and nothing releases it
+        # automatically; only a person can say what happened.
+        print(
+            f"  batch {batch.id} ({batch.purpose}) RESERVED, submit outcome "
+            f"unknown — ${batch.est_cost_usd:.4f} is counted against run "
+            f"{batch.run_id} and will not be released automatically"
+        )
     return 0
 
 
@@ -751,6 +833,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="print what would be sent and send nothing. Required today.",
     )
 
+    reconcile_parser = sub.add_parser(
+        "reconcile",
+        help="§5.6: poll every open batch, verify results against the sent "
+        "text, write signals and contacts. Reads its work from the database",
+    )
+    reconcile_parser.add_argument(
+        "--model",
+        default=llm_anthropic.DEFAULT_MODEL,
+        help=f"the model whose batches to poll (default {llm_anthropic.DEFAULT_MODEL})",
+    )
+
     prices_parser = sub.add_parser(
         "llm-prices",
         help="the declared price and model-limit tables with their as-of dates; "
@@ -809,6 +902,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "extract-p2":
         return cmd_extract_p2(path, args.dry_run)
+    if args.command == "reconcile":
+        return cmd_reconcile(path, args.model)
 
     if args.command == "score":
         return cmd_score(path, args.phase)

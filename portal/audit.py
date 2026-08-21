@@ -237,7 +237,7 @@ class UnverifiableOrigin:
 def unverifiable_origins(conn: sqlite3.Connection) -> list[UnverifiableOrigin]:
     """Every authority carrying stored bodies with no robots artifact of its own.
 
-    This is the audit-side statement of the same rule `impressum_audit._policy`
+    This is the audit-side statement of the same rule `impressum_audit.policy_for`
     applies per body: where the origin cannot be established the answer is *not
     verifiable*, never *allowed*. Reported separately from `robots_coverage`'s
     two classes because it sends a person somewhere else — not "this host failed

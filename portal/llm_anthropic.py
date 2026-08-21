@@ -224,7 +224,17 @@ class AnthropicProvider:
         # Raises on a duplicate id rather than keeping whichever arrived last.
         llm.index_by_custom_id(items)
         return llm.BatchResult(
-            provider_batch_id, llm.resolve_batch_status(items), items
+            provider_batch_id,
+            # **The provider-side question only, and the call site says so
+            # (M1.86).** `expected` is what was SENT, and this layer does not
+            # know it — `llm_batch_request` does, and `reconcile` re-resolves
+            # against that stored set. Passing the returned ids here is not a
+            # workaround for the missing set; it is the honest statement that
+            # from inside the provider, "every request" and "every result" are
+            # the same thing. The status on this object is therefore an upper
+            # bound on how finished the batch is, never a lower one.
+            llm.resolve_batch_status(items, expected=[i.custom_id for i in items]),
+            items,
         )
 
     # ── result mapping (offline) ────────────────────────────────────────

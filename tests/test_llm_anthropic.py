@@ -244,7 +244,10 @@ class Polling(unittest.TestCase):
         )
         provider = llm_anthropic.AnthropicProvider(client=client)
         result = provider.poll_batch("msgbatch_fake")
-        self.assertIs(result.status, llm.BatchStatus.COMPLETED)
+        # The PROVIDER-side status only (M1.86): this layer does not know what
+        # was sent, so "every request" and "every result" are the same thing
+        # from inside it. `reconcile` re-resolves against `llm_batch_request`.
+        self.assertIs(result.status, llm.BatchStatus.EXPIRED)
         self.assertEqual(llm.resubmittable(result.items), ("b",))
 
     def test_errored_splits_into_retryable_and_not(self) -> None:

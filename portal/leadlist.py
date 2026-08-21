@@ -164,6 +164,9 @@ class Lead:
     open_flags: int
     components: tuple[Component, ...] = ()
     flags: tuple[Flag, ...] = ()
+    #: Every `confidence = 0` signal for this company, **whether or not any rule
+    #: reads its key** (M1.85, settled in 9b). See `rejected_values` below.
+    rejected: tuple[Evidence, ...] = ()
 
     @property
     def scored(self) -> bool:
@@ -172,6 +175,33 @@ class Lead:
     @property
     def abstentions(self) -> tuple[Component, ...]:
         return tuple(c for c in self.components if c.abstained)
+
+    @property
+    def rejected_unread(self) -> tuple[Evidence, ...]:
+        """Rejected values that **no component renders** — M1.85's recorded gap.
+
+        §9 renders a `confidence = 0` value in red *beneath its
+        `score_component`*, and `evaluate` writes no component for a rule that
+        declines (A7). So the red rendering was only ever reachable where the
+        value's rule still produced one. For every §5.5b key a §6 rule reads it
+        does, because M1.81's three-state predicates abstain on a rejected value
+        and an abstention **is** a component worth 0 points.
+
+        **For the keys no rule reads, it did not.** Nine §8/§9-only Impressum
+        fields and `agency.footer_credit_llm` produce no component on any path,
+        so a value the tool had checked and disbelieved stayed queryable in
+        `signal` and was invisible on the page — including
+        `impressum.legal_name`, which is what goes in the letter and is the
+        single worst thing to be wrong about (§5.5b). That is what 9b settles:
+        this is the second render path, and it does **not** hang off
+        `score_component`.
+        """
+        rendered = {
+            evidence.key
+            for component in self.components
+            for evidence in component.evidence
+        }
+        return tuple(item for item in self.rejected if item.key not in rendered)
 
     @property
     def hook(self) -> str:
@@ -322,6 +352,7 @@ class LeadList:
         rows = self.conn.execute(self._SUMMARY).fetchall()
         components = self._components_by_company()
         flags = self._flags_by_company()
+        rejected = self._rejected_by_company()
 
         leads = []
         for row in rows:
@@ -333,6 +364,7 @@ class LeadList:
                         **lead.__dict__,
                         "components": components.get(company_id, ()),
                         "flags": flags.get(company_id, ()),
+                        "rejected": rejected.get(company_id, ()),
                     }
                 )
             )
@@ -456,6 +488,51 @@ class LeadList:
                 artifact_id=row["artifact_id"],
                 method=row["method"],
                 confidence=row["confidence"],
+            )
+        return out
+
+    def _rejected_by_company(self) -> dict[int, tuple[Evidence, ...]]:
+        """Every `confidence = 0` signal, keyed by company (M1.85).
+
+        **Deliberately not scoped to the authoritative run, and deliberately not
+        keyed on whether a rule reads it.** Both of those filters are correct
+        for `_evidence_by_company`, whose job is to show what a component was
+        evaluated against; this one's job is the opposite — *what did the tool
+        check and disbelieve?* — and a rejected value that a later run
+        superseded is still a value that was rejected, still queryable, and
+        still the thing an operator wants to know about before writing to a
+        stranger.
+
+        It reuses `Evidence` rather than a second shape, so the template renders
+        both paths with one partial and `unverified` means one thing in the
+        codebase.
+        """
+        out: dict[int, tuple[Evidence, ...]] = {}
+        rows = self.conn.execute("""
+            SELECT s.company_id, s.key, s.value_text, s.value_num, s.value_date,
+                   s.method, s.confidence, s.evidence_url, s.artifact_id
+            FROM signal s
+            WHERE s.method = 'llm' AND s.confidence = 0
+            ORDER BY s.company_id, s.key, s.id DESC
+        """).fetchall()
+        for row in rows:
+            value = row["value_text"] or row["value_date"]
+            if value is None and row["value_num"] is not None:
+                number = float(row["value_num"])
+                value = str(int(number)) if number.is_integer() else str(number)
+            company_id = int(row["company_id"])
+            items = out.get(company_id, ())
+            if any(item.key == row["key"] for item in items):
+                continue  # newest per key; ORDER BY id DESC put it first
+            out[company_id] = items + (
+                Evidence(
+                    key=row["key"],
+                    value=str(value) if value is not None else "",
+                    evidence_url=row["evidence_url"] or "",
+                    artifact_id=row["artifact_id"],
+                    method=row["method"],
+                    confidence=row["confidence"],
+                ),
             )
         return out
 
