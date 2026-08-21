@@ -982,5 +982,29 @@ measurement narrows that — **the Impressum of every one of these thirteen shop
 is on this disk right now**, and the erasure path for those bytes is as absent as
 it is for the rows that were never created.
 
+
+### 14.10 CI — the second session's run, recorded after it was observed
+
+Workflow run `32530318891` on PR #7 at `35eedc7`, **all four jobs green**
+(M1.19: the authority is the run that gates the merge):
+
+| Job | Result |
+|---|---|
+| `ruff` | pass |
+| `pytest (py3.11)` | pass |
+| `pytest (py3.12)` | pass |
+| `audit-politeness (fixture corpus)` | pass |
+
+Locally, **705 passed, 2 skipped, 139 subtests** — unchanged, as it must be: this
+session changed no code. `assert-no-api-key` passed, which is worth one line
+given the subject of this section — **CI is the one environment in this project
+where the absence of `ANTHROPIC_API_KEY` is a passing condition rather than a
+blocker**, and it stayed absent there too.
+
+§4's caveat still holds and still is not a contradiction: the politeness job is
+green on the fixture corpus while §4's audit of the **real** corpus exits 1 with
+`§5.2 robots: BREACHED`, because the fixture server gives every origin its own
+robots.txt and M1.103's collapse cannot occur there.
+
 **Dollars spent by this unit, across both sessions: $0.00.**
 
