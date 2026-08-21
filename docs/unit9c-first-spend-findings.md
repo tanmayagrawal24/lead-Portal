@@ -659,7 +659,8 @@ Per the brief: not re-derived in full. Four rows changed.
 | §10.7b's closing procedure | Specified; never executed | **EXECUTED, failed silently, HARDENED** — terminal verdict line required | M1.105 (§14.2) |
 | The batch question (§10.7b) | OPEN, listing never run | **Still OPEN** — listing attempted, did not complete | §14.2 |
 | `reserve_and_submit` vs. a real provider | Fake-only | **Abort path measured** — `MissingKeyError`, nothing on the books | §14.4 |
-| `ANTHROPIC_API_KEY` | Unset | **Still unset** — absent from PID 1 in a container restarted 21:36:39 UTC | §14.1 |
+| `ANTHROPIC_API_KEY` | Unset | **Still unset** — absent from PID 1 across **two** container starts (21:36:39, 22:10:38 UTC) | §14.1, §15.1 |
+| Which Codespaces store holds it | Unresolved — *empty store* vs *empty response* not separated | **RESOLVED: neither** — repo and user stores both return an explicit `total_count: 0`; repo-level secret is the fix and does not exist | §15.2 |
 
 **Unchanged and explicitly re-checked:** the batch question (§10.7b) is still
 open and still not zero; `interrupted-M5-remnant` is still stashed and
@@ -1008,3 +1009,96 @@ robots.txt and M1.103's collapse cannot occur there.
 
 **Dollars spent by this unit, across both sessions: $0.00.**
 
+
+---
+
+## 15. The third session — the same wall, and the one question it could answer
+
+A third session on 2026-08-21 (22:11 UTC) opened with steps 4–5 *"blocked only on
+a credential"* and Step 0's instruction to measure it at the point of use.
+**It is still not present. The unit stops in the same place a third time.** This
+section is short because almost nothing here is new — but one thing is, and it is
+the thing the brief actually asked for.
+
+### 15.1 The credential — absent, third measurement, second restart
+
+Measured per M1.105, in the environment of the process that would make the call:
+
+| Where | `ANTHROPIC_API_KEY` |
+|---|---|
+| this shell's environment | **absent** (`UNSET`, not empty-string) |
+| a `python3` child process — where the client would be built | **absent** |
+| **PID 1 — `docker-init`, started 22:10:38 UTC** | **absent** |
+
+The only `anthropic` string anywhere in the environment is
+`CLAUDE_CODE_EXECPATH`, which is the VS Code extension's install path and not a
+credential.
+
+**The container restarted again.** §14.1 recorded `docker-init` starting at
+**21:36:39 UTC**; this session's `docker-init` started at **22:10:38 UTC**. That
+is a **second** container start today, and the key was absent from PID 1 in both.
+Injection happens at container start, so the remedy of *restart and it will
+arrive* has now been tried twice and has not worked. The codespace itself is
+unchanged — `created_at` 2026-08-15, still `Available` — so this is a container
+replacement inside a persisted codespace, which is why `data/portal.db` and
+`data/artifacts/` are still on disk.
+
+### 15.2 Which of the two causes is true — the repository-level store is empty
+
+This is the question §14.1 could not answer and this session can. §14.1 reported
+the two Codespaces secret stores as *"returned successfully with no secret
+names"* and was careful to call that the weaker evidence it was, because a
+sandbox restriction meant *empty store* and *empty response* were not
+separated. **They are separated now:**
+
+| Endpoint | Status | Body |
+|---|---|---|
+| `user/codespaces/secrets` | `200` | `{"total_count":0,"secrets":[]}` |
+| `repos/:owner/:repo/codespaces/secrets` | `200` | `{"total_count":0,"secrets":[]}` |
+| `repos/:owner/:repo/actions/secrets` | `403` | `Resource not accessible by integration` |
+| `repos/:owner/:repo/dependabot/secrets` | `403` | `Resource not accessible by integration` |
+
+**The 403s are what make the 200s worth reading.** The two stores that answered
+returned a parsed, explicit `total_count` of **zero** — not an absence of names
+that a permissions failure could equally produce — while the same token was
+refused outright on the two stores it may not read. An instrument that returns
+*nothing* is only trustworthy once it has been shown to say *no* differently from
+how it says *forbidden*; this one does. That is M1.105's rule applied to a second
+instrument, and it is the reason this table is evidence rather than the same
+weak reading §14.1 already declined to lean on.
+
+**So, answering Step 0's two questions directly:**
+
+- **Is there a repository-level secret?** **No.** The repo Codespaces store is
+  readable by this token and reports zero secrets. Since that form has no grant
+  step, creating one there remains the fix — and it has not been created.
+- **Has the container started since the secret was added?** **Yes, twice** —
+  21:36:39 and 22:10:38 UTC — assuming the secret predates this session's brief.
+  Restarting is therefore not the missing step, which leaves the user-level
+  secret's repository-access grant as the remaining candidate. The user store
+  also reports zero, which would additionally be consistent with the secret
+  living under a different account than the one this token authenticates
+  (`tanmayagrawal24`); that is the one branch this session cannot discriminate
+  from inside the container.
+
+**Both forbidden workarounds remain untouched.** M1.99's `claudeAiOauth` token in
+`~/.claude/.credentials.json` was not read; M1.52's heuristic estimate was not
+substituted for `count_tokens`. No workaround was attempted, per the brief's
+ruling that this is the user's action.
+
+### 15.3 What this session did not do, and why that is correct
+
+**Nothing after Step 0 ran.** §10.7b's hardened procedure was not executed,
+because it constructs a client and the client cannot be constructed; Gate A was
+not re-run, because §14.3 already recorded it byte-identical and nothing has
+changed since; no batch was submitted. **§10.7b therefore remains OPEN, and it is
+still not zero** — unchanged, and explicitly not re-litigated.
+
+**No amendment was raised.** The general rule this session's measurement
+illustrates — that a negative result must be a printed statement rather than an
+absence of output — is already **M1.105**, and §15.2 is that rule applied, not a
+new one. Raising `M1.<106>` to record the same lesson against a second instrument
+would inflate the register for a measurement. **Next free amendment is therefore
+still `M1.<106>`** (angle brackets per M1.94).
+
+**Dollars spent by this unit, across all three sessions: $0.00.**
