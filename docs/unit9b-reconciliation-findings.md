@@ -5,7 +5,7 @@ crawl, no API call, no spend, and no `ANTHROPIC_API_KEY` at any point** — the
 variable was confirmed unset before the first command and the only network
 traffic was `git`, `gh`, and loopback fixture servers.
 
-M5 phase 9b, closing unit. Companion to **M1.86–M1.93** in
+M5 phase 9b, closing unit. Companion to **M1.86–M1.94** in
 `docs/lead-portal-spec-v0.3.md`.
 
 **What this unit is.** 9b built `portal/reconcile.py`, migrations `014` and
@@ -335,15 +335,21 @@ light wired to nothing (M1.62).
 An undeclared citation was appended to `portal/reconcile.py`:
 
 ```python
-# negative control: a number with no row (M1.994).
+# negative control: a number with no row (M1.<994>).
 ```
 
-Observed:
+**The angle brackets are this document defending itself, and §7.1 is why.** The
+line as injected had no brackets. It is written with them here because this
+document is a tracked file and the check greps tracked files, so quoting the
+control verbatim would make this paragraph an undeclared citation. `M1.<994>`
+does not match `M1\.\d+`; the injected line did.
+
+Observed (same substitution, for the same reason):
 
 ```
 AssertionError: 1 amendment number(s) are cited in the tree and have no row in
 the amendment table of docs/lead-portal-spec-v0.3.md:
-  M1.994 — cited in portal/reconcile.py
+  M1.<994> — cited in portal/reconcile.py
 1 failed, 1 passed
 ```
 
@@ -354,6 +360,46 @@ what makes the failure actionable rather than merely red.
 
 **No other negative control was run in this unit, and none is claimed** — see
 §8.
+
+### 7.1 M1.94 — the check's first CI run failed on the document describing it
+
+**This is not a footnote to the control; it is the control's second result, and
+it was found by CI rather than by reasoning.**
+
+The first push opened PR #5 and both `pytest` jobs went red. The failure:
+
+```
+M1.<994> — cited in docs/unit9b-reconciliation-findings.md
+1 failed, 697 passed, 2 skipped, 139 subtests
+```
+
+**A document that quotes a citation is a citation.** §7 above had recorded the
+negative control by reproducing the injected line, and the check — correctly,
+by its own rule — refused it.
+
+**The part worth the number is why it was green locally.** The check enumerates
+with `git ls-files`, chosen so that `.mypy_cache` and untracked scratch could
+not influence a check about what the repository says. The consequence was not
+foreseen: **while this document was untracked, it was invisible to the check.**
+Every local run passed. It went red the moment the file was committed and CI
+ran against a tree where it was tracked.
+
+So the check is **strictly more permissive before a commit than after it**, and
+a unit that runs it locally and pushes has not run the check that will judge it.
+That is a real property of the mechanism and it points the same direction as
+M1.19: the authority is the run that gates the merge, not the run on the
+author's machine.
+
+**Fixed in the document, not in the check.** An exclusion — *ignore a citation
+on a line containing "negative control"* — was considered and rejected: it is a
+hole with a name, and a rule that can be opted out of by writing a phrase is the
+convention this test exists to replace. The document adapts instead, and says
+so where it does.
+
+**And the branch had never run CI at all.** The workflow triggers on
+push-to-main and `pull_request`; three commits of 9b had been pushed to a branch
+with no PR, so nothing had ever fired. The first thing CI did when finally given
+the chance was find a defect that four local full-suite runs could not.
 
 ---
 
@@ -424,6 +470,12 @@ Every row above is attributed.
 * **M1.91's residual.** The check enforces that a citation resolves to a row. It
   cannot enforce that the row means what the citation means, and it cannot see a
   finding that was never numbered at all.
+* **M1.94's residual — recorded, deliberately not closed.** Because the scan
+  enumerates with `git ls-files`, an **untracked** file is invisible to it, so a
+  local run is strictly more permissive than the CI run that gates the merge.
+  Closing it means scanning the working tree, which is exactly what
+  `git ls-files` was chosen to avoid. The mitigation is M1.19's: trust the run
+  that gates the merge.
 * **Inference error in a verified boolean** (M1.49). Unguarded, bounded
   arithmetically, unchanged by this unit.
 
@@ -501,6 +553,7 @@ artefact that decides it, with the method named per row. **No row was taken from
 | **B3.2** ceiling sums estimates, never actuals | **CLOSED (M1.90)** | `reconcile.actual_cost_usd` at `:520` is the first measured number; `_correct_the_reservation` at `:563` writes it back |
 | **B3.3** reconciliation cost-ledger rule | **CLOSED (M1.90)** | §7 control 12, four clauses, each verified against `_correct_the_reservation` (§1) |
 | **Amendment numbers cited but undeclared** | **CLOSED this unit (M1.91)** | 90 cited vs 85 declared before; `tests/test_amendment_register.py` green after, and observed red on an injected citation |
+| **The register check's blast radius** | **CLOSED this unit (M1.94)** | first CI run refused this document for quoting its own control; local runs had passed because the file was untracked. Quotation sites now use `M1.<994>` |
 | **§7 control numbering** | **CLOSED this unit (M1.92)** | written order re-parsed and compared to positional index: `1`–`12`, equal |
 | **Spec line 113's frozen list** | **CLOSED this unit (M1.93)** | membership deleted; replaced by a pointer to this register's method, per Unit 8 |
 | **9c — first real spend** | **NOT STARTED, needs written authorisation** | `portal extract-p2` without `--dry-run` → exit **2**, observed |
@@ -528,8 +581,8 @@ artefact that decides it, with the method named per row. **No row was taken from
 | **Inference error in a verified boolean** | **OPEN, unguarded, bounded** | M1.49; `test_a_boolean_is_verified_through_its_evidence_span` PASSED |
 | **`expired`, two enums one word** | **SETTLED, not a finding** | §6; documentation fixed, no behaviour change |
 
-**Three rows moved that no previous register had at all** — M1.91, M1.92 and
-M1.93 — and all three are defects in the project's own instrumentation rather
+**Four rows moved that no previous register had at all** — M1.91, M1.92, M1.93
+and M1.94 — and all four are defects in the project's own instrumentation rather
 than in the crawler, the ledger, or the model. That is the shape of this unit.
 
 ---
@@ -543,10 +596,11 @@ workspace.
 |---|---|
 | `6f5bc8d` baseline | 696 passed, 2 skipped, 139 subtests |
 | after this unit | **698 passed, 2 skipped, 139 subtests** (+2, both the new register check) |
+| first CI run (PR #5) | **2 of 4 red** — `pytest` 3.11 and 3.12, on M1.94; `ruff` and `audit-politeness` green |
 | `tests/test_amendment_register.py` | 2 passed in 0.14 s |
-| negative control (injected `M1.994`) | **1 failed, 1 passed**, naming the file; restored, `git diff --stat` empty |
+| negative control (injected `M1.<994>`) | **1 failed, 1 passed**, naming the file; restored, `git diff --stat` empty |
 | declared vs cited, before | 85 declared / 90 cited / 5 undeclared |
-| declared vs cited, after | **93 declared / 93 cited / 0 undeclared** |
+| declared vs cited, after | **94 declared / 94 cited / 0 undeclared** |
 | §7 written order vs rendered order | `1`–`12`, equal |
 | `ruff check .` | clean |
 | `ruff format --check .` | clean |
