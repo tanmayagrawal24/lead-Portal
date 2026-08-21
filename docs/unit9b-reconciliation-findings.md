@@ -608,7 +608,7 @@ workspace.
 | `audit-politeness` breached corpus | exit **1**, §5.2 BREACHED, 1 unread |
 | `extract-p2` without `--dry-run` | exit **2**, naming 9b and 9c |
 | M1.73 counter grep | **seven** files — Units 4, 5, 6, 7, 8, 9a, 9b |
-| CI on the PR | CI_PLACEHOLDER |
+| CI on the PR, after M1.94 | **4 of 4 green** — `ruff`, `pytest (py3.11)`, `pytest (py3.12)`, `audit-politeness` |
 
 **Size.** **704 insertions across 4 files** for this closing unit, of which 563 lines are this findings document, 98 are `tests/test_amendment_register.py`, and the remainder is spec prose and one docstring clause. **No production behaviour changed**: the only non-comment edit outside `docs/` and `tests/` is zero lines. The 9b branch as a whole is 3,309 insertions across 16 files against `main`.
 
