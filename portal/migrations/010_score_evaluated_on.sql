@@ -1,13 +1,21 @@
 -- 010 — `score.evaluated_on`: the date the rules were actually run against.
 --
--- **THE NUMBER 010 HAS BEEN USED ONCE BEFORE, FOR A DIFFERENT AND
--- UNRECOVERABLE FILE.** The interrupted M5 work (stashed 2026-08-17 at
--- `6a5e266`, lost with its container — §10.4b) carried a `010_phase2_writers.sql`
--- creating `llm_batch_request`, a table with no writer and no registration in
--- the spec. That file no longer exists anywhere and cannot be recovered. This
--- is a *different* migration 010, and it is recorded here so that a later
--- reference to "migration 010" in the Unit 5 report or in §10.4b is not matched
--- to this file. Nothing here relates to batching.
+-- **THE NUMBER 010 HAS BEEN USED ONCE BEFORE, FOR A DIFFERENT FILE.** The
+-- interrupted M5 work (stashed 2026-08-17 at `6a5e266` — §10.4b) carried a
+-- `010_phase2_writers.sql` creating `llm_batch_request`, a table with no writer
+-- and no registration in the spec. This is a *different* migration 010, and it
+-- is recorded here so that a later reference to "migration 010" in the Unit 5
+-- report or in §10.4b is not matched to this file. Nothing here relates to
+-- batching.
+--
+-- **This header said that file was unrecoverable. It is not (M1.98).** It is
+-- readable at `stash@{0}^3` on the codespace Unit 5 ran on, verified 2026-08-21.
+-- It cannot reclaim the number 010 — this migration has it — so its content, if
+-- wanted, arrives on `016` or later with its writers, per M1.45(c). The claim
+-- was corrected rather than deleted because the propagation is the finding: an
+-- unverified conditional from Unit 6 was hardened into a fact and shipped into
+-- three migration headers, and no container re-ran `git stash list` for four
+-- units.
 --
 -- **M1.74, closing M1.66.** `evaluate` is a function of `(signals, today)`, so a
 -- band has no meaning without the date it was evaluated against. `score` had one
