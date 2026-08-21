@@ -6,7 +6,7 @@
 -- standing instruction is *"rebuild it in M5 with its writer, or register it in
 -- §10.6 as ahead-of-writer deliberately"*.** It is rebuilt here, with its
 -- writer, from the description rather than from the file — the stash is
--- unrecoverable and this schema was derived from §5.6's requirements, not
+-- unavailable to it and this schema was derived from §5.6's requirements, not
 -- remembered. Whatever the stash's columns were, these are the ones §5.6 needs.
 --
 -- ─────────────────────────────────────────────────────────────────────────

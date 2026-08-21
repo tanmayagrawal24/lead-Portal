@@ -604,6 +604,13 @@ on without measuring.
 **§10.6's `balance_exhausted` row named a migration number that had been taken.**
 It read *"migration 010 ships with M5's writer"*. `010` went to
 `score.evaluated_on` in Unit 8b, and the lost stash's `010` is unrecoverable.
+
+> **Correction, 2026-08-21 (M1.98): the stash is not lost and `010_phase2_writers.sql`
+> is not unrecoverable.** It is readable at `stash@{0}^3` on the codespace this project
+> has run on since 2026-08-15. The sentence above is left as written, because what it
+> recorded faithfully is what the register said at the time; the register was wrong.
+> Migration `010` is still taken by `score.evaluated_on`, so nothing else in this
+> paragraph changes.
 The row's claim — *not in the schema yet* — was still true; its number was not.
 Corrected, and reassigned to 9b with `014` or later.
 

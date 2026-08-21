@@ -1,7 +1,8 @@
 -- 011 — the Phase-2 columns A2 ruled and nothing ever built.
 --
 -- **The number carries no history.** 010 does (see its header: the lost M5
--- stash used 010 for a different, unrecoverable `010_phase2_writers.sql`).
+-- stash used 010 for a different `010_phase2_writers.sql`, which survives in
+--  `stash@{0}^3` and cannot reclaim the number — M1.98).
 -- 011 was left free by M1.75 deliberately — the origin-keyed robots lookup
 -- needed no schema change — and nothing has ever used it. Taken here.
 --
