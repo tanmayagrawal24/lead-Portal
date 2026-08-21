@@ -1,22 +1,36 @@
 # Unit 9c — the corpus rebuilt, two guards met a real server, and the per-run ceiling
 
-**DOLLARS SPENT: $0.00.** No batch was submitted. The corpus was rebuilt (free
-by construction — Phase 1 is deterministic and makes no paid call), §7 control 3
-was built and proved to refuse, and both gates were run — and the unit stopped at
-the submit call because **`ANTHROPIC_API_KEY` is unset on this machine and the
-two available workarounds are both forbidden by rulings this project wrote one
-unit ago** (M1.52, M1.99). §7.4 is the full account.
+**DOLLARS SPENT: $0.00.** No batch was submitted, and **no batch could be
+submitted**: `ANTHROPIC_API_KEY` is still absent from this machine. The corpus
+was rebuilt (free by construction — Phase 1 is deterministic and makes no paid
+call), §7 control 3 was built and proved to refuse, both gates were run, and the
+unit stopped at the submit call because the two available workarounds are both
+forbidden by rulings this project wrote one unit ago (M1.52, M1.99). §7.4 and
+§14 are the full account.
+
+**A second session on 2026-08-21 was told the key had been supplied as a
+Codespaces secret and went to make the first spend. It was not supplied — not to
+any process on this machine — so the unit stopped in the same place a second
+time, and found two things on the way** (§14). The sharper one is that
+**§10.7b's own closing procedure would have closed the open batch question
+without ever asking it**: run exactly as written it printed *nothing* on
+`stdout` and exited 1, because it failed during client construction before any
+network call. *Prints nothing* was specified to mean *no batch exists*. That is
+**M1.105**, and it is a finding about a money decision, not about a credential.
 
 **What is done:** the prep merged, the corpus rebuilt and its deltas reported,
-both live guards measured, control 3 built with seven tests, Gate A run, Gate B's
-structural checks passed. **What is not:** steps 4 and 5 — submit, restart
-survival against a real batch, reconcile, and the hallucination evidence that
-only a real run produces.
+both live guards measured, control 3 built with seven tests, Gate A run and
+**re-run byte-identically**, Gate B's structural checks passed, the real
+production reservation path driven **by the real provider for the first time**
+and observed to abort with nothing on the books (§14.4). **What is not:** steps
+4 and 5 — submit, restart survival against a real batch, reconcile, and the
+hallucination evidence that only a real run produces.
 
 Measured 2026-08-21 on `claude/unit9c-first-spend`, branched from `95d3281`
 (merged `main`, carrying 9c-prep's M1.95–M1.100).
 
-Migrations taken: none. Amendments: **M1.101–M1.104**.
+Migrations taken: **none, and 016 was not needed** (§14.5). Amendments:
+**M1.101–M1.105**.
 
 ---
 
@@ -547,13 +561,19 @@ one API key of writing nine of them. See M1.104.
 
 ## 9. Still open
 
-- **Was a batch ever submitted? (§10.7b, M1.100.)** Unchanged and still OPEN.
-  This unit could not run `messages.batches.list` for the same reason it could
-  not submit. **It is still not zero.**
+- **Was a batch ever submitted? (§10.7b, M1.100, M1.105.)** Still OPEN, and the
+  second session **attempted the listing and could not make it**: the procedure
+  failed in client construction with zero bytes on `stdout`, which §10.7b as
+  written defined to mean *no batch exists* (§14.2). **It is still not zero**,
+  the instrument is now hardened so that a future run cannot close it silently,
+  and the question is unchanged in every other respect.
 - **The first real spend.** Steps 4 and 5 of the brief. Everything up to the
   submit call is built, tested and dry-run; what is missing is a credential.
 - **`count_tokens` against a live model**, and with it §7 control 4's reservation
-  arithmetic end to end. The seam is exercised only by fakes.
+  arithmetic end to end. **The abort half is no longer fake-only** — the real
+  provider aborts the real `reserve_and_submit` with nothing on the books
+  (§14.4). Everything past step 1 — reserve, submit, provider id, restart
+  survival, reconcile — is still exercised only by fakes.
 - **M1.53's prepaid-balance assumption** — `llm-prices` still prints
   *"UNVERIFIED — it needs a live key."*
 - **M1.68's true-positive rate.** The address guard has now refused 0 of 249
@@ -595,6 +615,31 @@ call, and the dry run deliberately makes none.
 number in production".** True, and it still has not — but it has now returned
 `$0.0000` in production, against a real database, which it had not done before.
 
+### 10.1 The second session's brief, and where it was wrong
+
+**It said `ANTHROPIC_API_KEY` "is now set as a Codespaces secret" and asked for
+that to be confirmed first.** Confirming it first was the right instruction and
+it is the instruction that saved the session: **it is not present**, in any
+process on this machine, including PID 1 — in a container that had already
+restarted (§14.1). Had the confirmation been treated as a formality, the next
+step would have been a submit attempt built on a credential that does not exist.
+
+**It said `count_tokens` "can reach the network now, so the reservation is real
+for the first time".** It cannot; the reservation is still unpriced, and Gate A
+re-ran byte-identically with no dollar figure (§14.3).
+
+**It said §10.7b closes if the listing "prints nothing".** That is the sentence
+M1.105 corrects. The listing printed nothing **because it never ran**, and the
+brief's own reading would have closed a committed-spend question on the strength
+of a traceback nobody was looking at (§14.2). **The brief was right to put that
+check first and wrong about how to read its silence** — and putting it first is
+what exposed the second error.
+
+**It said to push the `provider_batch_id` the moment it returns, kill the
+process between submit and reconcile, and report dollars spent.** None of those
+happened, because nothing was submitted. **M5's done-when — restart survival
+against a real batch — has still only ever run against fakes.**
+
 **The brief predicted the crawl's numbers would differ from §10.7a and said not
 to treat differences as regressions.** Correct — and two rows came out
 *identical* (`propellerdiscount.de` 0+50, `germanelectronic.de` 5+50=55), which
@@ -611,13 +656,19 @@ Per the brief: not re-derived in full. Four rows changed.
 | §7 control 3 | Specified, not implemented | **BUILT** — `RUN_CEILING_USD`, `charge_run`, 7 tests | M1.101 (§6) |
 | `run.est_cost_usd`'s second writer | Unstated | **RULED** — reconciliation is never refused by control 3 | M1.102, `ledger.reconcile_run` (§6.4) |
 | §8 erasure path | Not previously registered | **OPEN, with the manual procedure written out** | M1.104 (§8) |
+| §10.7b's closing procedure | Specified; never executed | **EXECUTED, failed silently, HARDENED** — terminal verdict line required | M1.105 (§14.2) |
+| The batch question (§10.7b) | OPEN, listing never run | **Still OPEN** — listing attempted, did not complete | §14.2 |
+| `reserve_and_submit` vs. a real provider | Fake-only | **Abort path measured** — `MissingKeyError`, nothing on the books | §14.4 |
+| `ANTHROPIC_API_KEY` | Unset | **Still unset** — absent from PID 1 in a container restarted 21:36:39 UTC | §14.1 |
 
 **Unchanged and explicitly re-checked:** the batch question (§10.7b) is still
 open and still not zero; `interrupted-M5-remnant` is still stashed and
 unapplied; `portal/pagespeed.py` is still unbuilt; `run.pagespeed_calls` still
 exists nowhere; `llm_batch.status = 'balance_exhausted'` is still ahead of its
-writer. **Next free migration: `016`. Next free amendment: `M1.<105>`** (angle
-brackets per M1.94, so this line is not a citation).
+writer. **Next free migration: `016`** — unchanged, because 015 already carries
+everything steps 4 and 5 would write and a writerless migration is M1.45(c)
+(§14.5). **Next free amendment: `M1.<106>`** (angle brackets per M1.94, so this
+line is not a citation).
 
 ## 12. The counter (M1.73)
 
@@ -626,13 +677,14 @@ Re-run after this document existed, as the convention requires:
 ```
 $ git grep -ohE 'M1\.[0-9]+' -- docs/ portal/ tests/ README.md .github/ \
     | sed 's/M1\.//' | sort -n | uniq | tail -1
-104
+105
 $ grep -c '^| M1\.' docs/lead-portal-spec-v0.3.md
-104
+105
 ```
 
-**Cited maximum and declared row count agree at 104.** M1.91's check passes,
-which is the mechanism rather than the assertion.
+**Cited maximum and declared row count agree at 105.** M1.91's check passes,
+which is the mechanism rather than the assertion. Re-run after §14 and M1.105
+existed, as the convention requires.
 
 
 ---
@@ -659,3 +711,276 @@ about it in either direction.**
 `tests/conftest.py` (M1.95) had teeth on the runners again and was silent
 locally, where `data/` now exists because this unit rebuilt it — which is the
 first time that guard's stated blind spot has actually been occupied.
+
+---
+
+## 14. The second session — the key that was not there, and what it caught
+
+A second session on 2026-08-21 (21:36–22:00 UTC) opened with *"`ANTHROPIC_API_KEY`
+is now set as a Codespaces secret. Confirm it is present before anything else"*
+and a brief to make the first spend. **It is not present, the unit stopped in the
+same place a second time, and two things were found on the way there.**
+
+### 14.1 The credential — confirmed absent, at the point of use
+
+Checked where it would be used rather than where it was said to be:
+
+| Where | `ANTHROPIC_API_KEY` |
+|---|---|
+| this shell's environment | **absent** |
+| `claude`'s own environ (PID 2692) | **absent** |
+| **PID 1 — `docker-init`** | **absent** |
+
+**PID 1 is the one that settles it.** Codespaces injects secrets into the
+container at start, so a secret that is not in `docker-init`'s environment was
+not injected into this container at all — no child process can inherit what the
+root of the tree does not have.
+
+**And the container had already restarted.** `docker-init` started at
+**21:36:39 UTC** and the check ran at **21:39:24**, so this is not the stale
+container 9c's first session ran in — that one is gone, and its corpus survives
+only because `data/` is on the persisted workspace volume. **A restart was the
+thing that would have picked the secret up, the restart happened, and the key
+still is not here.** The most likely remaining cause is a user-level secret with
+no repository access granted, which is the step that gates injection.
+
+Corroborating, and deliberately reported as the weaker evidence it is: the
+user-level and repository-level Codespaces secret stores each returned
+**successfully with no secret names**, while the Actions and Dependabot stores
+returned `403 Resource not accessible by integration` — so the two that answered
+did answer, and neither named an `ANTHROPIC` secret. A follow-up call to read
+`total_count` directly was blocked by this session's sandbox, so *empty store*
+and *empty response* are not separated here. **That gap does not affect the
+conclusion, and M1.105 is the reason why**: the decisive measurement is the one
+taken at the point of use, and it was taken.
+
+**Both forbidden workarounds are still forbidden and were not used.** M1.99's
+`claudeAiOauth` token is still in `~/.claude/.credentials.json`; M1.52 still
+forbids a heuristic estimate. Neither was touched.
+
+### 14.2 §10.7b — run first, as instructed, and it did not close (M1.105)
+
+The brief's ordering was right and was followed: **before anything that could
+submit**, run §10.7b's closing procedure. It was run exactly as §10.7b writes
+it, with `stdout` and `stderr` captured separately:
+
+```
+exit status : 1
+stdout      : 0 bytes
+stderr      : TypeError: "Could not resolve authentication method. Expected one
+              of api_key, auth_token, or credentials to be set..."
+              raised in anthropic/_client.py:399, _validate_headers
+```
+
+**Zero bytes on `stdout`, and no network call was made** — the failure is in
+client construction, before any request leaves the machine.
+
+**§10.7b, and the brief repeating it, both say: *if it prints nothing, no batch
+exists, no money has ever moved, and §10.7b closes*.** It printed nothing. It
+also never asked. Following the procedure as written would have closed a money
+question on the strength of an exception that a caller reading `stdout` never
+sees — and the decision that question gates is **whether resubmitting is safe**,
+where a wrong *closed* means paying twice for a batch already bought.
+
+**§10.7b is therefore still OPEN. It is still not zero.** Nothing about the batch
+question changed in this session except that its instrument was fixed.
+
+That instrument is now hardened (M1.105): the client is constructed on its own
+statement, the loop counts, and the procedure ends with a **printed terminal
+verdict** — `LISTING COMPLETED — {n} batch(es) on this account.` **That line is
+the evidence; the absence of rows is not.** No `LISTING COMPLETED`, for any
+reason, and the question stays open. The direction is deliberate and asymmetric:
+a wrongly-open question costs one re-run of a free read-only call, a wrongly-
+closed one authorises a resubmission against committed spend.
+
+**The general half, which is what makes it an amendment rather than a bug
+report: a negative result must be a printed statement, never an absence of
+output.** An instrument that reports *nothing* by saying nothing is
+indistinguishable from an instrument that did not run. §14.1 is the same class
+in the other direction — a credential's presence read from the store that should
+supply it rather than from the environment that would use it — and both were
+found without a key, which is why a session that never got one still has
+findings to record.
+
+### 14.3 GATE A, re-run — byte-identical
+
+The brief expected `count_tokens` to reach the network this time and make the
+reservation real for the first time. **It cannot, so it did not.** The dry run
+was re-run anyway, on the surviving corpus, and it reproduces exactly:
+
+```
+extract-p2 --dry-run: 9 companies would be sent
+  ... 9 requests, 94,269 bytes total ...
+  ekomia.de             SKIPPED — no 200 Impressum artifact with a body
+  propellerdiscount.de  SKIPPED — robots_unavailable: origin www.propellerdiscount.de (M1.75)
+  smoke2u.de            SKIPPED — robots_unavailable: origin www.smoke2u.de (M1.75)
+  snocks.com            SKIPPED — no 200 Impressum artifact with a body
+exit 0
+```
+
+**Same nine companies, same artifacts, same per-company byte counts, same
+94,269-byte total as §7.1.** The corpus on disk is the one 9c's first session
+built (13 companies, 228 artifacts, 161 signals, 3 runs), and it is unchanged.
+**Still no dollar figure, and that remains correct behaviour rather than a gap**
+— the reservation is `count_tokens`-derived by M1.52 and the dry run makes no
+network call by design.
+
+**GATE B stands and was never reached.** Its stop condition — *above $1.00, stop
+rather than spend* — could not be evaluated, because no priced reservation
+exists to compare against it. Nothing was submitted, so nothing came near it.
+
+### 14.4 The submit path, driven by the real provider — the abort is now measured
+
+This is the one thing this session could add to the paid seam, and it is worth
+having. §9's open list said the reservation seam *"is exercised only by fakes"*.
+**One half of it no longer is.**
+
+`extract_p2.reserve_and_submit` was called with the **real `AnthropicProvider`**,
+the real nine prepared pages, and a real `LedgerClearance`, against a **copy** of
+the production database:
+
+```
+BEFORE  llm_batch=0  llm_batch_request=0  sum(run.est_cost_usd)=$0.0000
+        ledger.monthly_spend_usd = $0.0000
+prepared=9  skipped=4
+clearance obtained: headroom=$45.0000
+provider=anthropic  model=claude-haiku-4-5
+--- calling reserve_and_submit (step 1 = count_tokens) ---
+ABORTED: portal.llm_anthropic.MissingKeyError
+MESSAGE: ANTHROPIC_API_KEY is not set. §7 control 9: keys come from the
+         environment only, and this call needs one.
+AFTER   llm_batch=0  llm_batch_request=0  sum(run.est_cost_usd)=$0.0000
+NOTHING ON THE BOOKS
+```
+
+**This is M1.52's ruling running in production code rather than in a test.** The
+docstring's four-step order holds: step 1 is `count_tokens`, it failed, and it
+**aborted rather than falling back to an estimate** — so no batch row, no request
+set, no reservation, and `run.est_cost_usd` unmoved. The failure is
+`MissingKeyError`, which `llm_anthropic._client` raises **before any network
+attempt**, so this could not have spent money even in principle.
+
+**What this does and does not establish.** It establishes that the abort path is
+correct end to end against the real provider, which had never been shown outside
+fakes. **It establishes nothing about the paths past step 1** — the reservation
+write, the submit call, the provider id, restart survival, reconciliation — all
+of which remain fake-only. A guard that refuses is not a guard that permits
+correctly.
+
+**The CLI is also still shut**, unchanged: `portal extract-p2` without
+`--dry-run` exits **2** with *"phase 9c is the first real spend and needs written
+authorisation"*.
+
+### 14.5 Migration 016 — not needed, and that is a finding of its own kind
+
+**No migration was taken and none should have been.** The schema at `015` already
+carries everything steps 4 and 5 would have written: `llm_batch` with `reserved`
+and `balance_exhausted` and a nullable `provider_batch_id` (014), and
+`llm_batch_request` with its stored request set and `sent_text_sha256` (015).
+Both tables are present in the live database and **both hold zero rows**, which
+is the same statement as *nothing has ever been reserved or submitted on this
+machine*.
+
+**`016` is still the next free number.** A migration invented to give this
+session something schema-shaped to ship would have been a schema change with no
+writer — precisely M1.45(c), the defect M1.104 recorded one section above.
+
+### 14.6 What steps 4 and 5 still owe
+
+Unchanged from §7.4 and restated because a second session reached the same wall:
+**no batch was submitted, no `provider_batch_id` exists, restart survival between
+submit and reconcile was not exercised against a real batch, nothing was
+reconciled, and the hallucination evidence §5 was reconstructed without is still
+not observed.** Estimate-versus-actual has no actual. §10.2's lever is still
+unobservable for the reason §9 gives — it needs what the model reads, and the
+model was not called.
+
+
+### 14.7 The re-score — nothing moved, and no weight was touched (§10.3)
+
+`portal score --phase 1` re-run on the surviving corpus. **All 13 totals and all
+13 bands are identical to §5.1**, to the point:
+
+```
+blackpolish.de 73 B   smoke2u.de 55 B   bio-fleischer-laden.de 45 C
+opulent-wohnen.com 45 C   verpackungskoenig.de 45 C   zecplus.de 45 C
+navucko.com 42 C   doonails.de 40 C   ekomia.de 40 C   snocks.com 40 C
+smile-store.de 18 D   germanelectronic.de 5 D   propellerdiscount.de 0 D
+```
+
+**What moved: nothing in the scores, one thing in the schema.** `score` gained
+13 new rows under a new `run_id` (3 → 4), which is `007_profile_scoped_to_
+finished_runs` working as designed — `score` is run-scoped and `company_profile`
+resolves to the newest finished run, so the view still returns **13 rows** with
+the same values. The re-run is a no-op in the values and an append in the rows,
+and those are different statements worth keeping apart.
+
+**§10.3's calibration block is intact. No weight, band, threshold or selector was
+changed by this session** — `git status` shows exactly two modified files, both
+under `docs/`, and `git diff` over `portal/` and `tests/` is empty. The identical
+totals are the *output* of unchanged rules on an unchanged corpus, not a result
+that anything was adjusted to reproduce.
+
+### 14.8 §10.2's lever — observed, and it is still unobservable
+
+Reported as an observation only, as instructed, and the observation is that
+**the lever cannot be read yet.**
+
+Its deterministic half is measurable and **matches none of the corpus**:
+
+| `legal_form` | companies |
+|---|---|
+| `GmbH` | 3 — `bio-fleischer-laden.de`, `propellerdiscount.de`, `verpackungskoenig.de` |
+| `GmbH & Co. KG` | 1 — `zecplus.de` |
+| `Ltd` | 1 — `doonails.de` |
+| `NULL` | 8 |
+| **`e.K.` / `Einzelunternehmen` / `GbR`** | **0** |
+
+So `legal_form ∈ {e.K., Einzelunternehmen, GbR}` still selects **nobody**,
+unchanged from §9.
+
+**Its other half is entirely unpopulated, and that is the point.** `owner_named`
+is `NULL` for all 13 companies and `gf_count` is `NULL` for all 13, because both
+are Phase 2 outputs — what the model reads off the Impressum about
+owner-operation — **and the model was not called.** The lever needs the two
+halves together; one is measured and empty, the other does not exist yet.
+Nothing here is evidence about whether the lever works, and it is recorded so
+that the empty column is not later mistaken for a measured zero — which is
+M1.59's distinction and, this unit having spent a section on it, M1.105's.
+
+
+### 14.9 §8 — what the nine contact rows hold: they do not exist
+
+Step 5's last item asked what nine `contact` rows now hold and what erasure would
+take. **`SELECT COUNT(*) FROM contact` returns 0.** No batch was submitted, so no
+result was reconciled, so no contact row was written. The nine Impressum pages
+Gate A prepared were never sent, and **no natural person's name, role, email,
+phone or postal address has entered this database.**
+
+**§8's analysis therefore stands exactly as written and stays prospective.**
+Nothing in it needed revising, because nothing it describes has happened yet:
+`purge_after` is still `NOT NULL` and still names a `portal purge` that does not
+exist; `portal forget` still does not exist; `ON DELETE CASCADE` still appears
+nine times and every one still hangs off `company(id)`, so a contact still
+cascades to nothing.
+
+**What honouring a deletion request would take today is unchanged and is
+§8's four-part list** — a hand-written multi-table `DELETE` reaching `contact`,
+`signal.value_text` and `signal.evidence_url`; a file deletion under
+`data/artifacts/`; an edit to `data/requests.jsonl`, which is append-only by
+design; and a 29-day window at the provider that nothing in this project can
+reach. **Two of those four are empty today and two are not.** `contact` and
+`signal.value_text` hold no personal data, because Phase 2 never ran. But
+`data/artifacts/` holds **13 companies' worth of stored bodies including nine
+Impressum pages in full**, and `data/requests.jsonl` holds **249 fetched URLs** —
+both written by Phase 1, which is free, deterministic, and has already run twice.
+
+**That is the part worth stating plainly: the personal data is already here.** It
+arrived with the crawl, not with the extraction. M1.104 recorded the erasure gap
+as becoming material when the first `contact` row is written; this session's
+measurement narrows that — **the Impressum of every one of these thirteen shops
+is on this disk right now**, and the erasure path for those bytes is as absent as
+it is for the rows that were never created.
+
+**Dollars spent by this unit, across both sessions: $0.00.**
+
