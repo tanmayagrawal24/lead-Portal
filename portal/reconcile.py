@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from portal import extract_p2, llm, verify
+from portal import extract_p2, ledger, llm, verify
 
 #: The one disposition in `llm_batch_request.outcome` that is **not** a member
 #: of `llm.RequestOutcome`, and the separation is deliberate (migration 015).
@@ -614,10 +614,12 @@ def _correct_the_reservation(
             f"{float(row['spend']):.6f}). §7 control 2's ledger is not an "
             f"accounting record and must never read less than what is owed."
         )
-    conn.execute(
-        "UPDATE run SET est_cost_usd = COALESCE(est_cost_usd, 0) + ? WHERE id = ?",
-        (delta, batch.run_id),
-    )
+    # §7 control 3 is deliberately NOT consulted here (M1.101). The money is
+    # already spent; this is the correction that makes the ledger true, and a
+    # per-run ceiling that could block its own bookkeeping would leave control
+    # 2 — the guard that actually bounds spend — reading a number known to be
+    # wrong. `ledger.reconcile_run` is where that ruling lives.
+    ledger.reconcile_run(conn, run_id=batch.run_id, delta_usd=delta)
     return delta
 
 
