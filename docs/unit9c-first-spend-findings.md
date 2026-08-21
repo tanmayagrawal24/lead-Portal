@@ -633,3 +633,29 @@ $ grep -c '^| M1\.' docs/lead-portal-spec-v0.3.md
 
 **Cited maximum and declared row count agree at 104.** M1.91's check passes,
 which is the mechanism rather than the assertion.
+
+
+---
+
+## 13. CI — recorded after it was observed
+
+Workflow run `32453644175` on PR #7, **all four jobs green** (M1.19: the
+authority is the run that gates the merge):
+
+| Job | Result |
+|---|---|
+| `ruff` | pass, 10s |
+| `pytest (py3.11)` | **705 passed, 2 skipped, 139 subtests** — 2m5s |
+| `pytest (py3.12)` | **705 passed, 2 skipped, 139 subtests** — 1m31s |
+| `audit-politeness (fixture corpus)` | pass, 26s |
+
+The politeness job is green while §4's audit of the **real** corpus exits 1 with
+`§5.2 robots: BREACHED`, and the two do not contradict each other: the CI job
+builds a fixture corpus from a loopback server where every origin serves its own
+robots.txt, so M1.103's collapse cannot occur there. **That is worth stating
+plainly — the fixture corpus cannot reproduce M1.103, so CI is not evidence
+about it in either direction.**
+
+`tests/conftest.py` (M1.95) had teeth on the runners again and was silent
+locally, where `data/` now exists because this unit rebuilt it — which is the
+first time that guard's stated blind spot has actually been occupied.
