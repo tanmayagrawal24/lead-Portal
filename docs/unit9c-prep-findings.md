@@ -522,8 +522,22 @@ $ ruff format --check .            64 files already formatted
 $ env -u ANTHROPIC_API_KEY python -m pytest -q
 ```
 
-Full-suite result and CI status recorded in §10 **after** they were observed, per
-M1.19's rule that the authority is the run that gates the merge.
+**CI, workflow run `32451810805` on PR #6 — all four jobs green, recorded after
+they were observed** (M1.19: the authority is the run that gates the merge):
+
+| Job | Result |
+|---|---|
+| `ruff` | pass, 9s |
+| `pytest (py3.11)` | **698 passed, 2 skipped, 139 subtests** — 1m30s |
+| `pytest (py3.12)` | **698 passed, 2 skipped, 139 subtests** — 2m10s |
+| `audit-politeness (fixture corpus)` | pass, 29s |
+
+Local and CI agree exactly, which is what Unit 7's failure did *not* do — and the
+reason they agree is the subject of this unit. **The new guard in
+`tests/conftest.py` had teeth on those runners and nowhere else**: a CI runner has
+no `data/`, so its before-state was *absent* and the check was live for the whole
+suite. On the machine this was written on it was silent, exactly as its docstring
+says it would be.
 
 ---
 
