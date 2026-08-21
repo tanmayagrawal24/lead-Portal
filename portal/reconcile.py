@@ -27,7 +27,13 @@ mismatch writes no value at all.
    tying a returned legal name to a company. Substring verification cannot
    catch a mis-key, because the value really is on the page it came from.
 2. `expired` is a **per-request** result type, so a batch ends *normally*
-   carrying requests that were never processed.
+   carrying requests that were never processed. **The word names two different
+   things and both are correct**: `llm.RequestOutcome.EXPIRED` is the
+   provider's disposition for one request, and `llm.BatchStatus.EXPIRED` — in
+   `TERMINAL_STATUSES` below and in `llm_batch.status`'s CHECK since migration
+   001 — is *this tool's* conclusion about the batch that carried it. The
+   second is derived from the first by `resolve_batch_status` and is terminal;
+   the provider has no such batch state.
 3. `errored` splits: `invalid_request` will be malformed again, a server error
    will not.
 4. Results stay retrievable for 29 days; past that a batch is unrecoverable and
