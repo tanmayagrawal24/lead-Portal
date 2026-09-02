@@ -266,3 +266,104 @@ class TestVerification(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheGateIsEnforcedWhereMoneyIsCommitted(unittest.TestCase):
+    """Audit finding 1. `score --phase 1` wrote `gate.phase2_admitted` and the
+    §7.1 spend model assumed it; `prepare` selected every company with a usable
+    artifact regardless. The gate now sits on the one path every paid request
+    passes through, and the three withheld states are named in the dry run."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from portal import db, migrate
+
+        self.tmp = Path(tempfile.mkdtemp())
+        self.conn = db.connect(self.tmp / "p.db")
+        migrate.apply_pending(self.conn)
+        self.root = self.tmp / "artifacts"
+        self.root.mkdir()
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def _company(self, domain: str, *, excluded: bool = False) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO company (domain, discovery_source, discovered_at, excluded, "
+            "excluded_reason) VALUES (?, 'seed_csv', '2026-08-01T00:00:00Z', ?, ?)",
+            (domain, int(excluded), "duplicate_site: x" if excluded else None),
+        )
+        company_id = int(cur.lastrowid or 0)
+        body = self.root / f"{company_id}.html"
+        body.write_text("<html><body>Impressum Muster GmbH 12345 Berlin</body></html>")
+        for kind in ("homepage", "impressum"):
+            self.conn.execute(
+                "INSERT INTO artifact (company_id, kind, url, http_status, "
+                "content_hash, body_path, fetched_at) VALUES (?,?,?,200,?,?,'x')",
+                (
+                    company_id,
+                    kind,
+                    f"https://{domain}/{kind}",
+                    f"h-{kind}-{company_id}",
+                    body.name,
+                ),
+            )
+        robots = self.root / f"{company_id}-robots.txt"
+        robots.write_text("User-agent: *\nAllow: /\n")
+        self.conn.execute(
+            "INSERT INTO artifact (company_id, kind, url, http_status, content_hash, "
+            "body_path, fetched_at) VALUES (?,'robots',?,200,?,?,'x')",
+            (company_id, f"https://{domain}/robots.txt", f"r{company_id}", robots.name),
+        )
+        return company_id
+
+    def _score(self, company_id: int, admitted: int, *, finished: bool = True) -> None:
+        cur = self.conn.execute(
+            "INSERT INTO run (started_at, finished_at, stage) VALUES "
+            "(datetime('now'), ?, 'score-p1')",
+            ("2026-08-02T00:00:00Z" if finished else None,),
+        )
+        self.conn.execute(
+            "INSERT INTO signal (company_id, run_id, key, value_num, method, "
+            "evidence_url, observed_at) VALUES (?,?,'gate.phase2_admitted',?,"
+            "'deterministic','',datetime('now'))",
+            (company_id, cur.lastrowid, admitted),
+        )
+
+    def test_only_admitted_companies_are_prepared_for_either_purpose(self) -> None:
+        sent = self._company("sent.de")
+        self._score(sent, 1)
+        stopped = self._company("stopped.de")
+        self._score(stopped, 0)
+        self._company("unscored.de")
+        excluded = self._company("dup.de", excluded=True)
+        self._score(excluded, 1)  # admitted by score, but §6.4 excluded it
+
+        for purpose in extract_p2.PURPOSES:
+            prepared, skipped = extract_p2.prepare(
+                self.conn, self.root, purpose=purpose
+            )
+            self.assertEqual([p.company_id for p in prepared], [sent])
+            reasons = {s.domain: s.reason for s in skipped}
+            self.assertIn("gate", reasons["stopped.de"])
+            self.assertIn("not scored", reasons["unscored.de"])
+            self.assertIn("excluded", reasons["dup.de"])
+
+    def test_the_latest_finished_verdict_wins_and_a_crashed_run_is_ignored(
+        self,
+    ) -> None:
+        company = self._company("flip.de")
+        self._score(company, 0)
+        self._score(company, 1)  # re-scored later: admitted now
+        self._score(company, 0, finished=False)  # crashed run must not count
+        admitted, withheld = extract_p2.eligible_companies(self.conn)
+        self.assertEqual(admitted, {company})
+        self.assertEqual(withheld, {})
+
+    def test_build_requests_cannot_see_a_withheld_company(self) -> None:
+        stopped = self._company("stopped.de")
+        self._score(stopped, 0)
+        prepared, _ = extract_p2.prepare(self.conn, self.root)
+        self.assertEqual(extract_p2.build_requests(prepared), [])
