@@ -127,6 +127,9 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
         if result.excluded_reason:
             print(f"  {result.domain}: EXCLUDED — {result.excluded_reason}")
             continue
+        if result.failed:
+            print(f"  {result.domain}: FAILED — {result.failed}")
+            continue
         kinds = ", ".join(sorted(result.kinds)) or "nothing fetched"
         print(f"  {result.domain}: {kinds}")
         if result.product_sample:
@@ -697,10 +700,25 @@ def cmd_serve(path: Path, host: str, port: int, allow_public_bind: bool = False)
         )
         return 2
     if not is_loopback_bind(host):
-        # Asked for explicitly, and still worth saying out loud on the way past.
+        # Asked for explicitly — and off loopback, credentials are not optional
+        # (audit finding 5): §8's rows are third-party personal data.
+        try:
+            has_auth = serve_mod.basic_auth_from_env() is not None
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if not has_auth:
+            print(
+                f"refusing to bind {host!r} without credentials: set "
+                f"{serve_mod.BASIC_AUTH_ENV}=user:password in the environment "
+                f"first. A public bind with no authentication publishes a database "
+                f"of third-party personal data (§8).",
+                file=sys.stderr,
+            )
+            return 2
         print(
-            f"WARNING: binding {host} — the database is served without "
-            f"authentication to anything that can reach this host.",
+            f"WARNING: binding {host} — the page is reachable from other machines; "
+            f"HTTP Basic auth is on, and it should also sit behind TLS.",
             file=sys.stderr,
         )
     print(f"lead portal on http://{host}:{port}  (database: {path})")

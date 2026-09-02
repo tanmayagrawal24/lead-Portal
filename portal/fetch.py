@@ -64,6 +64,10 @@ class CompanyResult:
     artifacts: list[StoredArtifact] = field(default_factory=list)
     excluded_reason: str | None = None
     review_flags: list[str] = field(default_factory=list)
+    #: Set when `run_company` raised. The exception is recorded here and on
+    #: the review queue rather than propagated: one company's crash used to
+    #: abort the whole run and discard hours of crawl (audit finding 3).
+    failed: str | None = None
     product_sample: str | None = None
     product_sample_tier: str = "none"
     blog_sample: str | None = None
@@ -919,9 +923,31 @@ def run(
     # that column to decide which run's account of a company to trust
     # (migration 007). A run that died at company 10 of 13 must not be able to
     # retract the three it never reached.
+    def guarded(row: tuple[int, str]) -> CompanyResult:
+        """Isolate one company. A crash inside `run_company` is recorded on
+        its result and as a `fetch_persistently_failing` note, and the pool
+        moves on. Only an interrupt (`BaseException` that is not an
+        `Exception`) still stops the run, because that one is the operator's.
+        """
+        company_id, domain = row
+        try:
+            return stage.run_company(company_id, domain)
+        except Exception as exc:  # noqa: BLE001 — recorded, never swallowed
+            result = CompanyResult(domain=domain, company_id=company_id)
+            result.failed = f"{type(exc).__name__}: {exc}"[:500]
+            result.notes.append(f"crashed — nothing further fetched: {result.failed}")
+            stage._raise_review_flag(
+                company_id,
+                PERSISTENT_FETCH,
+                f"Der Abruf von {domain} ist mit einem internen Fehler abgebrochen "
+                f"({type(exc).__name__}); bitte die Seite einmal von Hand aufrufen.",
+            )
+            result.review_flags.append(PERSISTENT_FETCH)
+            return result
+
     try:
         with ThreadPoolExecutor(max_workers=max_hosts) as pool:
-            results = list(pool.map(lambda row: stage.run_company(*row), company_rows))
+            results = list(pool.map(guarded, company_rows))
     except BaseException as exc:
         conn.execute(
             "UPDATE run SET aborted_reason = ? WHERE id = ?",

@@ -188,7 +188,12 @@ class AddressPolicy:
 
         try:
             resolved = self.resolve(host)
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
+            # `UnicodeError` is what `getaddrinfo` raises for a label IDNA
+            # refuses — over 63 characters, or empty. It is not an `OSError`,
+            # and uncaught it left this guard, then `Fetcher.get`, then the
+            # worker thread, and aborted the whole run on one hostile
+            # `Location:` header (audit finding 3).
             return Verdict(
                 False,
                 f"address_unverifiable: {host} did not resolve "

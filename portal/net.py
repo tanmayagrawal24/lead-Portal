@@ -314,7 +314,10 @@ class Fetcher:
             issued_at = datetime.now(UTC).isoformat(timespec="milliseconds")
             try:
                 response = self._client.get(current)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, httpx.InvalidURL, UnicodeError, ValueError) as exc:
+                # `InvalidURL` and `UnicodeError` are not `HTTPError`s; both
+                # arrive from a malformed `Location:` and neither may leave
+                # this method, whose contract is "never raising".
                 self._log(current, issued, issued_at, None, f"{type(exc).__name__}")
                 return Response(url=current, error=f"{type(exc).__name__}: {exc}")
             self._log(
@@ -334,7 +337,10 @@ class Fetcher:
                     content_type=response.headers.get("content-type"),
                 )
 
-            target = _redirect_target(response, current)
+            try:
+                target = _redirect_target(response, current)
+            except (httpx.InvalidURL, UnicodeError, ValueError):
+                target = None
             if target is None:
                 location = response.headers.get("location", "")
                 return Response(
