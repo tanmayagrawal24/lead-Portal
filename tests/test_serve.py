@@ -624,3 +624,87 @@ class TestEvidenceReachability(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheWriteEndpointIsGuarded(ServeTestCase):
+    """Audit finding 5. The one write on the page is a form-encoded POST, which a
+    browser sends cross-origin without preflight; the flag id was not bound to
+    the company in the URL; and nothing required credentials off loopback."""
+
+    def _open_flag(self):
+        company_id = self.full_company()
+        self.score_now()
+        row = self.conn.execute(
+            "SELECT id, company_id FROM review_flag WHERE resolved_at IS NULL "
+            "AND company_id = ? ORDER BY id LIMIT 1",
+            (company_id,),
+        ).fetchone()
+        self.assertIsNotNone(row, "fixture company raised no review flag")
+        return row
+
+    def test_a_cross_site_post_is_refused_and_writes_nothing(self) -> None:
+        flag = self._open_flag()
+        for headers in (
+            {"Origin": "https://evil.example"},
+            {"Sec-Fetch-Site": "cross-site"},
+        ):
+            response = self.client().post(
+                f"/company/{flag['company_id']}/flag/{flag['id']}/resolve",
+                data={"note": "x"},
+                headers=headers,
+            )
+            self.assertEqual(response.status_code, 403)
+        row = self.conn.execute(
+            "SELECT resolved_at FROM review_flag WHERE id = ?", (flag["id"],)
+        ).fetchone()
+        self.assertIsNone(row["resolved_at"])
+
+    def test_a_same_origin_post_still_works(self) -> None:
+        flag = self._open_flag()
+        response = self.client().post(
+            f"/company/{flag['company_id']}/flag/{flag['id']}/resolve",
+            data={"note": "ok"},
+            headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_a_flag_cannot_be_resolved_through_another_company(self) -> None:
+        flag = self._open_flag()
+        other = int(flag["company_id"]) + 999  # any id that is not the owner
+        response = self.client().post(
+            f"/company/{other}/flag/{flag['id']}/resolve", data={"note": "x"}
+        )
+        self.assertEqual(response.status_code, 404)
+        row = self.conn.execute(
+            "SELECT resolved_at FROM review_flag WHERE id = ?", (flag["id"],)
+        ).fetchone()
+        self.assertIsNone(row["resolved_at"])
+
+    def test_basic_auth_is_enforced_when_configured(self) -> None:
+        import base64
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"PORTAL_BASIC_AUTH": "op:s3cret"}):
+            client = self.client()
+        self.assertEqual(client.get("/").status_code, 401)
+        token = base64.b64encode(b"op:wrong").decode()
+        self.assertEqual(
+            client.get("/", headers={"Authorization": f"Basic {token}"}).status_code,
+            401,
+        )
+        token = base64.b64encode(b"op:s3cret").decode()
+        self.assertEqual(
+            client.get("/", headers={"Authorization": f"Basic {token}"}).status_code,
+            200,
+        )
+
+    def test_a_public_bind_without_credentials_is_refused(self) -> None:
+        import os
+        from unittest import mock
+
+        from portal import cli
+
+        with mock.patch.dict(os.environ, {"PORTAL_BASIC_AUTH": ""}):
+            code = cli.cmd_serve(self.db_path, "0.0.0.0", 8000, allow_public_bind=True)
+        self.assertEqual(code, 2)

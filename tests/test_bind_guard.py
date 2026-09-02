@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -102,11 +103,25 @@ class ServeCommand(unittest.TestCase):
         self.assertIn("no authentication", text)
 
     def test_the_flag_permits_it_and_still_says_so(self) -> None:
-        code, text, served = self.run_serve("--host", "0.0.0.0", "--allow-public-bind")
+        """…provided credentials are set. Off loopback, `PORTAL_BASIC_AUTH` is
+        required, not advisory (audit finding 5)."""
+        with mock.patch.dict(os.environ, {"PORTAL_BASIC_AUTH": "op:pw"}):
+            code, text, served = self.run_serve(
+                "--host", "0.0.0.0", "--allow-public-bind"
+            )
         self.assertEqual(code, 0)
         served.assert_called_once()
         self.assertEqual(served.call_args.args[0], "0.0.0.0")
         self.assertIn("WARNING", text)
+
+    def test_the_flag_alone_is_not_enough_without_credentials(self) -> None:
+        with mock.patch.dict(os.environ, {"PORTAL_BASIC_AUTH": ""}):
+            code, text, served = self.run_serve(
+                "--host", "0.0.0.0", "--allow-public-bind"
+            )
+        self.assertEqual(code, 2)
+        served.assert_not_called()
+        self.assertIn("PORTAL_BASIC_AUTH", text)
 
     def test_the_flag_is_not_needed_and_not_noisy_on_loopback(self) -> None:
         _code, text, _served = self.run_serve("--host", "127.0.0.1")

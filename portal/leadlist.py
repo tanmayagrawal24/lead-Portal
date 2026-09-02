@@ -566,6 +566,13 @@ class LeadList:
                 return lead
         return None
 
+    def flag_owner(self, flag_id: int) -> int | None:
+        """The company a flag belongs to, resolved or not."""
+        row = self.conn.execute(
+            "SELECT company_id FROM review_flag WHERE id = ?", (flag_id,)
+        ).fetchone()
+        return None if row is None else int(row["company_id"])
+
     def resolve_flag(self, flag_id: int, note: str) -> int | None:
         """§9: clearing writes `resolved_at`, `resolved_by_human = 1` and an
         optional note, so *not yet reviewed* and *reviewed and dismissed* stay
