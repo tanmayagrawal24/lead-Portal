@@ -1,8 +1,8 @@
 """Command-line entry point.
 
 Each pipeline stage is its own subcommand, independently re-runnable (§5).
-Built so far: `init`, `fetch`, `extract-p1`, `score`, `serve`, plus the
-inspection commands `diff-signals`, `audit-politeness`,
+Built so far: `init`, `fetch`, `extract-p1`, `score`, `serve`, `pagespeed`
+(§5.5a), plus the inspection commands `diff-signals`, `audit-politeness`,
 `audit-impressum-candidates`, `llm-prices` and `extract-p2 --dry-run`.
 `extract-p2`'s **submitting** half is built (9b) and is **not reachable from
 here**: `extract-p2` still exits 2 without `--dry-run`, and stays that way until
@@ -32,6 +32,7 @@ from portal import (
     llm,
     llm_anthropic,
     migrate,
+    pagespeed,
     ruleset,
     score,
     seeds,
@@ -237,6 +238,76 @@ def cmd_extract_p2(path: Path, dry_run: bool) -> int:
         "was reserved; §7 control 4 is 9b's."
     )
     return 0
+
+
+def cmd_pagespeed(path: Path, dry_run: bool, max_calls: int) -> int:
+    """§5.5a — PageSpeed Insights over the homepages §5.4 admitted.
+
+    Free of charge (§7.1) and not free of consequence: every measurement is a
+    request against a keyed quota and takes 15–30 s, so `--dry-run` shows the
+    plan — who would be measured, who is cached under §5.3's 30-day rule, and
+    who is withheld and why — without a key and without a call. The real run
+    needs `PAGESPEED_API_KEY` in the environment and stops, saying so, if it is
+    absent (§7 control 9). Its own `run.stage`, for migration 006's reason;
+    see `portal/pagespeed.py`.
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    conn = db.connect(path)
+    try:
+        version = migrate.current_version(conn)
+        highest = migrate.discover()[-1][0]
+        if version < highest:
+            print(
+                f"database at {path} is at migration {version:03d} but the code "
+                f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+                file=sys.stderr,
+            )
+            return 2
+        if dry_run:
+            prepared = pagespeed.plan(conn)
+            print(
+                f"pagespeed --dry-run: {len(prepared.targets)} homepage(s) would be "
+                f"measured ({pagespeed.STRATEGY}), {len(prepared.cached)} cached\n"
+            )
+            _print_plan(prepared)
+            print("\nNothing was measured and no request was made.")
+            return 0
+        try:
+            result = pagespeed.run(conn, max_calls=max_calls)
+        except pagespeed.MissingKeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        except pagespeed.PageSpeedError as exc:
+            print(f"pagespeed refused: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+
+    print(
+        f"\nrun {result.run_id}: pagespeed over {len(result.plan.targets)} "
+        f"homepage(s), {result.calls} call(s) issued"
+    )
+    for outcome in result.outcomes:
+        if outcome.status == "measured":
+            print(f"  {outcome.domain:28} {outcome.score:>3}/100  {outcome.detail}")
+        else:
+            print(f"  {outcome.domain:28} FAILED — {outcome.detail}")
+    _print_plan(result.plan)
+    return 0
+
+
+def _print_plan(prepared: pagespeed.Plan) -> None:
+    """The half of the plan a run does not touch: cached and withheld rows."""
+    for entry in prepared.cached:
+        print(
+            f"  {entry.domain:28} cached — {entry.score}/100 measured "
+            f"{entry.observed_at} (run {entry.run_id}); §5.3 keeps it "
+            f"{pagespeed.CACHE_DAYS} days"
+        )
+    for domain, reason in prepared.skipped:
+        print(f"  {domain:28} SKIPPED — {reason}")
 
 
 def cmd_reconcile(path: Path, model: str) -> int:
@@ -851,6 +922,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="print what would be sent and send nothing. Required today.",
     )
 
+    pagespeed_parser = sub.add_parser(
+        "pagespeed",
+        help="§5.5a: PageSpeed Insights over admitted homepages; free tier, keyed "
+        "quota, 15–30 s per site, cached 30 days (§5.3)",
+    )
+    pagespeed_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print who would be measured, who is cached and who is withheld; "
+        "no key needed, no request made",
+    )
+    pagespeed_parser.add_argument(
+        "--max-calls",
+        type=int,
+        default=pagespeed.MAX_CALLS_PER_RUN,
+        help=f"refuse a run that would issue more requests than this "
+        f"(default {pagespeed.MAX_CALLS_PER_RUN}); a runaway guard, not a budget",
+    )
+
     reconcile_parser = sub.add_parser(
         "reconcile",
         help="§5.6: poll every open batch, verify results against the sent "
@@ -922,6 +1012,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_extract_p2(path, args.dry_run)
     if args.command == "reconcile":
         return cmd_reconcile(path, args.model)
+
+    if args.command == "pagespeed":
+        if args.max_calls < 1:
+            print("--max-calls must be at least 1; refusing", file=sys.stderr)
+            return 2
+        return cmd_pagespeed(path, args.dry_run, args.max_calls)
 
     if args.command == "score":
         return cmd_score(path, args.phase)

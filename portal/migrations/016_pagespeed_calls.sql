@@ -1,0 +1,39 @@
+-- 016 — `run.pagespeed_calls`: §5.5a's call counter, beside `places_calls`
+--       and `web_searches` where §4 has always had room for it.
+--
+-- The number carries no history: nothing has ever used 016. §10.4b named it
+-- as the next free number after 015.
+--
+-- **THIS MIGRATION SHIPS IN THE SAME COMMIT AS ITS WRITER** (M1.45(c)).
+-- `pagespeed.run` increments the column once per PageSpeed Insights request
+-- ISSUED — before the outcome is known, because a quota is consumed by the
+-- request and not by its success. §10.6 has listed the column as *"exists
+-- nowhere"* since M1.98, correctly: the lost M5 stash's `010_phase2_writers.sql`
+-- added it ahead of a writer that never landed, and §10.4b's standing rule is
+-- *"rebuild it in M5 with its writer"*. This is that rebuild, from §4's
+-- description of the sibling columns rather than from the stashed file, which
+-- is unreachable from the machine this was written on.
+--
+-- **Why a counter and not a cost.** §7.1 prices PageSpeed Insights at $0.000 —
+-- the free tier — so nothing here touches `est_cost_usd` or §7 control 2's
+-- ledger, which sums money and must not be handed a count of free calls
+-- dressed as one. What the column bounds is QUOTA: §7 control 1's Cloud
+-- Console cap is the outer guard, `pagespeed.MAX_CALLS_PER_RUN` the inner one,
+-- and this column is how a run can be read back against either. `places_calls`
+-- exists for the same reason and `web_searches` for the paid analogue.
+--
+-- **`run.stage` gains a value, and there is no CHECK to change.** §4's comment
+-- on `run.stage` lists the pipeline's stages and PageSpeed was folded into
+-- `extract_p2` there, as §5.5a folds it in prose. It is written as its own
+-- stage, `'pagespeed'`, and the reason is migration 006: `company_profile` is
+-- scoped to the latest finished run PER (company, stage), and *"a later run of
+-- a stage is authoritative for everything that stage owns, including the keys
+-- it deliberately did not write"*. Under a shared stage the LLM extraction's
+-- run would blank a company's `perf.lighthouse_performance` the moment it
+-- finished after the measurement, and the measurement's run would blank the
+-- extraction — two writers taking turns retracting each other. A stage of its
+-- own is what lets §5.3's 30-day cache work at all: a cached company gets NO
+-- row in the new run, so its earlier run stays that company's authority for
+-- this stage and the value keeps being served. See `portal/pagespeed.py`.
+
+ALTER TABLE run ADD COLUMN pagespeed_calls INTEGER DEFAULT 0;
