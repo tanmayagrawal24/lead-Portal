@@ -563,6 +563,23 @@ def cmd_score(path: Path, phase: int) -> int:
                 file=sys.stderr,
             )
             return 2
+        # §5.7: the warning goes out BEFORE the score is written, because a
+        # provisional number that is printed and then explained is a number a
+        # reader has already copied. It does not refuse — the score is the
+        # best reading available and `reconcile` will supersede it under the
+        # submitting run's own id (B4) — but it says so, loudly, on stderr.
+        pending = score.unreconciled_batches(conn) if phase == 2 else []
+        for batch in pending:
+            who = ", ".join(batch.domains) if batch.domains else "no company rows"
+            print(
+                f"⚠ score --phase 2: batch {batch.batch_id} "
+                f"({batch.purpose}, {batch.status}, submitted "
+                f"{batch.submitted_at or 'never — reserved only'}, provider id "
+                f"{batch.provider_batch_id or 'none'}) is NOT reconciled — "
+                f"Phase-2 signals for {who} are still in flight. This score is "
+                f"provisional for them; run `portal reconcile` and score again.",
+                file=sys.stderr,
+            )
         run_id, results = score.run(conn, phase=phase)
     finally:
         conn.close()
@@ -570,6 +587,12 @@ def cmd_score(path: Path, phase: int) -> int:
     if not results:
         print("no companies to score — run `portal extract-p1` first", file=sys.stderr)
         return 2
+    if pending:
+        print(
+            f"\n⚠ {len(pending)} unreconciled batch(es) — see the warnings above; "
+            f"this Phase-2 score is provisional (§5.7).",
+            file=sys.stderr,
+        )
 
     print(f"\nrun {run_id}: score --phase {phase}, ruleset {ruleset.RULESET_VERSION}")
     ranked = sorted(results, key=lambda r: (-r.total, r.domain))
