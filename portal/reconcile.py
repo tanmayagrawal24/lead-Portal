@@ -539,12 +539,20 @@ def actual_cost_usd(
     Requests that expired or errored contribute nothing, because they consumed
     nothing — which is what makes the reservation's release fall out of the
     arithmetic rather than needing a rule of its own (§7 control 12).
+
+    **A request that consumed tokens and produced no extraction still counts**
+    (audit finding 8). A response truncated at `max_tokens` or refused by the
+    model was paid for, and the provider reports it as `succeeded` with a
+    usage block; `llm_anthropic` maps it to a disposition and carries that
+    usage on `BatchResultItem.usage`. Reading only `extraction.usage` here
+    would release those tokens' share of the reservation — an under-count,
+    which is the direction §7 forbids.
     """
     total = llm.Usage(0, 0)
     for item in items:
-        if item.extraction is None:
+        usage = item.extraction.usage if item.extraction is not None else item.usage
+        if usage is None:
             continue
-        usage = item.extraction.usage
         total = llm.Usage(
             input_tokens=total.input_tokens + usage.input_tokens,
             output_tokens=total.output_tokens + usage.output_tokens,

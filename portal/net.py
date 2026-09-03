@@ -67,6 +67,12 @@ MAX_CONCURRENT_HOSTS = 2
 
 #: Bodies larger than this are truncated. Guards memory on a multi-megabyte
 #: Shopware homepage, and caps what the XML parser is ever handed.
+#:
+#: **Applied while the body is being decompressed, not after** (audit finding
+#: 9). `response.content[:max_bytes]` capped the slice and not the read: httpx
+#: had already inflated the whole `Content-Encoding: gzip` body into memory
+#: before the slice ran, so a 40 KB response that decompresses to 4 GB was 4 GB
+#: in this process, and the cap was decoration. See `_read_capped`.
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
 DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -223,6 +229,33 @@ def _redirect_target(response: httpx.Response, current: str) -> str | None:
     return absolutise(current, response.headers.get("location", ""))
 
 
+def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
+    """Read at most `max_bytes` of the DECODED body, then stop consuming.
+
+    The stream is iterated rather than `.content` read, so the cap is applied
+    to decompressed output as it is produced and the transport is not drained
+    past it: a gzip bomb is cut off at the first decoded chunk that crosses the
+    line, and the connection is closed unread behind it (`Fetcher.get` closes
+    the response in a `finally`).
+
+    **The residual bound, stated rather than left to be discovered.** httpx
+    decodes one raw network read at a time, so peak memory is `max_bytes` plus
+    the decoded size of ONE raw read — bounded by the transport's read size
+    times gzip's maximum ratio, not by the body. Before this the bound was the
+    body.
+    """
+    chunks: list[bytes] = []
+    received = 0
+    for chunk in response.iter_bytes():
+        room = max_bytes - received
+        if len(chunk) >= room:
+            chunks.append(chunk[:room])
+            break
+        chunks.append(chunk)
+        received += len(chunk)
+    return b"".join(chunks)
+
+
 @dataclass
 class Response:
     """What a fetch attempt produced. `error` and `body` are exclusive."""
@@ -259,6 +292,11 @@ class Fetcher:
     #: call site, in `HostRateLimiter.unthrottled`'s idiom, rather than a
     #: boolean nobody can find.
     addresses: AddressPolicy = field(default_factory=AddressPolicy)
+    #: Test seam only. A `httpx.MockTransport` here lets a test hand this
+    #: fetcher a streamed body of its own construction — which is the only way
+    #: to observe that the body cap stops CONSUMING (audit finding 9) rather
+    #: than merely truncating what was already read. Production passes nothing.
+    transport: httpx.BaseTransport | None = field(default=None, repr=False)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -269,6 +307,7 @@ class Fetcher:
             # is rate-limited and every host change is checked. See the module
             # docstring.
             follow_redirects=False,
+            transport=self.transport,
         )
 
     def get(self, url: str, *, hop_allowed: HopPolicy | _RobotsExempt) -> Response:
@@ -313,58 +352,79 @@ class Fetcher:
             issued = time.monotonic()
             issued_at = datetime.now(UTC).isoformat(timespec="milliseconds")
             try:
-                response = self._client.get(current)
+                # Streamed, so the headers arrive without the body (audit
+                # finding 9): the body is read through `_read_capped` below,
+                # and a redirect's body is never read at all.
+                response = self._client.send(
+                    self._client.build_request("GET", current), stream=True
+                )
             except (httpx.HTTPError, httpx.InvalidURL, UnicodeError, ValueError) as exc:
                 # `InvalidURL` and `UnicodeError` are not `HTTPError`s; both
                 # arrive from a malformed `Location:` and neither may leave
                 # this method, whose contract is "never raising".
                 self._log(current, issued, issued_at, None, f"{type(exc).__name__}")
                 return Response(url=current, error=f"{type(exc).__name__}: {exc}")
-            self._log(
-                current,
-                issued,
-                issued_at,
-                response.status_code,
-                None,
-                str(response.url),
-            )
-
-            if not response.has_redirect_location:
-                return Response(
-                    url=str(response.url),
-                    status=response.status_code,
-                    body=response.content[: self.max_bytes],
-                    content_type=response.headers.get("content-type"),
-                )
-
             try:
-                target = _redirect_target(response, current)
-            except (httpx.InvalidURL, UnicodeError, ValueError):
-                target = None
-            if target is None:
-                location = response.headers.get("location", "")
-                return Response(
-                    url=current,
-                    status=response.status_code,
-                    error=f"redirect_unusable: {location!r}",
+                self._log(
+                    current,
+                    issued,
+                    issued_at,
+                    response.status_code,
+                    None,
+                    str(response.url),
                 )
-            # Asked for every hop (M1.12). Under `RobotsExempt` there are no
-            # rules to ask, so the question collapses to "does this hop leave
-            # the origin?" — `authority_of`, not `host_of`, because the two
-            # differ on `www.`: apex and www share one politeness budget but may
-            # serve different robots.txt files.
-            if isinstance(hop_allowed, _RobotsExempt):
-                permitted = authority_of(target) == authority_of(current)
-            else:
-                permitted = hop_allowed(current, target)
-            if not permitted:
-                return Response(
-                    url=current,
-                    status=response.status_code,
-                    error=f"redirect_refused: {target}",
-                )
-            arrived_by = response.status_code
-            current = target
+
+                if not response.has_redirect_location:
+                    try:
+                        body = _read_capped(response, self.max_bytes)
+                    except httpx.HTTPError as exc:
+                        # A body that fails mid-read — a timeout, a corrupt
+                        # gzip stream — is a failed fetch, recorded like one.
+                        return Response(
+                            url=str(response.url),
+                            status=response.status_code,
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                    return Response(
+                        url=str(response.url),
+                        status=response.status_code,
+                        body=body,
+                        content_type=response.headers.get("content-type"),
+                    )
+
+                try:
+                    target = _redirect_target(response, current)
+                except (httpx.InvalidURL, UnicodeError, ValueError):
+                    target = None
+                if target is None:
+                    location = response.headers.get("location", "")
+                    return Response(
+                        url=current,
+                        status=response.status_code,
+                        error=f"redirect_unusable: {location!r}",
+                    )
+                # Asked for every hop (M1.12). Under `RobotsExempt` there are
+                # no rules to ask, so the question collapses to "does this hop
+                # leave the origin?" — `authority_of`, not `host_of`, because
+                # the two differ on `www.`: apex and www share one politeness
+                # budget but may serve different robots.txt files.
+                if isinstance(hop_allowed, _RobotsExempt):
+                    permitted = authority_of(target) == authority_of(current)
+                else:
+                    permitted = hop_allowed(current, target)
+                if not permitted:
+                    return Response(
+                        url=current,
+                        status=response.status_code,
+                        error=f"redirect_refused: {target}",
+                    )
+                arrived_by = response.status_code
+                current = target
+            finally:
+                # Unread or partly read, the response is closed here, which is
+                # what makes `_read_capped`'s early `break` stop the download
+                # rather than defer it.
+                response.close()
 
         return Response(
             url=current,

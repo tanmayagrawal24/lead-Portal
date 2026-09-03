@@ -77,7 +77,18 @@ def cmd_init(path: Path) -> int:
 
 
 def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> int:
-    """Fetch every seeded domain under the §5.2 politeness rules."""
+    """Fetch every seeded domain under the §5.2 politeness rules.
+
+    **Every seeded domain that is not excluded** (audit finding 10). §6.4's
+    `excluded = 1` is a standing verdict — a `duplicate_site` row is the same
+    lead as another row, a `robots_disallowed` row has said no — and
+    `extract-p1` has always read `WHERE excluded = 0`. This stage built its
+    targets from the seed file alone, so every excluded company was re-crawled
+    on every run: requests against a host whose owner had already been crawled
+    under its own row, and against a host that had disallowed the crawl. Lifting
+    an exclusion is an operator's act, not a stage's (§6.4), so the skip is
+    printed rather than silent.
+    """
     if not path.exists():
         print(f"no database at {path} — run `portal init` first", file=sys.stderr)
         return 2
@@ -104,9 +115,25 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
             return 2
 
         company_ids = seeds.upsert(conn, rows, query=str(seed_path))
+        # The same predicate `extract-p1` applies at cli.py's `cmd_extract_p1`
+        # and `score` applies in `ScoreStage.profiles`: `excluded = 0`. Read
+        # from `company` after the upsert, because the verdict lives there and
+        # the seed file cannot know it.
+        excluded = {
+            int(row["id"]): str(row["excluded_reason"] or "")
+            for row in conn.execute(
+                "SELECT id, excluded_reason FROM company WHERE excluded = 1"
+            )
+        }
+        skipped = [
+            (seed.domain, excluded[company_id])
+            for company_id, seed in zip(company_ids, rows, strict=True)
+            if company_id in excluded
+        ]
         targets = [
             (company_id, seed.domain)
             for company_id, seed in zip(company_ids, rows, strict=True)
+            if company_id not in excluded
         ]
         print(
             f"Fetching {len(targets)} domain(s) at {interval}s/host, {max_hosts} hosts max…"
@@ -125,6 +152,8 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
 
     print(f"requests logged to {log_path} — audit with `portal audit-politeness`")
     print(f"\nrun {run_id}:")
+    for domain, reason in skipped:
+        print(f"  {domain}: SKIPPED — excluded (§6.4): {reason}")
     for result in results:
         if result.excluded_reason:
             print(f"  {result.domain}: EXCLUDED — {result.excluded_reason}")

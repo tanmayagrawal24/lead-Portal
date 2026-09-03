@@ -570,6 +570,16 @@ class BatchResultItem:
     outcome: RequestOutcome
     extraction: Extraction | None = None
     error_message: str = ""
+    #: What the request consumed when it produced NO usable extraction (audit
+    #: finding 8). A response truncated at `max_tokens` or refused was still
+    #: paid for — the input was read and the output, such as it is, was
+    #: generated — and `reconcile.actual_cost_usd` must count it, or the
+    #: reservation's correction releases money that was spent: the one
+    #: direction §7 must not fail in. `None` means the request consumed
+    #: nothing (expired, canceled, never accepted), which is different from
+    #: "consumed and unusable". An item with an `extraction` carries its
+    #: usage there and leaves this `None`.
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True)
