@@ -612,6 +612,38 @@ class TokenCounter(Protocol):
     def __call__(self, *, system: str, user_text: str) -> int: ...
 
 
+@dataclass(frozen=True)
+class BatchListing:
+    """One row of `messages.batches.list` — what the account says it holds.
+
+    Read-only and account-scoped, which is what makes it §10.7b's instrument:
+    a batch listed here is committed spend whether or not any result was ever
+    read, its results are retrievable for 29 days from `created_at` (§5.6 fact
+    4), and resubmitting would double the cost. The counts are the provider's
+    `request_counts`, carried whole so the report can say *how* a batch ended.
+    """
+
+    provider_batch_id: str
+    processing_status: str
+    created_at: str
+    expires_at: str
+    succeeded: int
+    errored: int
+    expired: int
+    canceled: int
+    processing: int
+
+    @property
+    def total(self) -> int:
+        return (
+            self.succeeded
+            + self.errored
+            + self.expired
+            + self.canceled
+            + self.processing
+        )
+
+
 class LLMProvider(Protocol):
     """Proposal v2 §4. Selected by configuration, never inferred."""
 
@@ -859,6 +891,7 @@ __all__ = [
     "PRICES",
     "WEB_SEARCH_PER_SEARCH_USD",
     "BalanceFailurePoint",
+    "BatchListing",
     "BatchRequest",
     "BatchResult",
     "BatchResultItem",

@@ -919,6 +919,69 @@ def is_loopback_bind(host: str) -> bool:
         return False
 
 
+def cmd_llm_batches(
+    limit: int,
+    *,
+    model: str = llm_anthropic.DEFAULT_MODEL,
+    provider: llm_anthropic.AnthropicProvider | None = None,
+) -> int:
+    """§10.7b's closing procedure, as a command (M1.104).
+
+    Lists every message batch the account holds, newest first, and says in
+    words what a listed batch means: committed spend, results retrievable for
+    29 days from creation, resubmission doubles the cost. **Touches no
+    database and reserves nothing** — it is a read of what has already been
+    paid for, which is why it is classified free and needs no clearance.
+
+    Exit 0 with batches: the question is closed and the answer is *not zero*;
+    the ids are printed because with `llm_batch` gone they are the only route
+    back to any results. Exit 0 with none: the account has never submitted.
+    Exit 2 without a key: the question stays OPEN, and this command says so
+    rather than reporting zero — §7 control 9 forbids finding a credential.
+    """
+    active = provider or llm_anthropic.AnthropicProvider(model)
+    try:
+        listed = active.list_batches(limit=limit)
+    except llm_anthropic.MissingKeyError as exc:
+        print(
+            f"llm-batches: {exc}\n"
+            "§10.7b stays OPEN. This is not zero: no key on this machine is a "
+            "statement about this machine (M1.98, M1.100). Run it where the "
+            "billing account's key is set, or read the Console's usage view.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not listed:
+        print(
+            f"llm-batches: the account holds no message batches (limit {limit}).\n"
+            f"§10.7b is CLOSED with the answer ZERO, as of {utc_now()}: "
+            "no batch has ever been submitted on this key's account. Record the "
+            "date in the register — it is a measurement, not a fact about the code."
+        )
+        return 0
+
+    print(f"llm-batches: {len(listed)} batch(es) on this account (newest first)\n")
+    print(
+        f"  {'id':40} {'status':12} {'created':22} {'ok':>4} {'err':>4} {'exp':>4} {'can':>4} {'run':>4}"
+    )
+    for b in listed:
+        print(
+            f"  {b.provider_batch_id:40} {b.processing_status:12} {b.created_at:22} "
+            f"{b.succeeded:>4} {b.errored:>4} {b.expired:>4} {b.canceled:>4} {b.processing:>4}"
+        )
+    print(
+        "\n§10.7b is CLOSED and the answer is NOT zero. Every batch above is "
+        "committed spend whether or not its results were ever read (§5.6). "
+        "Results stay retrievable for 29 days from `created`; retrieving costs "
+        "nothing extra; RESUBMITTING WOULD DOUBLE THE COST. Write the ids down "
+        "before anything else — with `llm_batch` gone they are the only route "
+        "back to the results — and do not run `extract-p2 --submit` until each "
+        "one is accounted for."
+    )
+    return 0
+
+
 def cmd_serve(path: Path, host: str, port: int, allow_public_bind: bool = False) -> int:
     """§9's page. Refuses rather than starting against a database with no schema
     — an empty table is indistinguishable from a corpus nothing has scored.
@@ -1149,6 +1212,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"the model whose batches to poll (default {llm_anthropic.DEFAULT_MODEL})",
     )
 
+    batches_parser = sub.add_parser(
+        "llm-batches",
+        help="§10.7b: list every message batch on the account — read-only, no "
+        "spend, needs ANTHROPIC_API_KEY. The closing procedure, as a command",
+    )
+    batches_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="how many batches to list, newest first (default 20)",
+    )
+    batches_parser.add_argument(
+        "--model",
+        default=llm_anthropic.DEFAULT_MODEL,
+        help=f"provider model (only used to build the client; default "
+        f"{llm_anthropic.DEFAULT_MODEL})",
+    )
+
     prices_parser = sub.add_parser(
         "llm-prices",
         help="the declared price and model-limit tables with their as-of dates; "
@@ -1240,6 +1321,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "audit-impressum-candidates":
         return cmd_audit_impressum_candidates(path, args.show_values)
 
+    if args.command == "llm-batches":
+        return cmd_llm_batches(args.limit, model=args.model)
     if args.command == "llm-prices":
         return cmd_llm_prices(path, args.reserve)
 

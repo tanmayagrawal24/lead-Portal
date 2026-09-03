@@ -203,6 +203,41 @@ class AnthropicProvider:
             raise
         return str(batch.id)
 
+    def list_batches(self, *, limit: int = 20) -> tuple[llm.BatchListing, ...]:
+        """§10.7b's closing instrument: every batch the account has, newest first.
+
+        **Free, read-only, and the only way this project asks the account what
+        it has spent.** M1.100 ruled *whether a batch was ever submitted* OPEN
+        rather than zero, because every local record of `llm_batch` went with
+        the corpus and *"no key on this machine"* is a statement about a
+        machine. The closing procedure it wrote was a pasted Python one-liner;
+        this is the same call as a command, so that closing the question is a
+        thing one runs rather than a thing one types (M1.73's lesson: a state
+        that is a command cannot be reported on without being measured).
+
+        It needs a key and it makes no paid call — `messages.batches.list` is a
+        read. Without a key it raises `MissingKeyError` before any network
+        attempt, and does NOT look for another credential (§7 control 9).
+        """
+        client = _client(self._client)
+        listed: list[llm.BatchListing] = []
+        for batch in client.messages.batches.list(limit=limit):
+            counts = getattr(batch, "request_counts", None)
+            listed.append(
+                llm.BatchListing(
+                    provider_batch_id=str(getattr(batch, "id", "")),
+                    processing_status=str(getattr(batch, "processing_status", "")),
+                    created_at=str(getattr(batch, "created_at", "")),
+                    expires_at=str(getattr(batch, "expires_at", "") or ""),
+                    succeeded=int(getattr(counts, "succeeded", 0) or 0),
+                    errored=int(getattr(counts, "errored", 0) or 0),
+                    expired=int(getattr(counts, "expired", 0) or 0),
+                    canceled=int(getattr(counts, "canceled", 0) or 0),
+                    processing=int(getattr(counts, "processing", 0) or 0),
+                )
+            )
+        return tuple(listed)
+
     def poll_batch(self, provider_batch_id: str) -> llm.BatchResult:
         """Poll, and read results by `custom_id` (M1.51).
 
@@ -374,6 +409,7 @@ FREE_SURFACES: tuple[str, ...] = (
     "build_params",
     "count_input_tokens",
     "limits",
+    "list_batches",
     "poll_batch",
     "price",
     "token_counter",
