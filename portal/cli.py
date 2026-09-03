@@ -4,10 +4,10 @@ Each pipeline stage is its own subcommand, independently re-runnable (§5).
 Built so far: `init`, `fetch`, `extract-p1`, `score`, `serve`, `pagespeed`
 (§5.5a), plus the inspection commands `diff-signals`, `audit-politeness`,
 `audit-impressum-candidates`, `llm-prices` and `extract-p2 --dry-run`.
-`extract-p2`'s **submitting** half is built (9b) and is **not reachable from
-here**: `extract-p2` still exits 2 without `--dry-run`, and stays that way until
-9c is authorised in writing. `reconcile` is a subcommand as of 9b and collects
-whatever batches the database holds. `discover` arrives with M8.
+`extract-p2`'s **submitting** half is built (9b) and is reachable from here
+**only through `--submit`** (9c): without it the command is a dry run and
+spends nothing. `reconcile` is a subcommand as of 9b and collects whatever
+batches the database holds. `discover` arrives with M8.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from portal import (
 from portal import (
     serve as serve_mod,
 )
+from portal.artifacts import utc_now
 from portal.net import MAX_CONCURRENT_HOSTS, Fetcher, HostRateLimiter, RequestLog
 
 
@@ -190,54 +191,179 @@ def cmd_extract_p1(path: Path) -> int:
     return 0
 
 
-def cmd_extract_p2(path: Path, dry_run: bool) -> int:
-    """§5.5b's paid extraction — **and 9a ships only the half that spends nothing.**
+def cmd_extract_p2(
+    path: Path,
+    *,
+    dry_run: bool,
+    submit: bool,
+    purpose: str,
+    model: str = llm_anthropic.DEFAULT_MODEL,
+    provider: llm.LLMProvider | None = None,
+) -> int:
+    """§5.5b's paid extraction — dry by default, paid only on `--submit`.
 
-    `--dry-run` is required today, and refusing without it is the honest shape:
-    the submitting path needs §7 control 4's reservation, whose two writes must
-    commit together (M1.72), and that is 9b's. A command that silently did the
-    free half when asked for the paid one would be a stage reporting success for
-    work it did not do.
+    **The spend gate, restated for 9c rather than removed.** 9a made this
+    command refuse without `--dry-run`, because the submitting path needed §7
+    control 4's reservation and that was 9b's. 9b built it —
+    `extract_p2.reserve_and_submit`, tested against a fake provider — and the
+    refusal stayed, with a message that still said the reservation was 9b's.
+    That message was stale, and the gate's *shape* was the wrong one: a command
+    that refuses to do anything is a gate nobody can pass, so the first real
+    spend would have been made by editing this function, which is the one way a
+    gate should never be passed.
 
-    What the dry run prints is what would be sent: which stored artifact was
-    selected for each company, how large the cleaned text is, whether the 60 KB
-    cap truncated it, and which companies have no usable Impressum at all —
-    which is a finding (`snocks.com`'s state after A2 item 9's repairs), not an
-    empty row. **No request, no key, no cost.**
+    So the safe default is unchanged in substance and different in form: with
+    no flag, this is a **dry run** — what would be sent, who is withheld and
+    why, no request, no key, no reservation. `--dry-run` says the same thing
+    explicitly. **`--submit` is the written authorisation, expressed at the
+    command line**, and it is the only way this command spends: it takes §7
+    control 2's clearance first, then makes control 4's reservation and the
+    submission in `reserve_and_submit`'s order (M1.72 — the two writes commit
+    together, before `create` is called). `--submit --dry-run` is refused as a
+    contradiction rather than resolved either way.
+
+    `provider` is the injected seam (Unit 2's shape): `main` passes nothing and
+    the Anthropic provider is built here, so a test can drive this exact path
+    with a fake and CI, which forbids the key, never reaches a network.
     """
     if not path.exists():
         print(f"no database at {path} — run `portal init` first", file=sys.stderr)
         return 2
-    if not dry_run:
+    if submit and dry_run:
         print(
-            "extract-p2 can only be run with --dry-run today. The submitting "
-            "path needs §7 control 4's reservation, whose two writes must "
-            "commit in one transaction (M1.72); that is M5 phase 9b, and "
-            "phase 9c is the first real spend and needs written authorisation.",
+            "extract-p2: --submit and --dry-run contradict each other. A dry run "
+            "sends nothing; --submit reserves and sends. Pass one.",
             file=sys.stderr,
         )
         return 2
     conn = db.connect(path)
     try:
-        prepared, skipped = extract_p2.prepare(conn, config.artifacts_root(path))
+        version = migrate.current_version(conn)
+        highest = migrate.discover()[-1][0]
+        if version < highest:
+            print(
+                f"database at {path} is at migration {version:03d} but the code "
+                f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+                file=sys.stderr,
+            )
+            return 2
+        prepared, skipped = extract_p2.prepare(
+            conn, config.artifacts_root(path), purpose=purpose
+        )
         requests = extract_p2.build_requests(prepared)
+
+        label = "--submit" if submit else "--dry-run"
+        verb = "will be sent" if submit else "would be sent"
+        print(f"extract-p2 {label} ({purpose}): {len(prepared)} companies {verb}\n")
+        for page, request in zip(prepared, requests, strict=True):
+            size = len(page.sent_text.encode("utf-8"))
+            note = "  (truncated at 60 KB, §5.5b)" if page.truncated else ""
+            print(f"  {page.domain:28} {request.custom_id}")
+            print(f"      {page.url}")
+            print(f"      {size:,} bytes of cleaned visible text{note}")
+        for entry in skipped:
+            print(f"  {entry.domain:28} SKIPPED — {entry.reason}")
+
+        if not submit:
+            print(
+                f"\n{len(requests)} batch request(s) built. Nothing was sent and "
+                "nothing was reserved. To reserve and submit — §7 control 4, "
+                "the first real spend — run again with --submit."
+            )
+            return 0
+        if not prepared:
+            print(
+                "\nnothing to submit: no company is both admitted by §5.4 and "
+                "holds a usable page for this purpose",
+                file=sys.stderr,
+            )
+            return 2
+
+        # §7 control 2 before §7 control 4, in that order: the outer bound
+        # decides whether there is anything to price. `check_ceiling` raises
+        # on an unreadable ledger rather than reading it as zero — the same
+        # refusal `llm-prices --reserve` makes, for the same reason.
+        try:
+            clearance = ledger.check_ceiling(conn)
+        except ledger.CeilingExceeded as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        except sqlite3.Error as exc:
+            print(
+                f"refused: the §7 control 2 ledger is not readable ({exc}). Run "
+                f"`portal init` on {path} first — an unreadable ledger and an "
+                f"empty one look alike, and treating this as $0 spent is how an "
+                f"unmeasured number authorises a paid call.",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"\n§7 control 2: ${clearance.spend_usd:.2f} of "
+            f"${clearance.ceiling_usd:.2f} used over {clearance.window_days} "
+            f"rolling days; ${clearance.headroom_usd:.2f} headroom"
+        )
+
+        chosen = provider or llm_anthropic.AnthropicProvider(model=model)
+        # The submitting run. `reconcile` writes this batch's signals under
+        # THIS run id (B4) and `company_profile` serves a stage's signals only
+        # from a finished, un-aborted run (007), so it is closed on success and
+        # marked on failure — never left open.
+        cursor = conn.execute(
+            "INSERT INTO run (started_at, stage) VALUES (?, 'extract-p2')",
+            (utc_now(),),
+        )
+        run_id = int(cursor.lastrowid or 0)
+        try:
+            reservation = extract_p2.reserve_and_submit(
+                conn,
+                chosen,
+                prepared,
+                run_id=run_id,
+                purpose=purpose,
+                clearance=clearance,
+            )
+        except (llm_anthropic.MissingKeyError, llm_anthropic.BalanceExhausted) as exc:
+            # `MissingKeyError` arrives from `count_tokens`, before the
+            # reservation exists: nothing is on the books. `BalanceExhausted`
+            # arrives from `submit`, AFTER it: the batch row is `reserved`
+            # with no provider id, the money is counted, and only a person
+            # releases it (migration 014). Both mark the run.
+            _abort_run(conn, run_id, exc)
+            print(str(exc), file=sys.stderr)
+            return 2
+        except BaseException as exc:
+            _abort_run(conn, run_id, exc)
+            raise
+        conn.execute(
+            "UPDATE run SET finished_at = ?, companies_seen = ? WHERE id = ?",
+            (utc_now(), len(prepared), run_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 
-    print(f"extract-p2 --dry-run: {len(prepared)} companies would be sent\n")
-    for page, request in zip(prepared, requests, strict=True):
-        size = len(page.sent_text.encode("utf-8"))
-        note = "  (truncated at 60 KB, §5.5b)" if page.truncated else ""
-        print(f"  {page.domain:28} {request.custom_id}")
-        print(f"      {page.url}")
-        print(f"      {size:,} bytes of cleaned visible text{note}")
-    for entry in skipped:
-        print(f"  {entry.domain:28} SKIPPED — {entry.reason}")
+    est = reservation.estimate
     print(
-        f"\n{len(requests)} batch request(s) built. Nothing was sent and nothing "
-        "was reserved; §7 control 4 is 9b's."
+        f"\nrun {run_id}: batch {reservation.batch_id} submitted as "
+        f"{reservation.provider_batch_id} — {reservation.request_count} request(s)"
     )
+    print(
+        f"  reserved ${est.total_usd:.4f} ({est.input_tokens:,} measured input "
+        f"tokens + {est.output_tokens:,} reserved output, batch price as-of "
+        f"{est.price.as_of.isoformat()}) on run {run_id} and batch "
+        f"{reservation.batch_id} in one transaction (M1.72)"
+    )
+    print("  collect with `portal reconcile` once the batch has ended (§5.6)")
     return 0
+
+
+def _abort_run(conn: sqlite3.Connection, run_id: int, exc: BaseException) -> None:
+    """M1.39: a run that did not reach its end says so, and serves nothing."""
+    conn.execute(
+        "UPDATE run SET aborted_reason = ? WHERE id = ?",
+        (f"{type(exc).__name__}: {exc}"[:500], run_id),
+    )
+    conn.commit()
 
 
 def cmd_pagespeed(path: Path, dry_run: bool, max_calls: int) -> int:
@@ -913,13 +1039,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     p2_parser = sub.add_parser(
         "extract-p2",
-        help="§5.5b's paid extraction. Only --dry-run works today: the "
-        "submitting path needs §7 control 4's reservation (9b)",
+        help="§5.5b's paid extraction. A dry run unless --submit is given: "
+        "prints what would be sent and sends nothing",
     )
     p2_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print what would be sent and send nothing. Required today.",
+        help="print what would be sent and send nothing (the default)",
+    )
+    p2_parser.add_argument(
+        "--submit",
+        action="store_true",
+        help="reserve (§7 control 4) and submit the batch. THIS SPENDS MONEY: "
+        "it is the written authorisation for the first real spend, expressed "
+        "at the command line. Needs ANTHROPIC_API_KEY.",
+    )
+    p2_parser.add_argument(
+        "--purpose",
+        choices=extract_p2.PURPOSES,
+        default="impressum",
+        help="which §5.5b extraction to prepare or submit (default: impressum); "
+        "a batch is one purpose (§4)",
+    )
+    p2_parser.add_argument(
+        "--model",
+        default=llm_anthropic.DEFAULT_MODEL,
+        help=f"the model to submit to (default {llm_anthropic.DEFAULT_MODEL})",
     )
 
     pagespeed_parser = sub.add_parser(
@@ -1009,7 +1154,13 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_extract_p1(path)
 
     if args.command == "extract-p2":
-        return cmd_extract_p2(path, args.dry_run)
+        return cmd_extract_p2(
+            path,
+            dry_run=args.dry_run,
+            submit=args.submit,
+            purpose=args.purpose,
+            model=args.model,
+        )
     if args.command == "reconcile":
         return cmd_reconcile(path, args.model)
 

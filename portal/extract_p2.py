@@ -605,12 +605,13 @@ def reserve_and_submit(
     released automatically, ever. Only a measured actual corrects a reservation
     (§7 control 12).
 
-    **This is not reachable from the CLI.** `portal extract-p2` still exits 2
-    without `--dry-run`, and that stays true until 9c is authorised in writing.
-    The function exists, is tested against a fake provider, and has no caller
-    that can spend — which is the same order the ledger itself shipped in
-    (M1.69–M1.71): the mechanism before the spend, so the spend is written
-    against its presence.
+    **Reachable from the CLI as of 9c, through `portal extract-p2 --submit`
+    and nothing else.** Until then this function existed, was tested against a
+    fake provider, and had no caller that could spend — the same order the
+    ledger itself shipped in (M1.69–M1.71): the mechanism before the spend, so
+    the spend is written against its presence. The caller keeps that shape:
+    without `--submit` the command is a dry run, and `--submit` is the written
+    authorisation §7 asks for, expressed where the spend is made.
     """
     if purpose not in PURPOSES:
         raise ValueError(
