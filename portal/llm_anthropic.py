@@ -29,6 +29,7 @@ company.
 
 from __future__ import annotations
 
+import itertools
 import os
 from collections.abc import Sequence
 from typing import Any
@@ -291,7 +292,11 @@ class AnthropicProvider:
         """
         client = _client(self._client)
         listed: list[llm.BatchListing] = []
-        for batch in client.messages.batches.list(limit=limit):
+        # `limit` is the SDK's PAGE size and its page object auto-fetches the
+        # next page on iteration — so without the slice this walks the whole
+        # account and the printed "limit N" is a claim the code does not keep
+        # (Unit 10 audit, M1.108). Bounded here, newest first.
+        for batch in itertools.islice(client.messages.batches.list(limit=limit), limit):
             counts = getattr(batch, "request_counts", None)
             listed.append(
                 llm.BatchListing(

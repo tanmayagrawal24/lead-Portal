@@ -20,6 +20,17 @@ from unittest import mock
 from portal import cli, llm, llm_anthropic
 
 
+class _AutoPage:
+    """The SDK's page object: iterating it fetches the NEXT page too, so a
+    bare `for` walks the whole account whatever `limit` said."""
+
+    def __init__(self, rows: list) -> None:
+        self.rows = rows
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
 class _Batches:
     def __init__(self, rows: list) -> None:
         self.rows = rows
@@ -27,7 +38,7 @@ class _Batches:
 
     def list(self, **kwargs):
         self.calls.append(kwargs)
-        return iter(self.rows)
+        return _AutoPage(self.rows)
 
 
 def _client(rows: list) -> tuple[SimpleNamespace, _Batches]:
@@ -93,6 +104,16 @@ class LlmBatchesTestCase(unittest.TestCase):
         self.assertIn("msgbatch_02", out)
         self.assertIn("NOT zero", out)
         self.assertIn("DOUBLE THE COST", out)
+
+    def test_limit_bounds_the_listing_despite_auto_pagination(self) -> None:
+        """Unit 10 audit (M1.108): `limit` is the SDK's page size and the
+        page auto-fetches on iteration; the command must bound it itself."""
+        client, _ = _client([_row(f"msgbatch_{i:02}", "ended") for i in range(7)])
+        listed = llm_anthropic.AnthropicProvider(client=client).list_batches(limit=3)
+        self.assertEqual(
+            [b.provider_batch_id for b in listed],
+            ["msgbatch_00", "msgbatch_01", "msgbatch_02"],
+        )
 
     def test_listing_carries_the_counts_whole(self) -> None:
         client, _ = _client([_row("msgbatch_03", "ended", succeeded=3, errored=1)])

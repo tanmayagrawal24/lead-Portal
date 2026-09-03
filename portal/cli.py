@@ -547,11 +547,12 @@ def cmd_ai_check(
         f"  reserved ${report.reserved_usd:.4f}, measured ${report.actual_usd:.4f}; "
         f"run.est_cost_usd now carries the measured actual (§7 control 3)"
     )
-    if report.balance_exhausted:
+    if report.stopped_by:
+        why = "the balance ran dry" if report.balance_exhausted else report.stopped_by
         print(
-            f"  ⛔ the balance ran dry; not reached: {', '.join(report.not_reached)}. "
+            f"  ⛔ {why}; not reached: {', '.join(report.not_reached) or 'nobody'}. "
             f"The run is finished with what was paid for (M1.105(c)); run again "
-            f"once the key is topped up.",
+            f"{'once the key is topped up' if report.balance_exhausted else 'to reach the rest'}.",
             file=sys.stderr,
         )
         return 2

@@ -166,6 +166,11 @@ class Report:
     input_tokens: int = 0
     output_tokens: int = 0
     balance_exhausted: bool = False
+    #: Why the run stopped short, if it did — the exception's class and text.
+    #: Carried here because `run.aborted_reason` would hide the paid signals
+    #: (007), and a stop that is neither recorded nor printed is a stop the
+    #: next person infers from `companies_seen` (M1.39's shape).
+    stopped_by: str | None = None
 
 
 # ── query derivation (offline) ───────────────────────────────────────────
@@ -550,7 +555,16 @@ def run(
             remaining.pop(0)
     except BalanceExhausted as exc:
         report.balance_exhausted = True
+        report.stopped_by = f"{type(exc).__name__}: {exc}"
         say(f"  ⛔ {exc}")
+    except Exception as exc:  # noqa: BLE001 — a provider failure mid-run, any kind
+        # Unit 10 audit (M1.108): a rate limit or a 5xx between two companies
+        # is the same case as a dry balance for everything that matters —
+        # the calls already answered were paid for and their signals stand.
+        # It is finished, reported, and NOT re-raised as a traceback: the
+        # caller reads `stopped_by` and exits 2.
+        report.stopped_by = f"{type(exc).__name__}: {exc}"[:500]
+        say(f"  ⛔ stopped: {report.stopped_by}")
     finally:
         report.not_reached = [plan.domain for plan in remaining]
         actual = llm.estimate_cost(
@@ -589,6 +603,7 @@ __all__ = [
     "MIN_QUERIES",
     "PER_RUN_CEILING_USD",
     "QUERY_TEMPLATES",
+    "SEARCHES_PER_QUERY",
     "SEARCH_CONTEXT_AS_OF",
     "SEARCH_CONTEXT_TOKENS",
     "STAGE",

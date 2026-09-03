@@ -4,7 +4,7 @@
 > holding no credential of any kind, branched from `518aee4`
 > (`claude/keen-allen-gtsnrs`, M5 complete). Every paid path built here was
 > exercised against a fake provider under `env -u ANTHROPIC_API_KEY`.
-> Register rows **M1.104–M1.107**; migration **017** taken; **018** next free.
+> Register rows **M1.104–M1.108**; migration **017** taken; **018** next free.
 
 ## 0. What this unit was asked, and what it found
 
@@ -110,11 +110,21 @@ from the file — a discovered company would never have been crawled. `--seed`
 is now optional; without it, every company row is a target, which is the set
 `extract-p1` and `score` already read.
 
+## 4b. M1.108 — the audit, before handover
+
+Read back the day it was written, looking for the register's own defect
+classes. Found: a mid-run provider failure that finished the run silently
+and escaped as a traceback (M1.39's shape); a `--limit` that the SDK's
+auto-paginating page object ignored (a bound that did not bind); one missing
+`__all__` entry. Each fixed with the test that would have caught it. Not
+fixed, recorded: M6/M8 write non-URL `evidence_url`s, which render as dead
+links on the §9 page.
+
 ## 5. Verification
 
 ```
 env -u ANTHROPIC_API_KEY python -m pytest -q
-  810 passed, 2 skipped, 139 subtests    (from 760)
+  812 passed, 2 skipped, 139 subtests    (from 760)
 ruff check . && ruff format --check .    clean
 tests/test_amendment_register.py         green (M1.91 refused the tree twice
                                           mid-unit — once for M1.104/105,
@@ -153,4 +163,4 @@ New test files: `test_score_phase2.py` (7), `test_llm_batches_cli.py` (5),
 | §6.5 band calibration | §10.3 | blocked on a corpus gathered after B7 and the root-slug fix |
 | `interrupted-M5-remnant` stash | `git stash list` on the 2026-08-15 codespace | unread by this unit; nothing here was built from it |
 | Next free migration | `ls portal/migrations/` | **018** |
-| Next free amendment | the register | **`M1.<108>`** — angle brackets so it is not a citation; M1.91 refused this document on its first run for writing the bare number, exactly as it refused 9c-prep (its §11) |
+| Next free amendment | the register | **`M1.<109>`** — angle brackets so it is not a citation; M1.91 refused this document on its first run for writing the bare number, exactly as it refused 9c-prep (its §11) |

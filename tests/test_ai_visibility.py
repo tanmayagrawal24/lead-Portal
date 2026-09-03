@@ -30,10 +30,17 @@ class FakeProvider:
     name = "anthropic"
     model = "claude-haiku-4-5"
 
-    def __init__(self, answers: dict[str, str], *, dry_after: int | None = None):
+    def __init__(
+        self,
+        answers: dict[str, str],
+        *,
+        dry_after: int | None = None,
+        fail_after: int | None = None,
+    ):
         self.answers = answers
         self.calls: list[tuple[str, int, object]] = []
         self.dry_after = dry_after
+        self.fail_after = fail_after
 
     def token_counter(self) -> llm.TokenCounter:
         def count(*, system: str, user_text: str) -> int:
@@ -48,6 +55,8 @@ class FakeProvider:
             raise TypeError("called without a clearance")
         if self.dry_after is not None and len(self.calls) >= self.dry_after:
             raise llm_anthropic.BalanceExhausted("dry")
+        if self.fail_after is not None and len(self.calls) >= self.fail_after:
+            raise RuntimeError("rate_limit_error: overloaded")
         self.calls.append((user_text, max_searches, clearance))
         return llm.SearchAnswer(
             text=self.answers[user_text],
@@ -305,6 +314,29 @@ class AiCheckCliTestCase(unittest.TestCase):
         # Finished, not aborted: `company_profile` must serve a's paid signals.
         self.assertIsNotNone(run["finished_at"])
         self.assertIsNone(run["aborted_reason"])
+        self.assertEqual(run["companies_seen"], 1)
+        self.assertEqual(self.profile(a)["ai_queries_checked"], 2)
+        self.assertIsNone(self.profile(b)["ai_queries_checked"])
+
+    def test_any_mid_run_failure_finishes_the_run_and_names_itself(self) -> None:
+        """Unit 10 audit (M1.108): a rate limit between two companies is the
+        balance case for everything that matters. No traceback, exit 2, the
+        paid company's signals served, the failure printed by name."""
+        a = self.company("a-shop.de")
+        b = self.company("b-shop.de")
+        provider = FakeProvider(
+            {
+                "beste Zahnbürste": '{"brands": ["X"]}',
+                "Zahnbürste Test": '{"brands": ["Y"]}',
+            },
+            fail_after=2,
+        )
+        code, _, err = self.run_cli(submit=True, provider=provider)
+        self.assertEqual(code, 2)
+        self.assertIn("rate_limit_error", err)
+        self.assertIn("b-shop.de", err)
+        run = self.conn.execute("SELECT * FROM run WHERE stage='ai_check'").fetchone()
+        self.assertIsNotNone(run["finished_at"])
         self.assertEqual(run["companies_seen"], 1)
         self.assertEqual(self.profile(a)["ai_queries_checked"], 2)
         self.assertIsNone(self.profile(b)["ai_queries_checked"])
