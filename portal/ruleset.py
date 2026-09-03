@@ -197,13 +197,14 @@ def _owner_operated_settled(profile: Profile) -> bool:
     return _impressum_read(profile) and _homepage_read(profile)
 
 
-def _never_settled(_profile: Profile) -> bool:
-    """`opp.ai_invisible`'s input is M6's, not M5's. Declared explicitly rather
-    than left off, because `assert_declared` refuses a Phase-2-reachable rule
-    with no declaration and *"M6 has not run"* is a real answer to the question
-    the field asks — not an omission. Revisit when M6 writes `ai.checked_at`.
+def _ai_invisible_settled(profile: Profile) -> bool:
+    """M6 writes `ai.queries_checked` (M1.105) and that is the fact of having
+    looked: a check that ran wrote a count, and a count settles the rule
+    whichever way it fell. Until M6 this predicate was `_never_settled`,
+    returning False, because *"M6 has not run"* was a real answer rather than
+    an omission — the shape is unchanged, only the answer is.
     """
-    return False
+    return _num(profile, "ai_queries_checked") is not None
 
 
 def _slow_site_settled(profile: Profile) -> bool:
@@ -717,7 +718,7 @@ RULES: tuple[Rule, ...] = (
         ("ai_queries_checked", "ai_brand_mentions"),
         True,
         _ai_invisible,
-        _never_settled,
+        _ai_invisible_settled,
     ),
     Rule(
         "opp.slow_site",

@@ -613,6 +613,23 @@ class TokenCounter(Protocol):
 
 
 @dataclass(frozen=True)
+class SearchAnswer:
+    """What one live web-search-enabled call came back with (§5.5c).
+
+    The text is the model's answer in full; `usage` carries the measured
+    tokens and `web_searches` that §7 control 3 reconciles against and control
+    8 accumulates. `stop_reason` is kept because a `max_tokens` stop means the
+    brand list may be cut off — a query that ended that way still *ran* and is
+    still paid for, but its competitor list is a prefix and is marked as one.
+    """
+
+    text: str
+    usage: Usage
+    stop_reason: str
+    model: str
+
+
+@dataclass(frozen=True)
 class BatchListing:
     """One row of `messages.batches.list` — what the account says it holds.
 
@@ -903,6 +920,7 @@ __all__ = [
     "ModelLimits",
     "Price",
     "RequestOutcome",
+    "SearchAnswer",
     "Thinking",
     "TokenCounter",
     "Usage",

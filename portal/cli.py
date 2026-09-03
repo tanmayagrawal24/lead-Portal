@@ -20,6 +20,7 @@ from pathlib import Path
 
 from portal import (
     __version__,
+    ai_visibility,
     audit,
     config,
     db,
@@ -393,6 +394,142 @@ def _abort_run(conn: sqlite3.Connection, run_id: int, exc: BaseException) -> Non
         (f"{type(exc).__name__}: {exc}"[:500], run_id),
     )
     conn.commit()
+
+
+def cmd_ai_check(
+    path: Path,
+    *,
+    dry_run: bool,
+    submit: bool,
+    queries: int = ai_visibility.DEFAULT_QUERIES,
+    recheck: bool = False,
+    model: str = llm_anthropic.DEFAULT_MODEL,
+    provider: ai_visibility.SearchProvider | None = None,
+) -> int:
+    """§5.5c's AI-visibility check (M6) — dry by default, paid only on `--submit`.
+
+    M1.102's gate, in M1.102's shape: no flag is a dry run that prints who
+    would be checked with which literal queries, who is withheld and why, and
+    what the run would cost before the prompt is even measured. `--submit` is
+    the written authorisation. `--submit --dry-run` is refused as a
+    contradiction. Fewer than two queries is refused outright, because §6.2's
+    predicate needs two and one would silently disable a +15 rule (M1.23).
+
+    The order on `--submit` is §7's: control 2's clearance first, then control
+    3's reservation inside `ai_visibility.run`, then the calls. A dry key is
+    caught before any run row exists; a balance that runs dry mid-run finishes
+    the run with what was paid for (M1.105(c)).
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    if submit and dry_run:
+        print(
+            "ai-check: --submit and --dry-run contradict each other. Pass one.",
+            file=sys.stderr,
+        )
+        return 2
+    if not ai_visibility.MIN_QUERIES <= queries <= ai_visibility.MAX_QUERIES:
+        print(
+            f"ai-check: --queries must be {ai_visibility.MIN_QUERIES}–"
+            f"{ai_visibility.MAX_QUERIES} (§5.5c). Below {ai_visibility.MIN_QUERIES} "
+            f"`opp.ai_invisible` can never fire (M1.23); above "
+            f"{ai_visibility.MAX_QUERIES} is the hard maximum.",
+            file=sys.stderr,
+        )
+        return 2
+    conn = db.connect(path)
+    try:
+        version = migrate.current_version(conn)
+        highest = migrate.discover()[-1][0]
+        if version < highest:
+            print(
+                f"database at {path} is at migration {version:03d} but the code "
+                f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+                file=sys.stderr,
+            )
+            return 2
+        plans, withheld = ai_visibility.prepare(conn, queries=queries, recheck=recheck)
+        label = "--submit" if submit else "--dry-run"
+        verb = "will be" if submit else "would be"
+        print(f"ai-check {label}: {len(plans)} companies {verb} checked\n")
+        for plan in plans:
+            print(f"  {plan.domain:28} term: {plan.term!r}")
+            for query in plan.queries:
+                print(f"      „{query}“")
+            print(f"      counts as named: {', '.join(plan.brand_terms)}")
+        for entry in withheld:
+            print(f"  {entry.domain:28} WITHHELD — {entry.reason}")
+
+        floor = ai_visibility.unmeasured_floor(
+            plans, provider=llm_anthropic.PROVIDER, model=model
+        )
+        searches = sum(len(p.queries) for p in plans) * ai_visibility.SEARCHES_PER_QUERY
+        if not submit:
+            print(
+                f"\n{searches} search(es) at ${llm.WEB_SEARCH_PER_SEARCH_USD:.2f} plus "
+                f"{ai_visibility.SEARCH_CONTEXT_TOKENS:,} allowance tokens per query "
+                f"(as-of {ai_visibility.SEARCH_CONTEXT_AS_OF}) price at ${floor:.4f} "
+                f"before the prompt is measured. Nothing was sent and nothing was "
+                f"reserved. To reserve and run — §7 control 3, real spend — run "
+                f"again with --submit."
+            )
+            return 0
+        if not plans:
+            print("\nnothing to check: every company was withheld", file=sys.stderr)
+            return 2
+
+        try:
+            clearance = ledger.check_ceiling(conn)
+        except ledger.CeilingExceeded as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        except sqlite3.Error as exc:
+            print(
+                f"refused: the §7 control 2 ledger is not readable ({exc}). Run "
+                f"`portal init` on {path} first.",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"\n§7 control 2: ${clearance.spend_usd:.2f} of "
+            f"${clearance.ceiling_usd:.2f} used over {clearance.window_days} "
+            f"rolling days; ${clearance.headroom_usd:.2f} headroom"
+        )
+        chosen = provider or llm_anthropic.AnthropicProvider(model=model)
+        try:
+            report = ai_visibility.run(conn, chosen, plans, clearance=clearance)
+        except llm_anthropic.MissingKeyError as exc:
+            # From `count_tokens`, before any run row exists: nothing is on
+            # the books and there is nothing to abort.
+            print(str(exc), file=sys.stderr)
+            return 2
+        except ai_visibility.RunCeilingExceeded as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+
+    print(
+        f"\nrun {report.run_id}: {len(report.checked)} of "
+        f"{len(report.checked) + len(report.not_reached)} companies checked, "
+        f"{report.web_searches} searches, {report.input_tokens:,} in / "
+        f"{report.output_tokens:,} out tokens"
+    )
+    print(
+        f"  reserved ${report.reserved_usd:.4f}, measured ${report.actual_usd:.4f}; "
+        f"run.est_cost_usd now carries the measured actual (§7 control 3)"
+    )
+    if report.balance_exhausted:
+        print(
+            f"  ⛔ the balance ran dry; not reached: {', '.join(report.not_reached)}. "
+            f"The run is finished with what was paid for (M1.105(c)); run again "
+            f"once the key is topped up.",
+            file=sys.stderr,
+        )
+        return 2
+    print("  score with `portal score --phase 2`")
+    return 0
 
 
 def cmd_pagespeed(path: Path, dry_run: bool, max_calls: int) -> int:
@@ -1182,6 +1319,40 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"the model to submit to (default {llm_anthropic.DEFAULT_MODEL})",
     )
 
+    ai_parser = sub.add_parser(
+        "ai-check",
+        help="§5.5c's AI-visibility check (M6). A dry run unless --submit is "
+        "given: prints the literal queries and sends nothing",
+    )
+    ai_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan and send nothing (the default)",
+    )
+    ai_parser.add_argument(
+        "--submit",
+        action="store_true",
+        help="reserve (§7 control 3) and run the live web-search calls. THIS "
+        "SPENDS MONEY: ~$0.05–0.06 per company. Needs ANTHROPIC_API_KEY.",
+    )
+    ai_parser.add_argument(
+        "--queries",
+        type=int,
+        default=ai_visibility.DEFAULT_QUERIES,
+        help=f"queries per company, {ai_visibility.MIN_QUERIES}–"
+        f"{ai_visibility.MAX_QUERIES} (default {ai_visibility.DEFAULT_QUERIES})",
+    )
+    ai_parser.add_argument(
+        "--recheck",
+        action="store_true",
+        help="include companies already checked; a re-check is new spend",
+    )
+    ai_parser.add_argument(
+        "--model",
+        default=llm_anthropic.DEFAULT_MODEL,
+        help=f"the model to ask (default {llm_anthropic.DEFAULT_MODEL})",
+    )
+
     pagespeed_parser = sub.add_parser(
         "pagespeed",
         help="§5.5a: PageSpeed Insights over admitted homepages; free tier, keyed "
@@ -1297,6 +1468,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "reconcile":
         return cmd_reconcile(path, args.model)
 
+    if args.command == "ai-check":
+        return cmd_ai_check(
+            path,
+            dry_run=args.dry_run,
+            submit=args.submit,
+            queries=args.queries,
+            recheck=args.recheck,
+            model=args.model,
+        )
     if args.command == "pagespeed":
         if args.max_calls < 1:
             print("--max-calls must be at least 1; refusing", file=sys.stderr)
