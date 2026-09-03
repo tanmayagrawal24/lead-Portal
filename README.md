@@ -36,6 +36,10 @@ Localhost only. Single operator, no auth, no deployment.
 - **M7 complete (Unit 10, M1.106)** — `portal brief` (§9's Markdown export,
   which fails without §8's basis), `portal outreach`, `portal exclude`,
   `portal purge` and `portal forget`; the same three writes on the §9 page.
+- **M8 built (Unit 10, M1.107)** — `portal discover` (§5.1): Places Text
+  Search with the three-field mask asserted on the wire; `run.places_calls`
+  counts issued requests; dry unless `--submit`. `portal fetch` no longer
+  needs `--seed` — without it, every company row is fetched.
 - **§5.7** — `portal score --phase 2` warns loudly on every unreconciled
   batch before writing (M1.104), and `portal llm-batches` is §10.7b's closing
   procedure as a read-only command.

@@ -7,7 +7,7 @@ Built so far: `init`, `fetch`, `extract-p1`, `score`, `serve`, `pagespeed`
 `extract-p2`'s **submitting** half is built (9b) and is reachable from here
 **only through `--submit`** (9c): without it the command is a dry run and
 spends nothing. `reconcile` is a subcommand as of 9b and collects whatever
-batches the database holds. `discover` arrives with M8.
+batches the database holds; `discover` (M8) fills `company` from Places.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from portal import (
     config,
     db,
     diff,
+    discover,
     extract,
     extract_p2,
     fetch,
@@ -79,8 +80,16 @@ def cmd_init(path: Path) -> int:
     return 0
 
 
-def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> int:
+def cmd_fetch(
+    path: Path, seed_path: Path | None, interval: float, max_hosts: int
+) -> int:
     """Fetch every seeded domain under the §5.2 politeness rules.
+
+    **`--seed` became optional with M8 (M1.107).** `discover` writes `company`
+    rows the seed file never names; without a seed the targets are every
+    company row, which is the same set `extract-p1` and `score` already read.
+    With one, the file is upserted first and only its domains are fetched —
+    the pre-M8 behaviour, unchanged.
 
     **Every seeded domain that is not excluded** (audit finding 10). §6.4's
     `excluded = 1` is a standing verdict — a `duplicate_site` row is the same
@@ -95,11 +104,13 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
     if not path.exists():
         print(f"no database at {path} — run `portal init` first", file=sys.stderr)
         return 2
-    try:
-        rows = seeds.load(seed_path)
-    except seeds.SeedError as exc:
-        print(f"seed error: {exc}", file=sys.stderr)
-        return 2
+    rows: list[seeds.Seed] = []
+    if seed_path is not None:
+        try:
+            rows = seeds.load(seed_path)
+        except seeds.SeedError as exc:
+            print(f"seed error: {exc}", file=sys.stderr)
+            return 2
 
     conn = db.connect(path)
     try:
@@ -117,7 +128,21 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
             )
             return 2
 
-        company_ids = seeds.upsert(conn, rows, query=str(seed_path))
+        if seed_path is not None:
+            company_ids = seeds.upsert(conn, rows, query=str(seed_path))
+        else:
+            # Every company the table holds — discovered, seeded or manual.
+            table = conn.execute(
+                "SELECT id, domain FROM company ORDER BY domain"
+            ).fetchall()
+            rows = [seeds.Seed(domain=str(r["domain"])) for r in table]
+            company_ids = [int(r["id"]) for r in table]
+            if not rows:
+                print(
+                    "no companies in the database — pass --seed or run `portal discover`",
+                    file=sys.stderr,
+                )
+                return 2
         # The same predicate `extract-p1` applies at cli.py's `cmd_extract_p1`
         # and `score` applies in `ScoreStage.profiles`: `excluded = 0`. Read
         # from `company` after the upsert, because the verdict lives there and
@@ -1121,6 +1146,89 @@ def cmd_llm_batches(
     return 0
 
 
+def cmd_discover(
+    path: Path,
+    query: str,
+    *,
+    region: str,
+    submit: bool,
+    dry_run: bool,
+    max_calls: int,
+    client: discover.PlacesClient | None = None,
+) -> int:
+    """§5.1's discovery (M8) — dry by default, keyed only on `--submit`.
+
+    The dry run prints the query, the field mask and the request cap, and
+    needs no key. `--submit` reads `GOOGLE_PLACES_API_KEY` and reminds the
+    operator of §7 control 1 in words, because the Console cap that keeps
+    this SKU free is not something a program can verify.
+    """
+    if submit and dry_run:
+        print(
+            "discover: --submit and --dry-run contradict each other. Pass one.",
+            file=sys.stderr,
+        )
+        return 2
+    if max_calls < 1 or max_calls > discover.MAX_CALLS_PER_RUN:
+        print(
+            f"discover: --max-calls must be 1–{discover.MAX_CALLS_PER_RUN}; a runaway "
+            f"guard, not a budget",
+            file=sys.stderr,
+        )
+        return 2
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        text = f"{query} {region}".strip()
+        label = "--submit" if submit else "--dry-run"
+        print(f"discover {label}: „{text}“")
+        print(f"  field mask: {discover.FIELD_MASK}")
+        print(
+            f"  up to {max_calls} request(s) of {discover.PAGE_SIZE} places, counted as issued"
+        )
+        if not submit:
+            print(
+                "\nNothing was requested. §7 control 1: confirm the Places SKU quota "
+                "cap in Cloud Console FIRST, then run again with --submit "
+                f"(needs {discover.API_KEY_ENV})."
+            )
+            return 0
+        try:
+            chosen = client or discover.client_from_env()
+        except discover.MissingKeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        try:
+            report = discover.run(
+                conn, chosen, query, region=region, max_calls=max_calls
+            )
+        except discover.PlacesError as exc:
+            print(f"discover: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    print(
+        f"\nrun {report.run_id}: {report.calls} request(s), {len(report.found)} places "
+        f"with a website, {report.inserted} new company row(s), "
+        f"{len(report.found) - report.inserted} already known, "
+        f"{report.no_website} without a website, {report.unusable} unusable"
+    )
+    for found in report.found:
+        print(
+            f"  {'+' if found.inserted else '='} {found.domain:28} {found.display_name}"
+        )
+    if report.capped:
+        print(
+            f"  stopped at the {max_calls}-request cap with more pages available",
+            file=sys.stderr,
+        )
+    print(
+        "  next: `portal fetch --seed` is not needed — `portal fetch` reads `company`"
+    )
+    return 0
+
+
 def _open_current(path: Path) -> sqlite3.Connection | None:
     """The database, or None with the reason printed. Every M7 command needs
     the same two checks and none of them should differ in how it says no."""
@@ -1375,7 +1483,10 @@ def build_parser() -> argparse.ArgumentParser:
         "fetch", help="fetch robots, homepage, sitemaps, Impressum and a product sample"
     )
     fetch_parser.add_argument(
-        "--seed", type=Path, required=True, help="seed CSV with a 'domain' column"
+        "--seed",
+        type=Path,
+        default=None,
+        help="seed CSV with a 'domain' column; without it every company row is fetched",
     )
     fetch_parser.add_argument(
         "--interval",
@@ -1578,6 +1689,24 @@ def build_parser() -> argparse.ArgumentParser:
         f"{llm_anthropic.DEFAULT_MODEL})",
     )
 
+    discover_parser = sub.add_parser(
+        "discover",
+        help="§5.1: Places Text Search into company rows (M8). Dry unless --submit",
+    )
+    discover_parser.add_argument(
+        "--query", required=True, help='e.g. "Zahnpflege Onlineshop"'
+    )
+    discover_parser.add_argument("--region", default="", help='e.g. "NRW"')
+    discover_parser.add_argument("--dry-run", action="store_true")
+    discover_parser.add_argument(
+        "--submit",
+        action="store_true",
+        help=f"issue the requests; needs {discover.API_KEY_ENV} and a Console quota cap (§7 control 1)",
+    )
+    discover_parser.add_argument(
+        "--max-calls", type=int, default=discover.MAX_CALLS_PER_RUN
+    )
+
     purge_parser = sub.add_parser(
         "purge",
         help="§8: delete contact rows past purge_after (collected_at + 12 months)",
@@ -1723,6 +1852,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "audit-impressum-candidates":
         return cmd_audit_impressum_candidates(path, args.show_values)
 
+    if args.command == "discover":
+        return cmd_discover(
+            path,
+            args.query,
+            region=args.region,
+            submit=args.submit,
+            dry_run=args.dry_run,
+            max_calls=args.max_calls,
+        )
     if args.command == "purge":
         return cmd_purge(path, dry_run=args.dry_run)
     if args.command == "forget":
