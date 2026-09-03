@@ -22,6 +22,7 @@ from portal import (
     __version__,
     ai_visibility,
     audit,
+    brief,
     config,
     db,
     diff,
@@ -30,6 +31,7 @@ from portal import (
     fetch,
     impressum_audit,
     ledger,
+    lifecycle,
     llm,
     llm_anthropic,
     migrate,
@@ -1119,6 +1121,181 @@ def cmd_llm_batches(
     return 0
 
 
+def _open_current(path: Path) -> sqlite3.Connection | None:
+    """The database, or None with the reason printed. Every M7 command needs
+    the same two checks and none of them should differ in how it says no."""
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return None
+    conn = db.connect(path)
+    version = migrate.current_version(conn)
+    highest = migrate.discover()[-1][0]
+    if version < highest:
+        conn.close()
+        print(
+            f"database at {path} is at migration {version:03d} but the code "
+            f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+            file=sys.stderr,
+        )
+        return None
+    return conn
+
+
+def cmd_purge(path: Path, *, dry_run: bool) -> int:
+    """§8: delete `contact` rows past `purge_after`. Prints each one, because a
+    deletion of personal data is something an operator should be able to say
+    happened, and on which date."""
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        expired = lifecycle.expired_contacts(conn)
+        label = "would be deleted" if dry_run else "deleted"
+        print(f"purge: {len(expired)} expired contact(s) {label}")
+        for row in expired:
+            print(
+                f"  {row['domain']:28} {row['full_name'] or '—':30} "
+                f"{row['role'] or '':16} collected {row['collected_at'][:10]}, "
+                f"purge_after {row['purge_after'][:10]}"
+            )
+        if dry_run:
+            return 0
+        deleted = lifecycle.purge(conn)
+        if deleted != len(expired):
+            print(
+                f"purge: listed {len(expired)} but deleted {deleted} — a contact "
+                f"expired between the two reads; run again",
+                file=sys.stderr,
+            )
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_forget(path: Path, domain: str, *, yes: bool) -> int:
+    """§8's erasure. Refuses without `--yes`: it is irreversible and it is the
+    one command here whose dry run cannot show what it would do in full,
+    because the point is that nothing is left to show."""
+    if not yes:
+        print(
+            f"forget: this hard-deletes every row and every stored body for "
+            f"{domain}, and keeps only the §7 ledger (run rows name no company). "
+            f"It cannot be undone. Pass --yes.",
+            file=sys.stderr,
+        )
+        return 2
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        try:
+            report = lifecycle.forget(conn, config.artifacts_root(path), domain)
+        except lifecycle.UnknownCompany as exc:
+            print(f"forget: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    print(f"forget: {domain}")
+    for table, count in sorted(report.rows_deleted.items()):
+        print(f"  {table:24} {count:>6} row(s) deleted")
+    print(f"  stored bodies: {'removed' if report.bodies_removed else 'none on disk'}")
+    if not report.clean:
+        print(
+            f"forget: RESIDUE REMAINS — {report.residue}. Do not report this as done.",
+            file=sys.stderr,
+        )
+        return 1
+    print("  verified: zero rows anywhere name this company, and no directory remains")
+    return 0
+
+
+def cmd_exclude(path: Path, domain: str, *, reason: str, lift: bool) -> int:
+    """§9's *mark excluded (with reason)*. `--lift` is the operator's act
+    M1.103(10) keeps out of every stage."""
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        try:
+            if lift:
+                lifecycle.lift_exclusion(conn, domain)
+                print(f"exclude: {domain} is no longer excluded")
+            else:
+                lifecycle.exclude(conn, domain, reason)
+                print(f"exclude: {domain} excluded — {reason}")
+        except (lifecycle.UnknownCompany, ValueError) as exc:
+            print(f"exclude: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_outreach(
+    path: Path,
+    domain: str,
+    *,
+    channel: str,
+    occurred_at: str | None,
+    notes: str,
+    outcome: str | None,
+) -> int:
+    """§9's *log an outreach attempt*. The block is migration 008's trigger;
+    this command only puts its reason into words."""
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        try:
+            row_id = lifecycle.log_outreach(
+                conn,
+                domain,
+                channel=channel,
+                occurred_at=occurred_at,
+                notes=notes,
+                outcome=outcome,
+            )
+        except lifecycle.OutreachBlocked as exc:
+            print(f"⛔ {exc}", file=sys.stderr)
+            return 2
+        except (lifecycle.UnknownCompany, ValueError) as exc:
+            print(f"outreach: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    print(
+        f"outreach: row {row_id} — {domain} via {channel}"
+        + (f", {outcome}" if outcome else "")
+    )
+    return 0
+
+
+def cmd_brief(path: Path, domain: str, *, out: Path | None) -> int:
+    """§9's research brief. Stdout unless `--out`; fails loudly on §8."""
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        try:
+            company_id = lifecycle.company_id_for(conn, domain)
+            text = brief.render(conn, company_id)
+        except (lifecycle.UnknownCompany, brief.NotScored) as exc:
+            print(f"brief: {exc}", file=sys.stderr)
+            return 2
+        except (brief.MissingBasis, brief.ContactBlocked) as exc:
+            print(f"⛔ brief refused: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    if out is None:
+        print(text, end="")
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        print(f"brief: written to {out}")
+    return 0
+
+
 def cmd_serve(path: Path, host: str, port: int, allow_public_bind: bool = False) -> int:
     """§9's page. Refuses rather than starting against a database with no schema
     — an empty table is indistinguishable from a corpus nothing has scored.
@@ -1401,6 +1578,51 @@ def build_parser() -> argparse.ArgumentParser:
         f"{llm_anthropic.DEFAULT_MODEL})",
     )
 
+    purge_parser = sub.add_parser(
+        "purge",
+        help="§8: delete contact rows past purge_after (collected_at + 12 months)",
+    )
+    purge_parser.add_argument(
+        "--dry-run", action="store_true", help="list, do not delete"
+    )
+
+    forget_parser = sub.add_parser(
+        "forget", help="§8: hard-delete every row and stored body for one company"
+    )
+    forget_parser.add_argument("--domain", required=True)
+    forget_parser.add_argument(
+        "--yes", action="store_true", help="confirm; irreversible"
+    )
+
+    exclude_parser = sub.add_parser(
+        "exclude", help="§9: mark a company excluded, with a reason"
+    )
+    exclude_parser.add_argument("--domain", required=True)
+    exclude_parser.add_argument(
+        "--reason", default="", help="why (required unless --lift)"
+    )
+    exclude_parser.add_argument(
+        "--lift", action="store_true", help="remove an exclusion"
+    )
+
+    outreach_parser = sub.add_parser(
+        "outreach", help="§9: log an outreach attempt (post or phone)"
+    )
+    outreach_parser.add_argument("--domain", required=True)
+    outreach_parser.add_argument("--channel", required=True, choices=lifecycle.CHANNELS)
+    outreach_parser.add_argument(
+        "--at", dest="occurred_at", default=None, help="ISO 8601; default now"
+    )
+    outreach_parser.add_argument("--notes", default="")
+    outreach_parser.add_argument("--outcome", default=None, choices=lifecycle.OUTCOMES)
+
+    brief_parser = sub.add_parser(
+        "brief",
+        help="§9: export the research brief (Markdown); fails without §8's basis",
+    )
+    brief_parser.add_argument("--domain", required=True)
+    brief_parser.add_argument("--out", type=Path, default=None, help="write to a file")
+
     prices_parser = sub.add_parser(
         "llm-prices",
         help="the declared price and model-limit tables with their as-of dates; "
@@ -1501,6 +1723,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "audit-impressum-candidates":
         return cmd_audit_impressum_candidates(path, args.show_values)
 
+    if args.command == "purge":
+        return cmd_purge(path, dry_run=args.dry_run)
+    if args.command == "forget":
+        return cmd_forget(path, args.domain, yes=args.yes)
+    if args.command == "exclude":
+        return cmd_exclude(path, args.domain, reason=args.reason, lift=args.lift)
+    if args.command == "outreach":
+        return cmd_outreach(
+            path,
+            args.domain,
+            channel=args.channel,
+            occurred_at=args.occurred_at,
+            notes=args.notes,
+            outcome=args.outcome,
+        )
+    if args.command == "brief":
+        return cmd_brief(path, args.domain, out=args.out)
     if args.command == "llm-batches":
         return cmd_llm_batches(args.limit, model=args.model)
     if args.command == "llm-prices":
