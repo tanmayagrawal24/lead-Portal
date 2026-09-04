@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from portal import impressum_audit, llm, parsers
+from portal import impressum_audit, ledger, llm, parsers
 from portal.ledger import LedgerClearance
 from portal.urls import authority_of
 
@@ -481,6 +481,8 @@ def _commit_reservation(
     purpose: str,
     total_usd: float,
     now: str,
+    clearance: LedgerClearance,
+    run_ceiling_usd: float | None = None,
 ) -> int:
     """**M1.72: §7 control 4's two writes, committed together or not at all.**
 
@@ -513,7 +515,13 @@ def _commit_reservation(
             now=now,
             request_count=len(requests),
         )
-        _charge_run(conn, run_id=run_id, total_usd=total_usd)
+        _charge_run(
+            conn,
+            run_id=run_id,
+            total_usd=total_usd,
+            clearance=clearance,
+            run_ceiling_usd=run_ceiling_usd,
+        )
     except BaseException:
         conn.execute("ROLLBACK")
         raise
@@ -555,17 +563,36 @@ def _write_batch_row(
     return batch_id
 
 
-def _charge_run(conn: sqlite3.Connection, *, run_id: int, total_usd: float) -> None:
+def _charge_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    total_usd: float,
+    clearance: LedgerClearance,
+    run_ceiling_usd: float | None = None,
+) -> None:
     """Half two of M1.72's pair: **the ledger**, which is the half control 2 reads.
 
     A separate function from `_write_batch_row` for one reason and it is not
     style: the negative control for M1.72 has to fail *between* the two writes,
     and a test that can only fail before or after the pair proves nothing about
     whether they commit together.
+
+    **§7 control 3 is enforced here because this is the only place a reservation
+    reaches `run.est_cost_usd` (M1.109).** Putting the check at the single write
+    rather than at the caller is what makes it unbypassable: a future second
+    caller gets the ceiling by construction instead of by remembering.
+    `ledger.charge_run` raises `RunCeilingExceeded` before writing anything, and
+    this runs inside `_commit_reservation`'s `BEGIN IMMEDIATE`, so the refusal
+    rolls back the batch row with it — **no batch on the books, no money
+    reserved, nothing submitted.**
     """
-    conn.execute(
-        "UPDATE run SET est_cost_usd = COALESCE(est_cost_usd, 0) + ? WHERE id = ?",
-        (total_usd, run_id),
+    ledger.charge_run(
+        conn,
+        run_id=run_id,
+        usd=total_usd,
+        clearance=clearance,
+        ceiling_usd=run_ceiling_usd,
     )
 
 
@@ -578,6 +605,7 @@ def reserve_and_submit(
     run_id: int,
     purpose: str,
     clearance: LedgerClearance,
+    run_ceiling_usd: float | None = None,
 ) -> Reservation:
     """§7 control 4 end to end: measure, reserve, submit, record. **Paid.**
 
@@ -594,7 +622,9 @@ def reserve_and_submit(
             because a fallback is how an unmeasured number enters the ledger
             looking measured.
         2.  **one transaction** — the batch row, its request set, and the run's
-            reservation (M1.72). Nothing is spent yet.
+            reservation (M1.72). **§7 control 3 is checked here, at the write
+            (M1.109)**, so a run over its per-run ceiling is refused with the
+            batch row rolled back beside it. Nothing is spent yet.
         3.  `submit` — the money is gone the moment this returns.
         4.  the provider id and `submitted_at`, recorded.
 
@@ -647,6 +677,8 @@ def reserve_and_submit(
         purpose=purpose,
         total_usd=estimate.total_usd,
         now=now,
+        clearance=clearance,
+        run_ceiling_usd=run_ceiling_usd,
     )
 
     provider_batch_id = submit(provider, requests, clearance=clearance)

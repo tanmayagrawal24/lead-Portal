@@ -28,8 +28,9 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from portal import db, ledger, llm, llm_anthropic, migrate
+from portal import db, extract_p2, ledger, llm, llm_anthropic, migrate
 
 
 class LedgerTestCase(unittest.TestCase):
@@ -323,6 +324,180 @@ class TheGateAtTheCallSite(LedgerTestCase):
         provider = llm_anthropic.AnthropicProvider(client=object())
         with self.assertRaises(ledger.LedgerBypass):
             provider.submit_batch(self._requests(), clearance=None)
+
+
+class ThePerRunCeiling(LedgerTestCase):
+    """§7 control 3 — the control §7 says should bite occasionally (M1.109).
+
+    **Reproduced before it was built.** On `95d3281`, one run charged $2.00 six
+    times through the real reservation write reached `run.est_cost_usd = 12.00`
+    against a stated per-run ceiling of `$5.00`, and `check_ceiling` cleared it
+    — correctly, because control 2 is the outer bound and $12 is well under $45.
+    `ledger.MONTHLY_CEILING_USD` was the only ceiling constant in the tree.
+    """
+
+    def clearance(self) -> ledger.LedgerClearance:
+        """A real one. `check_ceiling` is the only thing that builds these."""
+        return ledger.check_ceiling(self.conn)
+
+    def test_a_run_is_refused_at_the_per_run_ceiling(self) -> None:
+        run_id = self.add_run(days_ago=0, cost=0.0)
+        cl = self.clearance()
+
+        # Four charges of $1.20 → $4.80, all under $5.00.
+        for _ in range(4):
+            ledger.charge_run(self.conn, run_id=run_id, usd=1.20, clearance=cl)
+        self.assertAlmostEqual(ledger.run_reserved_usd(self.conn, run_id), 4.80)
+
+        # The fifth would reach $6.00 and must be refused.
+        with self.assertRaises(ledger.RunCeilingExceeded) as caught:
+            ledger.charge_run(self.conn, run_id=run_id, usd=1.20, clearance=cl)
+
+        message = str(caught.exception)
+        self.assertIn("§7 control 3", message)
+        self.assertIn("6.0000", message)
+        self.assertIn("$5.00", message)
+
+        # And it refused *before* writing: the accumulator has not moved.
+        self.assertAlmostEqual(ledger.run_reserved_usd(self.conn, run_id), 4.80)
+
+    def test_the_check_is_on_the_total_not_the_increment(self) -> None:
+        """A single call larger than the whole ceiling is refused outright.
+
+        Otherwise the guard's first call is free — and the first call is the one
+        most likely to be the pathological one.
+        """
+        run_id = self.add_run(days_ago=0, cost=0.0)
+        with self.assertRaises(ledger.RunCeilingExceeded):
+            ledger.charge_run(
+                self.conn, run_id=run_id, usd=9.99, clearance=self.clearance()
+            )
+        self.assertEqual(ledger.run_reserved_usd(self.conn, run_id), 0.0)
+
+    def test_control_2_is_not_replaced_by_control_3(self) -> None:
+        """The two bound different things and neither substitutes for the other.
+
+        Ten runs of $4.50 each are all individually legal under control 3 and
+        together are $45.00 — which is control 2's whole point about
+        `run.est_cost_usd` resetting on every invocation.
+        """
+        cl = self.clearance()
+        for _ in range(10):
+            run_id = self.add_run(days_ago=0, cost=0.0)
+            ledger.charge_run(self.conn, run_id=run_id, usd=4.50, clearance=cl)
+        self.assertAlmostEqual(ledger.monthly_spend_usd(self.conn), 45.00)
+        with self.assertRaises(ledger.CeilingExceeded):
+            self.add_run(days_ago=0, cost=0.01)
+            ledger.check_ceiling(self.conn)
+
+    def test_it_cannot_be_applied_without_consulting_control_2(self) -> None:
+        """Composition, not replacement: the clearance is required and unforgeable."""
+        run_id = self.add_run(days_ago=0, cost=0.0)
+        with self.assertRaises(TypeError):
+            ledger.charge_run(self.conn, run_id=run_id, usd=1.00)  # type: ignore[call-arg]
+
+    def test_a_run_that_does_not_exist_is_refused_not_treated_as_empty(self) -> None:
+        with self.assertRaises(ledger.RunCeilingExceeded):
+            ledger.charge_run(
+                self.conn, run_id=9999, usd=0.01, clearance=self.clearance()
+            )
+
+    def test_reconciliation_is_never_refused_by_the_per_run_ceiling(self) -> None:
+        """M1.110's ruling: a ceiling may not block its own bookkeeping.
+
+        The money is already spent. Refusing the correction would leave
+        `run.est_cost_usd` holding a number known to be wrong, and control 2 —
+        the guard that actually bounds spend — reads that column.
+        """
+        run_id = self.add_run(days_ago=0, cost=4.90)
+        # An actual that lands well above the per-run ceiling still applies.
+        ledger.reconcile_run(self.conn, run_id=run_id, delta_usd=+3.00)
+        self.assertAlmostEqual(ledger.run_reserved_usd(self.conn, run_id), 7.90)
+        # And a downward correction, which is the ordinary case.
+        ledger.reconcile_run(self.conn, run_id=run_id, delta_usd=-1.40)
+        self.assertAlmostEqual(ledger.run_reserved_usd(self.conn, run_id), 6.50)
+
+    def test_the_ceiling_is_read_at_call_time_not_frozen_at_import(self) -> None:
+        """One expression means one expression **at the moment of the check**.
+
+        `ceiling_usd: float = RUN_CEILING_USD` in the signature would evaluate
+        the constant once, at import, and freeze that value into every caller
+        that did not pass one — so `ledger.RUN_CEILING_USD` would be a name the
+        module reads and nothing obeys. This is why the parameter is `None`.
+        """
+        run_id = self.add_run(days_ago=0, cost=0.0)
+        with (
+            mock.patch.object(ledger, "RUN_CEILING_USD", 0.50),
+            self.assertRaises(ledger.RunCeilingExceeded),
+        ):
+            ledger.charge_run(
+                self.conn, run_id=run_id, usd=1.00, clearance=self.clearance()
+            )
+        self.assertEqual(ledger.run_reserved_usd(self.conn, run_id), 0.0)
+        # Unpatched, the same charge is ordinary.
+        ledger.charge_run(
+            self.conn, run_id=run_id, usd=1.00, clearance=self.clearance()
+        )
+        self.assertAlmostEqual(ledger.run_reserved_usd(self.conn, run_id), 1.00)
+
+    def test_the_ceiling_has_one_expression_and_ai_visibility_reads_it(self) -> None:
+        """M1.109: `ai_visibility.PER_RUN_CEILING_USD` was a second expression.
+
+        M6 checks a whole run's estimate before the `run` row exists; M5's
+        reservation checks per call at the write. Two enforcement points is
+        correct — two constants and two exception classes was not.
+        """
+        from portal import ai_visibility
+
+        self.assertFalse(hasattr(ai_visibility, "PER_RUN_CEILING_USD"))
+        self.assertIs(ai_visibility.RunCeilingExceeded, ledger.RunCeilingExceeded)
+        self.assertNotIsInstance(ledger.RunCeilingExceeded("x"), ledger.CeilingExceeded)
+
+
+class TheReservationPathEnforcesControl3(LedgerTestCase):
+    """The ceiling is at the single write, so a second caller gets it for free."""
+
+    def test_an_oversized_reservation_leaves_no_batch_row_and_no_charge(self) -> None:
+        """The refusal rolls back `_write_batch_row` with it (M1.72's transaction).
+
+        This is the property that matters operationally: a refused reservation
+        must leave **nothing** — no batch on the books for `reconcile` to find,
+        and no money counted against a run that never submitted.
+        """
+        run_id = self.add_run(days_ago=0, cost=0.0)
+        cl = ledger.check_ceiling(self.conn)
+        page = types.SimpleNamespace(
+            kind="impressum",
+            company_id=1,
+            artifact_id=1,
+            sent_text="x",
+            sent_sha256="0" * 64,
+        )
+        self.conn.execute(
+            "INSERT INTO company (id, domain, discovery_source, discovered_at) "
+            "VALUES (1,'x.de','seed_csv','2026-08-21T00:00:00Z')"
+        )
+        self.conn.execute(
+            "INSERT INTO artifact (id, company_id, kind, url, fetched_at) "
+            "VALUES (1,1,'impressum','https://x.de/impressum','2026-08-21T00:00:00Z')"
+        )
+
+        with self.assertRaises(ledger.RunCeilingExceeded):
+            extract_p2._commit_reservation(
+                self.conn,
+                [page],  # type: ignore[list-item]
+                [object()],  # type: ignore[list-item]
+                run_id=run_id,
+                purpose="impressum",
+                total_usd=6.00,
+                now="2026-08-21T00:00:00Z",
+                clearance=cl,
+            )
+
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM llm_batch").fetchone()[0], 0
+        )
+        self.assertEqual(ledger.run_reserved_usd(self.conn, run_id), 0.0)
 
 
 if __name__ == "__main__":  # pragma: no cover
