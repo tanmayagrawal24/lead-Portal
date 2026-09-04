@@ -223,7 +223,7 @@ class ThePaidPath(ExtractP2CliTestCase):
         self.assertEqual([r["company_id"] for r in rows], [company_id])
         # What went out is what the dry run showed.
         self.assertEqual(len(provider.submitted), 1)
-        self.assertTrue(provider.submitted[0].custom_id.startswith("impressum:"))
+        self.assertTrue(provider.submitted[0].custom_id.startswith("impressum-"))
         self.assertIn("reserved $", text)
         self.assertIn("one transaction (M1.72)", text)
         self.assertIn("portal reconcile", text)
@@ -342,7 +342,7 @@ class ThePaidPath(ExtractP2CliTestCase):
         self.assertEqual(code, 0, text)
         (batch,) = self.batches()
         self.assertEqual(batch["purpose"], "homepage")
-        self.assertTrue(provider.submitted[0].custom_id.startswith("homepage:"))
+        self.assertTrue(provider.submitted[0].custom_id.startswith("homepage-"))
 
 
 if __name__ == "__main__":

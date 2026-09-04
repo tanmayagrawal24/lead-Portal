@@ -120,7 +120,7 @@ SCHEMA = {
 }
 
 
-def _request(custom_id: str = "snocks.com") -> llm.BatchRequest:
+def _request(custom_id: str = "impressum-1-31") -> llm.BatchRequest:
     return llm.BatchRequest(
         custom_id=custom_id,
         system="Return null for any field not present on the page.",
@@ -176,7 +176,7 @@ class Submission(unittest.TestCase):
         self.assertEqual(
             provider.submit_batch([_request()], clearance=_cleared()), "msgbatch_fake"
         )
-        self.assertEqual(client.submitted[0]["custom_id"], "snocks.com")
+        self.assertEqual(client.submitted[0]["custom_id"], "impressum-1-31")
 
     def test_a_dry_key_at_submit_raises_its_own_exception(self) -> None:
         """M1.53 seam one. `billing_error` is a 403 and so is `permission_error`;

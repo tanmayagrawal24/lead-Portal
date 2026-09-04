@@ -162,5 +162,5 @@ New test files: `test_score_phase2.py` (7), `test_llm_batches_cli.py` (5),
 | §10.2's cost lever | §10.2 | open; base rates unreproducible (§10.7a) |
 | §6.5 band calibration | §10.3 | blocked on a corpus gathered after B7 and the root-slug fix |
 | `interrupted-M5-remnant` stash | `git stash list` on the 2026-08-15 codespace | unread by this unit; nothing here was built from it |
-| Next free migration | `ls portal/migrations/` | **018** |
-| Next free amendment | the register | **`M1.<115>`** — angle brackets so it is not a citation; M1.91 refused this document on its first run for writing the bare number, exactly as it refused 9c-prep (its §11). *Was `M1.<109>` when written; Unit 11 took M1.109–M1.113 reconciling PR #7 (M1.113), and the §10.7b closing took M1.114* |
+| Next free migration | `ls portal/migrations/` | **019** — *was `018` when written; the reservation-release states took 018 (M1.117)* |
+| Next free amendment | the register | **`M1.<118>`** — angle brackets so it is not a citation; M1.91 refused this document on its first run for writing the bare number, exactly as it refused 9c-prep (its §11). *Was `M1.<109>` when written; Unit 11 took M1.109–M1.113 reconciling PR #7 (M1.113), and the §10.7b closing took M1.114* |

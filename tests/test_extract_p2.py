@@ -70,7 +70,7 @@ class TestTheLedgerGateEngages(unittest.TestCase):
 
         clearance = ledger.check_ceiling(conn)
         provider = FakeProvider()
-        request = llm.BatchRequest("impressum:1:1", "sys", "text", {}, 128)
+        request = llm.BatchRequest("impressum-1-1", "sys", "text", {}, 128)
         self.assertEqual(
             extract_p2.submit(provider, [request], clearance=clearance),
             "batch_fake_1",
@@ -155,7 +155,7 @@ class TestBatchRequests(unittest.TestCase):
             False,
         )
         request = extract_p2.build_requests([page])[0]
-        self.assertEqual(request.custom_id, "impressum:7:42")
+        self.assertEqual(request.custom_id, "impressum-7-42")
         self.assertEqual(
             extract_p2.parse_custom_id(request.custom_id), ("impressum", 7, 42)
         )
@@ -367,3 +367,61 @@ class TestTheGateIsEnforcedWhereMoneyIsCommitted(unittest.TestCase):
         self._score(stopped, 0)
         prepared, _ = extract_p2.prepare(self.conn, self.root)
         self.assertEqual(extract_p2.build_requests(prepared), [])
+
+
+class TheCustomIdIsSendable(unittest.TestCase):
+    """M1.115. The key shipped in Unit 9b with `:` separators, which the batch
+    API's `custom_id` pattern does not admit. Every fake provider accepted it
+    and three tests asserted it, so the suite pinned the defect instead of
+    catching it: it surfaced on the first real submit, as a 400 for the whole
+    batch, AFTER §7 control 4 had committed the reservation."""
+
+    def test_the_key_matches_the_pattern_the_batch_api_enforces(self) -> None:
+        self.assertRegex(
+            extract_p2.format_custom_id("impressum", 7, 96), llm.CUSTOM_ID_PATTERN
+        )
+        self.assertRegex(
+            extract_p2.format_custom_id("homepage", 12, 223), llm.CUSTOM_ID_PATTERN
+        )
+
+    def test_every_request_a_real_corpus_builds_is_sendable(self) -> None:
+        """The check that matters is over `build_requests`, not over the
+        formatter: the formatter is only correct if the builder uses it."""
+        for kind in ("impressum", "homepage"):
+            with self.subTest(kind=kind):
+                request = llm.BatchRequest(
+                    custom_id=extract_p2.format_custom_id(kind, 1, 31),
+                    system="s",
+                    user_text="u",
+                    json_schema={},
+                    max_tokens=128,
+                )
+                self.assertRegex(request.custom_id, llm.CUSTOM_ID_PATTERN)
+
+    def test_a_key_the_provider_would_reject_is_refused_at_construction(self) -> None:
+        """The guard is on `BatchRequest`, so no caller — production, fake or
+        test — can build a request the batch API would refuse."""
+        with self.assertRaises(llm.LLMConfigError) as caught:
+            llm.BatchRequest("impressum:1:1", "sys", "text", {}, 128)
+        self.assertIn("custom_id", str(caught.exception))
+        self.assertIn("M1.115", str(caught.exception))
+
+    def test_the_round_trip_holds(self) -> None:
+        self.assertEqual(
+            extract_p2.parse_custom_id(extract_p2.format_custom_id("impressum", 7, 96)),
+            ("impressum", 7, 96),
+        )
+
+    def test_the_pre_m1_115_form_no_longer_parses(self) -> None:
+        """Strict rather than tolerant: no `:` batch was ever submitted, so
+        accepting both forms would be a second meaning for one word."""
+        with self.assertRaises(llm.LLMConfigError):
+            extract_p2.parse_custom_id("impressum:7:96")
+
+    def test_the_stored_key_and_the_sent_key_are_the_same_expression(self) -> None:
+        """`reconcile` refuses to attribute a result whose key disagrees with
+        the row that stored it, so the reservation writer and the request
+        builder must not hold two hand-written copies of one format string."""
+        source = Path(extract_p2.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('f"{page.kind}:', source)
+        self.assertEqual(source.count("format_custom_id(page.kind"), 2)

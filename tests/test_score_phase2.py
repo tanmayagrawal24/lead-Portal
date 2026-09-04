@@ -94,7 +94,7 @@ class Phase2WarningTestCase(unittest.TestCase):
                 "artifact_id, sent_text_sha256, sent_bytes) VALUES (?, ?, ?, ?, 'sha', 10)",
                 (
                     batch_id,
-                    f"impressum:{company_id}:{artifact.lastrowid}",
+                    f"impressum-{company_id}-{artifact.lastrowid}",
                     company_id,
                     artifact.lastrowid,
                 ),
