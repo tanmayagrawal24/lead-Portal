@@ -352,7 +352,7 @@ class BatchDisposition(unittest.TestCase):
         said nothing, so two companies went unextracted with nothing naming
         them. §5.6 fact 2 is a rule about a SET and `request_count` is a number.
         """
-        sent = [f"impressum:{i}:{i}" for i in range(10)]
+        sent = [f"impressum-{i}-{i}" for i in range(10)]
         returned = [_item(cid, llm.RequestOutcome.SUCCEEDED) for cid in sent[:8]]
         self.assertIs(
             llm.resolve_batch_status(returned, expected=sent),

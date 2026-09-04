@@ -167,7 +167,7 @@ class M7TestCase(unittest.TestCase):
         ).fetchone()[0]
         self.conn.execute(
             "INSERT INTO llm_batch_request (batch_id, custom_id, company_id, artifact_id, "
-            "sent_text_sha256, sent_bytes) VALUES (?, 'impressum:x', ?, ?, 's', 1)",
+            "sent_text_sha256, sent_bytes) VALUES (?, 'impressum-x', ?, ?, 's', 1)",
             (batch, gone, artifact),
         )
         self.assertTrue(lifecycle.residue(self.conn, gone))

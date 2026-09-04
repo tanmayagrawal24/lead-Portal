@@ -405,7 +405,7 @@ def build_requests(prepared: list[Prepared]) -> list[llm.BatchRequest]:
     schema = {"impressum": impressum_schema(), "homepage": homepage_schema()}
     return [
         llm.BatchRequest(
-            custom_id=f"{page.kind}:{page.company_id}:{page.artifact_id}",
+            custom_id=format_custom_id(page.kind, page.company_id, page.artifact_id),
             system=_SYSTEM[page.kind],
             user_text=page.sent_text,
             json_schema=schema[page.kind],
@@ -415,10 +415,55 @@ def build_requests(prepared: list[Prepared]) -> list[llm.BatchRequest]:
     ]
 
 
+#: The separator, changed from `:` to `-` by M1.115: `:` is not in the batch
+#: API's `custom_id` pattern, so every request Unit 9b built was unsendable and
+#: nothing measured that until the first real submit. The pattern itself lives
+#: in `llm.CUSTOM_ID_PATTERN` and is enforced in `BatchRequest.__post_init__`,
+#: so there is one statement of it and no caller can go around it. `-` is safe
+#: as a separator here because `kind` is `impressum` or `homepage` and the two
+#: ids are integers: no part can contain it, so `split` stays exact.
+_CUSTOM_ID_SEP = "-"
+
+
+def format_custom_id(kind: str, company_id: int, artifact_id: int) -> str:
+    """The key, built in **one place** (M1.115).
+
+    `build_requests` sends this and `_commit_reservation` stores it, and
+    `reconcile` refuses to attribute a result whose key disagrees with the row
+    that stored it. Two hand-written copies of one format string is how those
+    two come to disagree — the same shape as M1.109's frozen default — so
+    there is one expression and both callers use it.
+
+    Raises rather than truncating or substituting: a key the provider will
+    reject must fail here, where it names the company, and not at
+    `create`, where it fails the entire batch and names an index.
+    """
+    custom_id = f"{kind}{_CUSTOM_ID_SEP}{company_id}{_CUSTOM_ID_SEP}{artifact_id}"
+    if not llm.CUSTOM_ID_RE.match(custom_id):
+        raise llm.LLMConfigError(
+            f"custom_id {custom_id!r} does not match the provider's required "
+            f"pattern {llm.CUSTOM_ID_PATTERN} — the batch API refuses the whole "
+            f"submission on one bad key (M1.115)"
+        )
+    return custom_id
+
+
 def parse_custom_id(custom_id: str) -> tuple[str, int, int]:
-    """The inverse of `build_requests`' key, in one place so the two cannot
-    disagree about what a `custom_id` means."""
-    kind, company_id, artifact_id = custom_id.split(":")
+    """The inverse of `format_custom_id`, in one place so the two cannot
+    disagree about what a `custom_id` means.
+
+    Strict on the separator: no batch built with the pre-M1.115 `:` form was
+    ever submitted (`portal llm-batches` reported zero on this account before
+    and after the refused submit), so there is no in-flight key to stay
+    compatible with, and accepting both would be a second meaning for one word.
+    """
+    parts = custom_id.split(_CUSTOM_ID_SEP)
+    if len(parts) != 3:
+        raise llm.LLMConfigError(
+            f"custom_id {custom_id!r} is not {_CUSTOM_ID_SEP!r}-separated into "
+            f"kind, company id and artifact id (M1.115)"
+        )
+    kind, company_id, artifact_id = parts
     return kind, int(company_id), int(artifact_id)
 
 
@@ -553,7 +598,7 @@ def _write_batch_row(
             "artifact_id, sent_text_sha256, sent_bytes) VALUES (?,?,?,?,?,?)",
             (
                 batch_id,
-                f"{page.kind}:{page.company_id}:{page.artifact_id}",
+                format_custom_id(page.kind, page.company_id, page.artifact_id),
                 page.company_id,
                 page.artifact_id,
                 page.sent_sha256,
@@ -712,6 +757,7 @@ FREE_SURFACES: tuple[str, ...] = (
     "build_requests",
     "clean",
     "eligible_companies",
+    "format_custom_id",
     "homepage_schema",
     "impressum_schema",
     "parse_custom_id",
@@ -739,6 +785,7 @@ __all__ = [
     "build_requests",
     "clean",
     "eligible_companies",
+    "format_custom_id",
     "homepage_schema",
     "impressum_schema",
     "parse_custom_id",

@@ -276,7 +276,7 @@ the environment.
 | §8 erasure path | Recorded by #7, unmerged | **RECORDED on `main`** — M7 built it since; the row stands as the audit | M1.111 |
 | M1.75's collapse cost | #7's M1.103, unmerged | **Recorded in the findings, not as a row** | M1.113 |
 
-**Next free migration: `018`.** **Next free amendment: `M1.<115>`** (angle
+**Next free migration: `018`.** **Next free amendment: `M1.<117>`** (angle
 brackets per M1.94, so this line is not a citation) — M1.114 was taken by the
 §10.7b closing on the same day, after this unit merged.
 

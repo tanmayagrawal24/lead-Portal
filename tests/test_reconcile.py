@@ -530,8 +530,8 @@ class VerificationAgainstTheSentText(ReconcileTestCase):
         can."""
         provider = FakeProvider()
         self.submit(provider)
-        self.conn.execute("UPDATE llm_batch_request SET custom_id = 'impressum:999:1'")
-        provider.will_return(succeeded("impressum:999:1", impressum_payload()))
+        self.conn.execute("UPDATE llm_batch_request SET custom_id = 'impressum-999-1'")
+        provider.will_return(succeeded("impressum-999-1", impressum_payload()))
         with self.assertRaises(reconcile.ReconcileError) as caught:
             reconcile.run(self.conn, provider, self.artifacts)
         self.assertIn("does not agree", str(caught.exception))

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -46,6 +47,16 @@ from typing import Any, Protocol
 from portal.ledger import LedgerBypass, LedgerClearance
 
 TOKENS_PER_MTOK = 1_000_000
+
+
+#: The batch API's constraint on `custom_id`, written down because it is not
+#: discoverable from the success path (M1.115). A request whose key does not
+#: match is refused by `messages.batches.create` with a 400 for the WHOLE
+#: batch — so one bad key sends nothing, and the message names an index rather
+#: than a company. Vendor-neutral by shape: it is stated here, once, and both
+#: the builder in `extract_p2` and `BatchRequest.__post_init__` read it.
+CUSTOM_ID_PATTERN = r"^[a-zA-Z0-9_-]{1,64}$"
+CUSTOM_ID_RE = re.compile(CUSTOM_ID_PATTERN)
 
 
 class LLMConfigError(RuntimeError):
@@ -555,6 +566,16 @@ class BatchRequest:
     `custom_id` is not decoration. Batch results come back in **arbitrary
     order** (M1.51), so this is the only thing tying a returned legal name to
     the company it was read for.
+
+    **The key is validated here, at construction (M1.115).** The batch API
+    constrains `custom_id` to `CUSTOM_ID_PATTERN` and refuses the ENTIRE
+    submission with a 400 if one request violates it, naming only the offending
+    index. Checking it in `extract_p2` alone would leave every other caller and
+    every test fake free to build a key the provider rejects — which is exactly
+    what happened: `:` separators shipped in Unit 9b, three tests asserted them,
+    and the defect surfaced on the first real submit, after the reservation was
+    already committed. A frozen dataclass every request passes through is the
+    one place no caller can go around.
     """
 
     custom_id: str
@@ -562,6 +583,14 @@ class BatchRequest:
     user_text: str
     json_schema: dict[str, Any]
     max_tokens: int
+
+    def __post_init__(self) -> None:
+        if not CUSTOM_ID_RE.match(self.custom_id):
+            raise LLMConfigError(
+                f"custom_id {self.custom_id!r} does not match the batch API's "
+                f"required pattern {CUSTOM_ID_PATTERN} — one bad key refuses "
+                f"the whole submission (M1.115)"
+            )
 
 
 @dataclass(frozen=True)
