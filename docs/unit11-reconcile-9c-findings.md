@@ -272,12 +272,13 @@ the environment.
 | The per-run ceiling's expression | Two constants, two exception classes | **ONE of each**, two enforcement points | M1.109 (§3.2) |
 | `extract-p2 --submit` vs. control 3 | Enforced at the write, unwired at the CLI | **WIRED** — bound printed, refusal is exit 2 | M1.109 (§3.3) |
 | §10.7b's closing procedure | Command hardened (M1.104); **prose still the original snippet** | **Prose amended** — command first, verdict line required | M1.112 (§3.4) |
-| The batch question (§10.7b) | OPEN, listing never run | **Still OPEN, still not zero** — `portal llm-batches` has never been run against a key | unchanged |
+| The batch question (§10.7b) | OPEN, listing never run | **CLOSED 2026-09-04 with the answer ZERO** — `portal llm-batches` run against a real key, exit 0, terminal verdict line printed. 9c unblocked | M1.114 |
 | §8 erasure path | Recorded by #7, unmerged | **RECORDED on `main`** — M7 built it since; the row stands as the audit | M1.111 |
 | M1.75's collapse cost | #7's M1.103, unmerged | **Recorded in the findings, not as a row** | M1.113 |
 
-**Next free migration: `018`.** **Next free amendment: `M1.<114>`** (angle
-brackets per M1.94, so this line is not a citation).
+**Next free migration: `018`.** **Next free amendment: `M1.<115>`** (angle
+brackets per M1.94, so this line is not a citation) — M1.114 was taken by the
+§10.7b closing on the same day, after this unit merged.
 
 ## 8. What this unit did not do, stated so it is not inferred
 
@@ -287,8 +288,10 @@ brackets per M1.94, so this line is not a citation).
   nowhere in this repository or in any output.
 - **`data/` was not modified except by `portal init`**, which applies migration
   017 to the existing corpus and is idempotent. No crawl, no re-fetch.
-- **The batch question is not closed.** `portal llm-batches` exists on `main`
-  and has still never been run with a credential. It precedes any `--submit`.
+- **The batch question was not closed by this unit** — and was closed hours
+  later, on the same day, once this branch merged: `portal llm-batches` was run
+  against a real key and listed nothing (M1.114). What this unit did was carry
+  the prose half of the instrument (§3.4); the measurement is M1.114's.
 - **#7's git history is not preserved.** The port is a fresh commit against
   `main`, not a rebase: #7's seven commits describe a tree that no longer exists.
   #7 stays visible on GitHub as a closed PR, which is where its history lives.

@@ -682,7 +682,7 @@ unapplied; `portal/pagespeed.py` is still unbuilt; `run.pagespeed_calls` still
 exists nowhere; `llm_batch.status = 'balance_exhausted'` is still ahead of its
 writer. **Next free migration: `016`** — unchanged, because 015 already carries
 everything steps 4 and 5 would write and a writerless migration is M1.45(c)
-(§14.5). **Next free amendment: `M1.<114>`** (angle brackets per M1.94, so this
+(§14.5). **Next free amendment: `M1.<115>`** (angle brackets per M1.94, so this
 line is not a citation).
 
 > **UNIT 11 NOTE (2026-09-04) — what has closed since this table was written.**
@@ -694,8 +694,12 @@ line is not a citation).
 > **§10.7b's closing procedure is now a command**, `portal llm-batches`
 > (M1.104), which is M1.112's hardening arrived at independently: it prints a
 > terminal statement on all three branches instead of reporting *nothing* by
-> saying nothing. **The batch question itself is still OPEN and still not
-> zero** — the command has never been run against a key. §7 control 3 is
+> saying nothing. **The batch question itself is now CLOSED with the answer
+> ZERO** (M1.114) — `portal llm-batches` was run against a real key on
+> 2026-09-04 and listed no batches, which is what §14.2 could not do and what
+> §15's three sessions correctly declined to guess. **Nothing this unit
+> measured is overturned by that**: every statement it made was about a
+> machine, and the answer came from the account. §7 control 3 is
 > **built and merged** as of Unit 11, which is what this branch does. The
 > credential rows are left exactly as measured: they were facts about that
 > container on that day, and M1.98's whole point is that they were never
@@ -1127,8 +1131,13 @@ still not zero** — unchanged, and explicitly not re-litigated.
 **No amendment was raised.** The general rule this session's measurement
 illustrates — that a negative result must be a printed statement rather than an
 absence of output — is already **M1.112**, and §15.2 is that rule applied, not a
-new one. Raising `M1.<114>` to record the same lesson against a second instrument
-would inflate the register for a measurement. **Next free amendment is therefore
-still `M1.<114>`** (angle brackets per M1.94).
+new one. Raising a number of its own to record the same lesson against a second
+instrument would inflate the register for a measurement.
+
+> **UNIT 11 NOTE (2026-09-04).** The next free number this section left standing
+> was taken the same day, by **M1.114** — §10.7b closed at zero by `portal
+> llm-batches` against a real key. That row is the measurement these three
+> sessions were unable to take. **Next free amendment is now `M1.<115>`**
+> (angle brackets per M1.94).
 
 **Dollars spent by this unit, across all three sessions: $0.00.**

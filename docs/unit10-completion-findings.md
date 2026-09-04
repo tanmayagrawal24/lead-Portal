@@ -154,8 +154,8 @@ New test files: `test_score_phase2.py` (7), `test_llm_batches_cli.py` (5),
 
 | Item | Decided by | State |
 |---|---|---|
-| Was a batch ever submitted? | `portal llm-batches` with a real key | **OPEN** — §10.7b. Not zero. Now a command |
-| 9c — first real spend | operator, `extract-p2 --submit` | **Not started**, and gated on the row above |
+| Was a batch ever submitted? | `portal llm-batches` with a real key | **CLOSED 2026-09-04 — the answer is ZERO** (M1.114). The command this unit built was run against a real key, listed nothing, and printed its verdict line at exit 0 |
+| 9c — first real spend | operator, `extract-p2 --submit` | **Not started; no longer gated** — the row above closed at zero, so there is no committed spend to account for and nothing a first `--submit` would double |
 | PR #8 (`claude/keen-allen-gtsnrs` → `main`) | GitHub | **Draft**; this unit branches from its head |
 | M6 first run | `ai-check --submit` | never run; needs `homepage` extraction reconciled first |
 | M8 first run | `discover --submit` | never run; needs §7 control 1 in Cloud Console first |
@@ -163,4 +163,4 @@ New test files: `test_score_phase2.py` (7), `test_llm_batches_cli.py` (5),
 | §6.5 band calibration | §10.3 | blocked on a corpus gathered after B7 and the root-slug fix |
 | `interrupted-M5-remnant` stash | `git stash list` on the 2026-08-15 codespace | unread by this unit; nothing here was built from it |
 | Next free migration | `ls portal/migrations/` | **018** |
-| Next free amendment | the register | **`M1.<109>`** — angle brackets so it is not a citation; M1.91 refused this document on its first run for writing the bare number, exactly as it refused 9c-prep (its §11) |
+| Next free amendment | the register | **`M1.<115>`** — angle brackets so it is not a citation; M1.91 refused this document on its first run for writing the bare number, exactly as it refused 9c-prep (its §11). *Was `M1.<109>` when written; Unit 11 took M1.109–M1.113 reconciling PR #7 (M1.113), and the §10.7b closing took M1.114* |
