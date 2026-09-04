@@ -1,4 +1,4 @@
-# Unit 12 — the first `--submit`: refused by the provider, no batch created
+# Unit 12 — the first `--submit`: refused by the provider, and the release it forced
 
 **2026-09-04.** Authorised with the word *submit*. One command was run against
 the real key. **No batch was created, no money was spent, and the account still
@@ -76,30 +76,64 @@ Six regression tests, including one that reads the module source to assert the
 format string has exactly one expression, and one that proves the old form no
 longer parses.
 
-## 3. The stranded reservation — M1.116, and it is still there
+## 3. The stranded reservation — M1.116, released under a rule
+
+The refusal left this:
 
 ```
 run 5        aborted, est_cost_usd = 0.0639135
-llm_batch 1  status='reserved', provider_batch_id=NULL, est_cost_usd=0.0639135
-llm_batch_request  9 rows
+llm_batch 1  status='reserved', provider_batch_id=NULL, 9 requests
 ```
 
 Migration 014 reads `reserved` as *"we do not know whether this batch was
-submitted"* and therefore as *the money is gone*. **Here we do know.** The 400
-was request validation; no batch id was assigned; and `portal llm-batches` —
-the account-scoped instrument that closed §10.7b — reports **zero batches at
-2026-09-04T12:07:51Z, after the refused submit**.
+submitted"* and therefore as *the money is gone*. **Here we did know**, and the
+difference was measurable: request validation, no id assigned, and
+`portal llm-batches` reporting zero *after* the refusal.
 
-**It was left in place anyway.** Nothing automatic releases a reservation, and
-that rule is not suspended because this instance is provably safe to release: a
-rule's value is that it holds when the evidence is thin, and an exception
-written the first time the evidence is good is not a rule. Releasing it is an
-operator's act.
+014 could not draw that distinction because in the crash it was written for it
+does not exist. So rather than editing the row, the distinction was built:
 
-**Consequences while it stands:** §7 control 2 reads **$0.06 of $45.00**, and a
-re-run of `--submit` reserves a *second* time for the same nine pages. Two
-reservations for one batch's work — the over-count the design prefers to the
-alternative, and the reason the release is worth doing *before* the retry.
+### `portal release-reservation --batch <id> --reason "..."` (M1.117, migration 018)
+
+**The rule is not "an operator may clear a row". It is that a reservation may
+be released only when the account itself says the batch does not exist.** All
+three conditions are required, and there is no override flag — a condition that
+can be waived is not a condition:
+
+1. `provider_batch_id IS NULL` — the row never learned an id.
+2. `status = 'reserved'` — the outcome was never learned.
+3. a **live** `messages.batches.list` shows no batch created at or after the
+   row's `reserved_at`.
+
+Condition 3 is deliberately a network read. A cached answer, or one inferred
+from `llm_batch`, is the local record vouching for itself — the thing §10.7b
+spent four units refusing to accept. An unparseable or missing `created_at` on
+any listed batch **refuses** the release: M1.52's rule, in the one place where
+reading *unreadable* as *empty* releases money that was actually spent.
+
+Migration 018 makes the reason a `NOT NULL` CHECK for a released row, not a
+convention. The run is **decremented by the batch's reservation, not assigned
+zero**, so a run carrying two batches loses only the one released; the batch
+keeps its `est_cost_usd` as the record of the amount released.
+
+A new narrow `llm.BatchLister` protocol carries only `list_batches`, so the
+release path cannot submit — and its fake models a listing and nothing more,
+which is §2's lesson applied at the point of writing the next fake.
+
+**14 tests, 11 of them refusals**, because a release path is only worth having
+if it declines.
+
+### Run
+
+```
+released batch 1: $0.0639135 off run 5, which now stands at $0.0000000
+  reason: 400 invalid_request_error on custom_id pattern; no batch created; account listing zero
+  evidence: 0 batch(es) on the account, none created at or after the reservation,
+            checked live at 2026-09-04T12:30:30Z
+```
+
+**§7 control 2 reads $0.00 of $45.00 again.** The batch row stands as
+`released`, with its reason and clock.
 
 ## 4. The one number the dry run could never give
 
@@ -112,16 +146,15 @@ was ~$0.06.
 ## 5. Verification
 
 - `ruff check` / `ruff format --check`: clean.
-- Full suite: **829 passed, 2 skipped** (`--ignore=test_live_smoke.py`).
-- Amendment register with docs staged: passes. M1.1–M1.116, no gaps, no
-  duplicates.
+- Full suite: **843 passed, 2 skipped** (`--ignore=test_live_smoke.py`).
+- Amendment register with docs staged: passes. M1.1–M1.117, no gaps, no
+  duplicates. Schema at **018**.
 
 ## 6. Open
 
-1. **The stranded reservation** (M1.116) — an operator decision.
-2. **The retry** — not run. `--submit` was authorised once, for a run that has
-   now concluded. The fix is unproven against the real API: the next submit is
-   still the first real one.
+**The retry.** Not run. `--submit` was authorised once, for a run that has now
+concluded; the fix is unproven against the real API, so the next submit is
+still the first real one. The ledger is clean and nothing is double-counted.
 
-**Next free migration: `018`.** **Next free amendment: `M1.<117>`** (angle
+**Next free migration: `019`.** **Next free amendment: `M1.<118>`** (angle
 brackets per M1.94, so this line is not a citation).

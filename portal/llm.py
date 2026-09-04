@@ -42,7 +42,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from portal.ledger import LedgerBypass, LedgerClearance
 
@@ -712,6 +712,21 @@ class LLMProvider(Protocol):
     ) -> str: ...
 
     def poll_batch(self, provider_batch_id: str) -> BatchResult: ...
+
+
+@runtime_checkable
+class BatchLister(Protocol):
+    """Just `list_batches` — the account-scoped read, on its own (M1.117).
+
+    Narrow on purpose. `release_reservation` needs to ask the account what it
+    holds and needs nothing else, and a release path that accepted a full
+    `LLMProvider` would be one that could submit. The narrow protocol is also
+    what lets its test fake be a listing and nothing more, which is the
+    difference between a fake that models the constraint and one that waves
+    everything through (M1.115).
+    """
+
+    def list_batches(self, *, limit: int = 20) -> tuple[BatchListing, ...]: ...
 
 
 # ── estimation and reconciliation, as pure functions ────────────────────

@@ -37,6 +37,7 @@ from portal import (
     llm_anthropic,
     migrate,
     pagespeed,
+    reservations,
     ruleset,
     score,
     seeds,
@@ -1112,6 +1113,73 @@ def is_loopback_bind(host: str) -> bool:
         return False
 
 
+def cmd_release_reservation(
+    path: Path,
+    batch_id: int,
+    reason: str,
+    *,
+    model: str = llm_anthropic.DEFAULT_MODEL,
+    provider: llm.BatchLister | None = None,
+) -> int:
+    """Release one §7 control 4 reservation, against a live account listing.
+
+    **The only command in this project that makes the ledger smaller.** It is
+    free — the account listing is a read — but it is not casual: migration 014
+    reads a `reserved` row as *the money is gone*, and 018 admits exactly one
+    exception, which is that the account itself says the batch does not exist.
+    All three conditions are checked in `reservations.release_reservation` and
+    none can be waived from here; a condition with an override flag is not a
+    condition.
+
+    Exit 0 on release, 2 on refusal, 2 without a key — a release cannot be
+    decided without asking the account, so a missing credential refuses rather
+    than proceeding on the local record alone (§7 control 9, M1.100).
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+
+    active = provider or llm_anthropic.AnthropicProvider(model)
+    conn = db.connect(path)
+    try:
+        try:
+            release = reservations.release_reservation(
+                conn, active, batch_id=batch_id, reason=reason, now=utc_now()
+            )
+        except llm_anthropic.MissingKeyError as exc:
+            print(
+                f"release-reservation: {exc}\n"
+                "Refusing to release. The third condition is a LIVE account "
+                "listing, and without a key there is none — releasing on the "
+                "local record alone is the local record vouching for itself "
+                "(M1.100, M1.117).",
+                file=sys.stderr,
+            )
+            return 2
+        except reservations.ReleaseRefused as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+
+    print(
+        f"released batch {release.batch_id}: ${release.released_usd:.7f} off "
+        f"run {release.run_id}, which now stands at "
+        f"${release.run_est_cost_usd_after:.7f}"
+    )
+    print(f"  reason: {release.reason}")
+    print(
+        f"  evidence: {release.batches_listed} batch(es) on the account, none "
+        f"created at or after the reservation, checked live at "
+        f"{release.released_at}"
+    )
+    print(
+        "  the batch row keeps its est_cost_usd as the record of what was "
+        "released; `status` is what says it is no longer counted (018)"
+    )
+    return 0
+
+
 def cmd_llm_batches(
     limit: int,
     *,
@@ -1718,6 +1786,32 @@ def build_parser() -> argparse.ArgumentParser:
         f"{llm_anthropic.DEFAULT_MODEL})",
     )
 
+    release_parser = sub.add_parser(
+        "release-reservation",
+        help="§7 control 4 / migration 018: release a reservation for a batch "
+        "the ACCOUNT says does not exist. Read-only against the provider, "
+        "needs ANTHROPIC_API_KEY, refuses unless all three conditions hold",
+    )
+    release_parser.add_argument(
+        "--batch",
+        type=int,
+        required=True,
+        dest="batch",
+        help="the llm_batch.id to release",
+    )
+    release_parser.add_argument(
+        "--reason",
+        required=True,
+        help="why this reservation is being released — stored on the row, "
+        "required by migration 018's CHECK, not by convention",
+    )
+    release_parser.add_argument(
+        "--model",
+        default=llm_anthropic.DEFAULT_MODEL,
+        help=f"provider model (only used to build the client; default "
+        f"{llm_anthropic.DEFAULT_MODEL})",
+    )
+
     discover_parser = sub.add_parser(
         "discover",
         help="§5.1: Places Text Search into company rows (M8). Dry unless --submit",
@@ -1909,6 +2003,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_brief(path, args.domain, out=args.out)
     if args.command == "llm-batches":
         return cmd_llm_batches(args.limit, model=args.model)
+    if args.command == "release-reservation":
+        return cmd_release_reservation(path, args.batch, args.reason, model=args.model)
     if args.command == "llm-prices":
         return cmd_llm_prices(path, args.reserve)
 
