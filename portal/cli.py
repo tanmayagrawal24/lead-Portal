@@ -27,6 +27,7 @@ from portal import (
     db,
     diff,
     discover,
+    discover_llm,
     extract,
     extract_p2,
     fetch,
@@ -1243,7 +1244,7 @@ def cmd_llm_batches(
     return 0
 
 
-def cmd_discover(
+def _discover_websearch(
     path: Path,
     query: str,
     *,
@@ -1251,15 +1252,171 @@ def cmd_discover(
     submit: bool,
     dry_run: bool,
     max_calls: int,
+    provider: ai_visibility.SearchProvider | None = None,
+) -> int:
+    """`discover --source websearch` — §5.1's second source, paid (M1.119).
+
+    §7's order, unchanged from every other paid command: control 2's clearance
+    first (it decides whether there is anything to price), then control 3's
+    bound announced before the call that enforces it. The dry run prices the
+    searches and the allowance — the part that needs no key — and says plainly
+    that the prompt's own tokens are measured only at `--submit`.
+    """
+    if submit and dry_run:
+        print(
+            "discover: --submit and --dry-run contradict each other. Pass one.",
+            file=sys.stderr,
+        )
+        return 2
+    if max_calls < 1 or max_calls > discover_llm.MAX_CALLS:
+        print(
+            f"discover: --source websearch takes --max-calls 1–"
+            f"{discover_llm.MAX_CALLS}; each call is a live search message",
+            file=sys.stderr,
+        )
+        return 2
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        text = f"{query} {region}".strip()
+        label = "--submit" if submit else "--dry-run"
+        model = llm_anthropic.DEFAULT_MODEL
+        print(f"discover {label} (websearch): „{text}“")
+        print(
+            f"  up to {max_calls} live call(s), "
+            f"{discover_llm.SEARCHES_PER_CALL} search(es) each "
+            f"(sent as max_uses), up to {discover_llm.SHOPS_PER_CALL} shops per call"
+        )
+        print(
+            f"  marketplaces and aggregators dropped by an explicit list of "
+            f"{len(discover_llm.MARKETPLACES)} names"
+        )
+        print(
+            f"  rows land as discovery_source='{discover_llm.SOURCE}', city and postal_code NULL"
+        )
+        floor = discover_llm.unmeasured_floor(
+            max_calls, provider="anthropic", model=model
+        )
+        print(
+            f"  §7 control 3: bounded at ${ledger.RUN_CEILING_USD:.2f}; this run "
+            f"prices at ${floor:.4f} before the prompt's own tokens, which are "
+            f"measured at --submit"
+        )
+        if not submit:
+            print(
+                "\nNothing was requested and nothing was reserved. This source "
+                "favours shops that ALREADY RANK — the opposite of §6's target "
+                "(M1.119) — so treat what it returns as provenance, not as a "
+                "ranked lead list. To reserve and call, run again with --submit."
+            )
+            return 0
+        try:
+            clearance = ledger.check_ceiling(conn)
+        except ledger.CeilingExceeded as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        except sqlite3.Error as exc:
+            print(
+                f"refused: the §7 control 2 ledger is not readable ({exc}). Run "
+                f"`portal init` on {path} first — an unreadable ledger and an "
+                f"empty one look alike (M1.52).",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"\n§7 control 2: ${clearance.spend_usd:.2f} of "
+            f"${clearance.ceiling_usd:.2f} used over {clearance.window_days} "
+            f"rolling days; ${clearance.headroom_usd:.2f} headroom"
+        )
+        chosen = provider or llm_anthropic.AnthropicProvider(model=model)
+        try:
+            report = discover_llm.run(
+                conn,
+                chosen,
+                query,
+                region=region,
+                max_calls=max_calls,
+                clearance=clearance,
+            )
+        except ai_visibility.RunCeilingExceeded as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        except llm_anthropic.MissingKeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+
+    print(
+        f"\nrun {report.run_id}: {report.calls} call(s), "
+        f"{report.web_searches} search(es), {len(report.found)} shop(s) kept, "
+        f"{report.inserted} new company row(s), "
+        f"{len(report.found) - report.inserted} already known, "
+        f"{len(report.marketplaces)} marketplace(s) dropped, "
+        f"{report.unusable} unusable domain(s)"
+    )
+    for found in report.found:
+        print(
+            f"  {'+' if found.inserted else '='} {found.domain:28} {found.display_name}"
+        )
+    if report.marketplaces:
+        print(f"  dropped: {', '.join(sorted(set(report.marketplaces)))}")
+    if report.unparsed_answers:
+        print(
+            f"  {report.unparsed_answers} answer(s) were not parseable — paid "
+            f"for and yielded nothing",
+            file=sys.stderr,
+        )
+    print(
+        f"  reserved ${report.reserved_usd:.4f}, measured ${report.actual_usd:.4f} "
+        f"({report.input_tokens:,} in / {report.output_tokens:,} out, "
+        f"{report.web_searches} searches) — run {report.run_id} reconciled"
+    )
+    if report.stopped_by:
+        print(f"  stopped: {report.stopped_by}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_discover(
+    path: Path,
+    query: str,
+    *,
+    region: str,
+    submit: bool,
+    dry_run: bool,
+    max_calls: int | None = None,
+    source: str = "places",
     client: discover.PlacesClient | None = None,
+    provider: ai_visibility.SearchProvider | None = None,
 ) -> int:
     """§5.1's discovery (M8) — dry by default, keyed only on `--submit`.
 
-    The dry run prints the query, the field mask and the request cap, and
-    needs no key. `--submit` reads `GOOGLE_PLACES_API_KEY` and reminds the
-    operator of §7 control 1 in words, because the Console cap that keeps
-    this SKU free is not something a program can verify.
+    Two sources, and `places` is the default and the primary. The dry run
+    prints the query, the field mask and the request cap, and needs no key.
+    `--submit` reads `GOOGLE_PLACES_API_KEY` and reminds the operator of §7
+    control 1 in words, because the Console cap that keeps this SKU free is
+    not something a program can verify.
+
+    `--source websearch` is the second, lower-fidelity source (M1.119): a live
+    web-search call instead of the Places SKU, because Places needs a Google
+    key this project has never had. It is paid rather than quota-capped, so it
+    goes through §7 controls 2 and 3 like every other paid path — which is why
+    the two sources diverge here rather than sharing a body.
     """
+    if source == "websearch":
+        return _discover_websearch(
+            path,
+            query,
+            region=region,
+            submit=submit,
+            dry_run=dry_run,
+            max_calls=discover_llm.MAX_CALLS if max_calls is None else max_calls,
+            provider=provider,
+        )
+    if max_calls is None:
+        max_calls = discover.MAX_CALLS_PER_RUN
     if submit and dry_run:
         print(
             "discover: --submit and --dry-run contradict each other. Pass one.",
@@ -1820,14 +1977,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--query", required=True, help='e.g. "Zahnpflege Onlineshop"'
     )
     discover_parser.add_argument("--region", default="", help='e.g. "NRW"')
+    discover_parser.add_argument(
+        "--source",
+        choices=("places", "websearch"),
+        default="places",
+        help="places (§5.1's primary, Google SKU, quota-capped) or websearch "
+        "(M1.119's second source, a paid live search — lower fidelity, and "
+        "biased toward shops that already rank)",
+    )
     discover_parser.add_argument("--dry-run", action="store_true")
     discover_parser.add_argument(
         "--submit",
         action="store_true",
         help=f"issue the requests; needs {discover.API_KEY_ENV} and a Console quota cap (§7 control 1)",
     )
+    #: Resolved per source rather than defaulted to one number, because the two
+    #: caps mean different things: Places' 10 is a page cap on a quota-capped
+    #: free SKU, websearch's 5 is a cap on live PAID calls. One default for both
+    #: would silently over-request on whichever source it did not belong to.
     discover_parser.add_argument(
-        "--max-calls", type=int, default=discover.MAX_CALLS_PER_RUN
+        "--max-calls",
+        type=int,
+        default=None,
+        help=f"places: 1–{discover.MAX_CALLS_PER_RUN} (default "
+        f"{discover.MAX_CALLS_PER_RUN}); websearch: 1–{discover_llm.MAX_CALLS} "
+        f"(default {discover_llm.MAX_CALLS})",
     )
 
     purge_parser = sub.add_parser(
@@ -1983,6 +2157,7 @@ def main(argv: list[str] | None = None) -> int:
             submit=args.submit,
             dry_run=args.dry_run,
             max_calls=args.max_calls,
+            source=args.source,
         )
     if args.command == "purge":
         return cmd_purge(path, dry_run=args.dry_run)
