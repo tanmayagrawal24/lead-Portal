@@ -31,8 +31,6 @@ bounds the run, and the reservation is reconciled to measured usage.
 
 from __future__ import annotations
 
-import json
-import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field
@@ -64,17 +62,29 @@ SHOPS_PER_CALL = 20
 #: runaway answer costs a fraction of a cent.
 MAX_OUTPUT_TOKENS = 2_000
 
+#: Tightened by M1.121(a) after 12 of the first 25 real calls returned
+#: something the parser could not read. The instructions that changed are the
+#: last four sentences: they name the failure modes that actually occurred —
+#: a preamble, a fenced code block, and a source list appended after the
+#: object — rather than restating "nur JSON" more emphatically. The parser was
+#: fixed in the same commit; **the prompt is the cheaper half of the fix and
+#: the parser is the half that has to hold**, because an instruction is a
+#: request and a parser is a guarantee.
 SYSTEM_PROMPT = (
     "Du recherchierst deutschsprachige Online-Shops. Der Nutzer nennt eine "
     "Produkt- oder Branchenbeschreibung und eine Region. Suche im Web und "
     "nenne eigenständige Online-Shops, die dort verkaufen. "
     "**Keine Marktplätze, keine Preisvergleiche, keine Portale, keine "
     "Hersteller ohne eigenen Shop.** "
-    "Antworte ausschließlich mit einem JSON-Objekt der Form "
-    '{"shops": [{"domain": "beispiel.de", "name": "Beispiel Shop"}]} '
-    f"und nichts sonst. Höchstens {SHOPS_PER_CALL} Shops. "
+    "Antworte mit genau einem JSON-Objekt der Form "
+    '{"shops": [{"domain": "beispiel.de", "name": "Beispiel Shop"}]}. '
+    f"Höchstens {SHOPS_PER_CALL} Shops. "
     "`domain` ist die reine Domain ohne https:// und ohne www. "
-    "Keine Erklärung außerhalb des JSON."
+    "Deine Antwort beginnt mit { und endet mit }. "
+    "Kein einleitender Satz, keine Zusammenfassung, kein abschließender Kommentar. "
+    "Keine Code-Fences (kein ```), kein Markdown. "
+    "Keine Quellenangaben und keine Fußnoten nach dem JSON — die Suchergebnisse "
+    "sind bereits erfasst und dürfen nicht wiederholt werden."
 )
 
 #: Marketplaces, price-comparison sites and portals, dropped by name.
@@ -141,8 +151,6 @@ MARKETPLACES: frozenset[str] = frozenset(
     }
 )
 
-_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
-
 
 @dataclass(frozen=True)
 class Found:
@@ -192,15 +200,15 @@ def parse_shops(text: str) -> list[tuple[str, str]] | None:
     `None` is distinct from `[]`: an unparseable answer is a call that was PAID
     FOR and produced nothing readable, and the report counts those separately
     from a call that searched and honestly found no shop (M1.59's tri-state).
+
+    The object-finding half is `llm.parse_last_json_object`, shared with
+    §5.5c (M1.121). This function's own version lacked the balanced-brace trim
+    and failed on every answer that appended a source list after the JSON —
+    **12 of the first 25 real calls**, which is what made this a measured fix
+    rather than a tidy-up.
     """
-    match = _JSON_OBJECT.search(text)
-    if match is None:
-        return None
-    try:
-        payload = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
+    payload = llm.parse_last_json_object(text)
+    if payload is None:
         return None
     shops = payload.get("shops")
     if not isinstance(shops, list):

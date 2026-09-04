@@ -48,6 +48,55 @@ PLATFORM_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
 _WOO_MARKERS = ("wp-content", "woocommerce")
 
 
+#: Markers that a page can actually be bought from. **A POSITIVE test.**
+#:
+#: `detect_platform` returning `None` is explicitly not "not a shop" (M1.11,
+#: and its docstring says so), so the manufacturer class (M1.121) cannot be
+#: identified by the absence of a platform signature. It is identified by the
+#: absence of ALL of these, which is a different and much weaker claim: a page
+#: with none of them offers the visitor no way to put anything in a basket.
+#: Weak enough to raise a review flag on, and nothing stronger — a human
+#: resolves it, nothing is excluded and no score moves.
+#:
+#: German and English both, because a German shop on an international platform
+#: ships English class names under German labels.
+_CART_MARKERS: tuple[str, ...] = (
+    "/warenkorb",
+    "/cart",
+    "/checkout",
+    "/kasse",
+    "/basket",
+    "add-to-cart",
+    "add_to_cart",
+    "addtocart",
+    "shopping-cart",
+    "shopping_cart",
+    "minicart",
+    "mini-cart",
+    "cart-drawer",
+    "data-cart",
+    "in den warenkorb",
+    "zum warenkorb",
+    "in den einkaufswagen",
+    "produkt kaufen",
+    "jetzt kaufen",
+)
+
+
+def cart_signal(html: str) -> str | None:
+    """The first cart or checkout marker on the page, or `None` if there is none.
+
+    Returns the marker rather than a boolean so the flag it feeds can say WHICH
+    evidence it found — and, when it finds none, a reader can check the list
+    that was searched instead of taking "no cart" on trust (M1.121).
+    """
+    haystack = html.lower()
+    for marker in _CART_MARKERS:
+        if marker in haystack:
+            return marker
+    return None
+
+
 def detect_platform(html: str) -> str | None:
     """The platform, or `None` when no signature matches.
 

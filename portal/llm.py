@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import re
 import sys
 from collections.abc import Callable, Sequence
@@ -332,6 +333,7 @@ FREE_SURFACES: tuple[str, ...] = (
     "assert_declared",
     "assert_ledger_guarded",
     "cache_write_observed",
+    "parse_last_json_object",
     "classify_api_error",
     "estimate_cost",
     "index_by_custom_id",
@@ -342,6 +344,52 @@ FREE_SURFACES: tuple[str, ...] = (
     "resubmittable",
     "strict_json_schema",
 )
+
+
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def parse_last_json_object(text: str) -> dict[str, Any] | None:
+    """The JSON object out of a search-backed answer, or `None`.
+
+    **One expression, because two modules need exactly this and a second copy
+    is how they drift** (M1.42's shape; M1.121 is where the drift was measured
+    — `ai_visibility.parse_brands` had the balanced-brace trim and
+    `discover_llm.parse_shops` did not, and 12 of 25 calls in the first real
+    discovery run were scored unparseable for that reason alone).
+
+    Lenient on purpose. A model with a search tool narrates before the JSON,
+    appends a citation list after it, and sometimes wraps it in a fenced code
+    block. The greedy match spans the first `{` to the last `}`, which
+    overshoots whenever anything object-shaped follows; the trim walks it to
+    the first BALANCED object and parses that.
+
+    `None` means *nothing parsed* — distinct from an object that parsed and
+    held nothing (M1.59's tri-state). The call ran and was paid for either way,
+    and only the caller knows which of its keys it wanted.
+    """
+    match = None
+    for match in _JSON_OBJECT_RE.finditer(text):
+        pass
+    if match is None:
+        return None
+    candidate = match.group(0)
+    depth, end = 0, None
+    for index, char in enumerate(candidate):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    if end is not None:
+        candidate = candidate[:end]
+    try:
+        payload = json.loads(candidate)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def assert_ledger_guarded(
