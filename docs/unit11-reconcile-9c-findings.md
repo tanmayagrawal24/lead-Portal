@@ -242,7 +242,25 @@ local passes once meant nothing.
 
 ## 6. CI — recorded after it was observed
 
-*This section is written after the run, never before it (M1.94).*
+*Written after the run, never before it (M1.94).* Run `33822151948` on
+`claude/unit11-reconcile-9c` @ `47d237e`, PR #10. **All five checks pass.**
+
+```
+assert-no-api-key                 no key, no live-smoke opt-in
+pytest (py3.11)   1m31s   823 passed, 2 skipped, 1 warning, 139 subtests
+pytest (py3.12)   1m34s   823 passed, 2 skipped
+ruff                6s    pass
+audit-politeness (fixture corpus)   34s   pass
+CodeRabbit                        skipped (manual review, OSS repo)
+```
+
+**Two things worth naming.** CI reports **2** skipped where a local full run
+reports 4 — CI enumerates a clean checkout, so the untracked duplicate in §1
+does not exist there. And `assert-no-api-key` passed, which it must: it fails
+the build if `ANTHROPIC_API_KEY` is present (M1.65). It is set in the
+*development* container this unit ran in, and nothing here reads it — but that
+step is the reason the local suite is run under `env -u` rather than trusting
+the environment.
 
 ## 7. Open items register — the rows this unit touched
 
