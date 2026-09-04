@@ -22,10 +22,20 @@ Localhost only. Single operator, no auth, no deployment.
 
 - **LLM provider layer** (proposal v2 build steps 1–3) — `portal/llm.py` and
   `portal/llm_anthropic.py`: prices as dated data, per-model limits as declared
-  data, and the batch failure taxonomy including the prepaid-balance case. No
-  caller yet; inspect it with `portal llm-prices`.
+  data, and the batch failure taxonomy including the prepaid-balance case.
+  Inspect it with `portal llm-prices`.
+- **M5 complete** — Phase 2. `portal pagespeed` (§5.5a) writes
+  `perf.lighthouse_performance`, which `opp.slow_site` had been waiting three
+  milestones for; `portal extract-p2` prepares §5.5b's batches and **submits
+  only under `--submit`**; `portal reconcile` collects, verifies against the
+  sent text, and writes the ledger's one measured number.
 
-Phase 2 (`extract-p2`, M5) is not built.
+**Nothing has been submitted yet, and that is deliberate.** `extract-p2` with no
+flag is a dry run that reserves nothing. Before the first real submission,
+§10.7b must be closed: run `messages.batches.list()` with a real key to
+establish whether any batch has ever been submitted on this account. A batch
+that exists is committed spend whether or not its results were ever read, and
+resubmitting would double it.
 
 ## Setup
 

@@ -203,6 +203,53 @@ _SYSTEM = {
 #: schema's own comment rather than appearing as a string in one call site.
 PURPOSES: tuple[str, ...] = ("impressum", "homepage")
 
+#: §5.4's verdict, as `score --phase 1` wrote it, from the latest **finished**
+#: scoring run per company (the same authority rule `company_profile` uses,
+#: migration 007). One row per company: `admitted` is 1, 0, or absent.
+_GATE_SQL = """
+WITH gate AS (
+    SELECT s.company_id, s.value_num AS admitted, s.run_id,
+           ROW_NUMBER() OVER (PARTITION BY s.company_id ORDER BY s.run_id DESC) AS rn
+    FROM signal s JOIN run r ON r.id = s.run_id
+    WHERE s.key = 'gate.phase2_admitted'
+      AND r.finished_at IS NOT NULL AND r.aborted_reason IS NULL
+)
+SELECT c.id AS company_id, c.domain, c.excluded, c.excluded_reason, g.admitted
+FROM company c LEFT JOIN gate g ON g.company_id = c.id AND g.rn = 1
+"""
+
+
+def eligible_companies(conn: sqlite3.Connection) -> tuple[set[int], dict[int, str]]:
+    """Which companies §5.4 admits to Phase 2, and why the rest are not sent.
+
+    **This is the gate the spend model in §7.1 assumes, and until now nothing
+    on the paid path consulted it** (audit finding 1). `score` wrote
+    `gate.phase2_admitted` per company and `prepare` selected every company
+    with a usable artifact — excluded rows included — so the batch would have
+    paid for the companies Phase 1 had already stopped.
+
+    Three reasons a company is not sent, each named so the dry run shows it:
+    excluded by §6.4 (a `duplicate_site` row is the same lead twice), never
+    scored (there is no verdict to act on — run `portal score` first), and
+    stopped by the gate (`phase1_total + remaining_upside < B floor`).
+    """
+    admitted: set[int] = set()
+    withheld: dict[int, str] = {}
+    for row in conn.execute(_GATE_SQL):
+        company_id = int(row["company_id"])
+        if row["excluded"]:
+            withheld[company_id] = f"excluded (§6.4): {row['excluded_reason']}"
+        elif row["admitted"] is None:
+            withheld[company_id] = (
+                "not scored — no §5.4 verdict; run `portal score` first"
+            )
+        elif int(row["admitted"]) != 1:
+            withheld[company_id] = "stopped by the §5.4 gate (score --phase 1)"
+        else:
+            admitted.add(company_id)
+    return admitted, withheld
+
+
 # The newest 200-with-body homepage per company. The Impressum side has
 # `impressum_audit.select_inputs` — A2 §7 as amended by M1.43 and M1.44 — and
 # this is deliberately NOT a second copy of it: the two exclusions that make
@@ -308,6 +355,23 @@ def prepare(
         inputs, skipped = impressum_audit.select_inputs(conn, root)
     else:
         inputs, skipped = _homepage_inputs(conn, root)
+
+    # §5.4 is applied here, on the one path every paid request passes through,
+    # so a company the gate stopped cannot be priced, reserved or sent.
+    admitted, withheld = eligible_companies(conn)
+    skipped = [
+        entry
+        for entry in skipped
+        if entry.domain not in {c.domain for c in inputs if c.company_id in withheld}
+    ] + [
+        impressum_audit.Skipped(
+            domain=chosen.domain, reason=withheld[chosen.company_id]
+        )
+        for chosen in inputs
+        if chosen.company_id in withheld
+    ]
+    inputs = [chosen for chosen in inputs if chosen.company_id in admitted]
+
     prepared: list[Prepared] = []
     for chosen in inputs:
         body = (root / chosen.body_path).read_text(encoding="utf-8", errors="replace")
@@ -541,12 +605,13 @@ def reserve_and_submit(
     released automatically, ever. Only a measured actual corrects a reservation
     (§7 control 12).
 
-    **This is not reachable from the CLI.** `portal extract-p2` still exits 2
-    without `--dry-run`, and that stays true until 9c is authorised in writing.
-    The function exists, is tested against a fake provider, and has no caller
-    that can spend — which is the same order the ledger itself shipped in
-    (M1.69–M1.71): the mechanism before the spend, so the spend is written
-    against its presence.
+    **Reachable from the CLI as of 9c, through `portal extract-p2 --submit`
+    and nothing else.** Until then this function existed, was tested against a
+    fake provider, and had no caller that could spend — the same order the
+    ledger itself shipped in (M1.69–M1.71): the mechanism before the spend, so
+    the spend is written against its presence. The caller keeps that shape:
+    without `--submit` the command is a dry run, and `--submit` is the written
+    authorisation §7 asks for, expressed where the spend is made.
     """
     if purpose not in PURPOSES:
         raise ValueError(
@@ -614,6 +679,7 @@ PAID_SURFACES: tuple[str, ...] = ("reserve_and_submit", "submit")
 FREE_SURFACES: tuple[str, ...] = (
     "build_requests",
     "clean",
+    "eligible_companies",
     "homepage_schema",
     "impressum_schema",
     "parse_custom_id",
@@ -640,6 +706,7 @@ __all__ = [
     "Reservation",
     "build_requests",
     "clean",
+    "eligible_companies",
     "homepage_schema",
     "impressum_schema",
     "parse_custom_id",

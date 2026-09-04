@@ -246,12 +246,28 @@ class AnthropicProvider:
 
         if kind == "succeeded":
             message = result.result.message
+            payload, problem = _json_payload(message)
+            if payload is None:
+                # Audit finding 8. `succeeded` is the PROVIDER's word for "a
+                # message came back", and a message can come back truncated
+                # at `max_tokens`, refused, or otherwise carrying no JSON.
+                # Raising here took the whole batch down for one company —
+                # Audit 3's shape one stage on. It is a disposition instead:
+                # not retryable, because the same request at the same bound
+                # does the same thing (§5.6, spend with a known outcome), and
+                # it CARRIES ITS USAGE, because it was paid for.
+                return llm.BatchResultItem(
+                    custom_id,
+                    llm.RequestOutcome.INVALID_REQUEST,
+                    error_message=problem,
+                    usage=_usage(message),
+                )
             return llm.BatchResultItem(
                 custom_id,
                 llm.RequestOutcome.SUCCEEDED,
                 extraction=llm.Extraction(
                     custom_id=custom_id,
-                    payload=_json_payload(message),
+                    payload=payload,
                     usage=_usage(message),
                     model=str(getattr(message, "model", self.model)),
                 ),
@@ -286,18 +302,45 @@ class BalanceExhausted(RuntimeError):
     """
 
 
-def _json_payload(message: Any) -> dict[str, Any]:
-    """The validated JSON out of a structured-output response.
+def _json_payload(message: Any) -> tuple[dict[str, Any] | None, str]:
+    """The validated JSON out of a structured-output response, or why not.
 
-    `output_config.format` guarantees the first text block is valid JSON, so
-    this reads that block rather than searching for the first thing that parses.
+    `output_config.format` guarantees the first text block is valid JSON **when
+    the model finished** — so this reads that block rather than searching for
+    the first thing that parses. Returns `(payload, "")` on success and
+    `(None, reason)` for the three ways a `succeeded` result carries nothing
+    usable (audit finding 8):
+
+    * `stop_reason == "max_tokens"` — the JSON was cut off. The text block is
+      not parsed at all: a prefix of a JSON document is not a document, and
+      "it happened to parse" would be a value written from a truncated page.
+    * `stop_reason == "refusal"` — the model declined.
+    * no text block, or text that is not JSON — a contract violation that used
+      to raise `LLMConfigError` and abort the whole poll.
+
+    All three are mapped to `INVALID_REQUEST` by the caller. The reason string
+    is the request's `error_message`, which `reconcile` stores on
+    `llm_batch_request` and prints, so the operator sees *which* company came
+    back empty and *why*, rather than a traceback for the batch.
     """
     import json
 
+    stop_reason = getattr(message, "stop_reason", None)
+    if stop_reason == "max_tokens":
+        return None, (
+            "truncated: the response reached its max_tokens bound before the "
+            "JSON closed; a resubmission at the same bound would truncate again"
+        )
+    if stop_reason == "refusal":
+        return None, "refused: the model declined to produce the structured output"
+
     for block in message.content:
         if getattr(block, "type", None) == "text":
-            return dict(json.loads(block.text))
-    raise llm.LLMConfigError("structured-output response carried no text block")
+            try:
+                return dict(json.loads(block.text)), ""
+            except (TypeError, ValueError) as exc:
+                return None, f"response text is not a JSON object: {exc}"
+    return None, "structured-output response carried no text block"
 
 
 def _usage(message: Any) -> llm.Usage:

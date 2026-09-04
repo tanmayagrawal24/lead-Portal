@@ -26,12 +26,15 @@ already made once:
 
 from __future__ import annotations
 
+import base64
+import os
+import secrets
 import sqlite3
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -64,6 +67,54 @@ SECTION_LABELS = {
     "6.3": "Abzüge",
 }
 
+#: `user:password` for HTTP Basic auth. Optional on loopback; **required** for
+#: any other bind (see `cli.cmd_serve`). §1 was written for a localhost tool
+#: and §8's rows are third-party personal data — the moment the page is
+#: reachable from another machine, an unauthenticated read is a data breach,
+#: not a convenience (audit finding 5).
+BASIC_AUTH_ENV = "PORTAL_BASIC_AUTH"
+
+
+def basic_auth_from_env() -> tuple[str, str] | None:
+    raw = os.environ.get(BASIC_AUTH_ENV, "")
+    if not raw:
+        return None
+    user, sep, password = raw.partition(":")
+    if not sep or not user or not password:
+        raise RuntimeError(f"{BASIC_AUTH_ENV} must be 'user:password'")
+    return user, password
+
+
+def _credentials_ok(header: str | None, expected: tuple[str, str]) -> bool:
+    if not header or not header.lower().startswith("basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header[6:].strip()).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    user, _, password = decoded.partition(":")
+    return secrets.compare_digest(user, expected[0]) and secrets.compare_digest(
+        password, expected[1]
+    )
+
+
+def cross_site(request: Request) -> bool:
+    """Is this a browser request from another origin? — the CSRF check.
+
+    The one write here is a form-encoded POST, which browsers send cross-origin
+    **without** a preflight, so a page the operator visits elsewhere could
+    resolve the flags that block outbound contact. Two headers a browser always
+    sets on such a request and a page cannot forge: `Origin`, whose host must be
+    this one, and `Sec-Fetch-Site`, which must not be `cross-site`. A non-browser
+    client sends neither and is not the threat this guards against.
+    """
+    origin = request.headers.get("origin")
+    if origin:
+        own = request.headers.get("host", "")
+        if urlsplit(origin).netloc.lower() != own.lower():
+            return True
+    return request.headers.get("sec-fetch-site", "").lower() == "cross-site"
+
 
 def create_app(
     db_path: Path | None = None, artifacts_root: Path | None = None
@@ -89,6 +140,21 @@ def create_app(
     store = ArtifactStore(artifacts_root or config.artifacts_root(path))
     app = FastAPI(title="Lead Portal", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    credentials = basic_auth_from_env()
+
+    @app.middleware("http")
+    async def require_auth(request: Request, call_next):
+        if credentials is not None and not _credentials_ok(
+            request.headers.get("authorization"), credentials
+        ):
+            return Response(
+                "authentication required",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Lead Portal"'},
+            )
+        return await call_next(request)
+
     templates = Jinja2Templates(directory=str(TEMPLATES))
     templates.env.globals.update(flag_labels=FLAG_LABELS, section_labels=SECTION_LABELS)
 
@@ -173,9 +239,16 @@ def create_app(
         and htmx posts `application/x-www-form-urlencoded`, which is four
         stdlib characters to parse and needs nothing.
         """
+        if cross_site(request):
+            return HTMLResponse("cross-site request refused", status_code=403)
         body = (await request.body()).decode("utf-8")
         note = parse_qs(body).get("note", [""])[0]
         lead_list = read()
+        # The flag must be this company's: the URL names both, and a flag id
+        # that belongs to another row must not be resolvable through this one.
+        owner = lead_list.flag_owner(flag_id)
+        if owner is None or owner != company_id:
+            return HTMLResponse("no such flag for this company", status_code=404)
         lead_list.resolve_flag(flag_id, note.strip())
         lead = lead_list.lead(company_id)
         if lead is None:  # pragma: no cover — the flag's own company

@@ -171,13 +171,29 @@ class ReconcileTestCase(unittest.TestCase):
         self._artifact(self.company_id, "homepage", "https://muster.de/", HOMEPAGE_HTML)
 
     # -- fixture writers ------------------------------------------------
-    def _company(self, domain: str) -> int:
+    def _company(self, domain: str, *, admitted: bool = True) -> int:
         cur = self.conn.execute(
             "INSERT INTO company (domain, discovery_source, discovered_at) "
             "VALUES (?, 'seed_csv', '2026-08-01T00:00:00Z')",
             (domain,),
         )
-        return int(cur.lastrowid or 0)
+        company_id = int(cur.lastrowid or 0)
+        if admitted:
+            self._admit(company_id)
+        return company_id
+
+    def _admit(self, company_id: int, verdict: int = 1) -> int:
+        """§5.4's verdict, as a finished `score-p1` run writes it. `prepare`
+        sends nothing the gate has not admitted (audit finding 1), so every
+        fixture company that is meant to be sent needs one."""
+        run_id = self._run("score-p1")
+        self.conn.execute(
+            "INSERT INTO signal (company_id, run_id, key, value_num, method, "
+            "evidence_url, observed_at) VALUES (?,?,'gate.phase2_admitted',?,"
+            "'deterministic','',datetime('now'))",
+            (company_id, run_id, verdict),
+        )
+        return run_id
 
     def _artifact(self, company_id: int, kind: str, url: str, body: str) -> int:
         name = f"{company_id}-{kind}-{abs(hash(url)) % 10_000}.html"
@@ -341,7 +357,12 @@ class RestartSurvival(ReconcileTestCase):
         # the same code and fail the same way, so a retryable disposition would
         # leave the batch open forever.
         self.assertTrue(report.closed)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0], 0)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM signal WHERE method = 'llm'").fetchone()[
+                0
+            ],
+            0,
+        )
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM contact").fetchone()[0], 0)
 
     def test_running_it_twice_writes_nothing_the_second_time(self) -> None:
@@ -492,7 +513,9 @@ class VerificationAgainstTheSentText(ReconcileTestCase):
         result = reconcile.run(self.conn, provider, self.artifacts)
 
         self.assertNotEqual(result.run_id, submitting_run)
-        for row in self.conn.execute("SELECT DISTINCT run_id FROM signal"):
+        for row in self.conn.execute(
+            "SELECT DISTINCT run_id FROM signal WHERE method = 'llm'"
+        ):
             self.assertEqual(row["run_id"], submitting_run)
         # The reconciling run still gets its own row, for its own timestamps.
         stage = self.conn.execute(

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -63,6 +64,16 @@ class _Artifact:
     url: str
     body_path: str | None
     http_status: int | None
+    #: When this exact content was last confirmed on the wire. Identical
+    #: content re-fetched updates this in place; changed content is a new row
+    #: (§4 D5b). Together with `id` it orders artifacts by *recency of the
+    #: crawl that last saw them*, which is what "the current page" means.
+    last_checked_at: str = ""
+    content_hash: str | None = None
+
+    @property
+    def recency(self) -> tuple[str, int]:
+        return (self.last_checked_at or "", self.id)
 
 
 class ExtractStage:
@@ -90,12 +101,20 @@ class ExtractStage:
 
     def _artifacts(self, company_id: int) -> list[_Artifact]:
         rows = self.conn.execute(
-            "SELECT id, kind, url, body_path, http_status FROM artifact "
-            "WHERE company_id = ? ORDER BY id",
+            "SELECT id, kind, url, body_path, http_status, last_checked_at, "
+            "content_hash FROM artifact WHERE company_id = ? ORDER BY id",
             (company_id,),
         ).fetchall()
         return [
-            _Artifact(r["id"], r["kind"], r["url"], r["body_path"], r["http_status"])
+            _Artifact(
+                r["id"],
+                r["kind"],
+                r["url"],
+                r["body_path"],
+                r["http_status"],
+                r["last_checked_at"] or "",
+                r["content_hash"],
+            )
             for r in rows
         ]
 
@@ -187,25 +206,36 @@ class ExtractStage:
         ).fetchone()
         site = (row["site_domain"] if row else None) or domain
 
-        def first(kind: str) -> _Artifact | None:
-            return next(
-                (
-                    a
-                    for a in artifacts
-                    if a.kind == kind and a.body_path and a.http_status == 200
-                ),
-                None,
-            )
-
-        homepage = first("homepage")
+        # **The newest usable artifact of each kind**, by the crawl that last
+        # confirmed it — not the first row by id. Reading the oldest row meant
+        # every Phase-1 signal after the second crawl was computed off the
+        # first crawl's bytes while Phase 2 read the newest page (audit finding
+        # 2). One rule for every kind, and `_current` is the one expression.
+        homepage = _current(artifacts, "homepage")
         if homepage is None:
             result.notes.append("no homepage on disk — nothing to extract")
             return result
 
+        # From here on, only what the crawl that fetched *this* homepage also
+        # touched. `fetch` reads the homepage before every sitemap, Impressum,
+        # index and sample, so `last_checked_at >= the homepage's` is exactly
+        # "seen by the same or a later crawl" — a shard from a run three weeks
+        # ago must not add its URLs to today's catalogue count.
+        artifacts = [
+            a for a in artifacts if a.recency >= homepage.recency or a is homepage
+        ]
+        homepage_hashes = {a.content_hash for a in artifacts if a.kind == "homepage"}
+
         homepage_html = self._body(homepage)
         self._homepage_signals(result, homepage, homepage_html)
 
-        impressum = first("impressum")
+        impressum = _current(
+            artifacts,
+            "impressum",
+            # M1.43, applied to Phase 1 as well as Phase 2: a body identical to
+            # the homepage is the homepage filed as an Impressum.
+            exclude=lambda a: a.content_hash in homepage_hashes,
+        )
         if impressum is not None:
             self._legal_form(result, impressum.url, self._body(impressum))
         else:
@@ -461,14 +491,7 @@ class ExtractStage:
         located: impressum_mod.BlogLocation | None,
         homepage: _Artifact,
     ) -> None:
-        index = next(
-            (
-                a
-                for a in artifacts
-                if a.kind == "blog_index" and a.body_path and a.http_status == 200
-            ),
-            None,
-        )
+        index = _current(artifacts, "blog_index")
         if index is None:
             self._no_blog_index(result, artifacts, located, homepage)
             return
@@ -481,14 +504,7 @@ class ExtractStage:
             index_path=path_of(index.url),
             today=self.today,
         )
-        article = next(
-            (
-                a
-                for a in artifacts
-                if a.kind == "blog_article" and a.body_path and a.http_status == 200
-            ),
-            None,
-        )
+        article = _current(artifacts, "blog_article")
 
         # A6, corrected by running it (M1.30): **the later of the two sources
         # wins, and neither is preferred.**
@@ -721,14 +737,7 @@ class ExtractStage:
         it and no homepage does — but `opp.no_product_schema` is +10, and a
         latent desync is the one M1.40 was.
         """
-        sample = next(
-            (
-                a
-                for a in artifacts
-                if a.kind == "product_page" and a.body_path and a.http_status == 200
-            ),
-            None,
-        )
+        sample = _current(artifacts, "product_page")
         if sample is None:
             result.notes.append(
                 "no product page fetched — schema.product_present stays unwritten (A5.5)"
@@ -752,6 +761,24 @@ class ExtractStage:
         )
 
 
+def _current(
+    artifacts: list[_Artifact],
+    kind: str,
+    exclude: Callable[[_Artifact], bool] | None = None,
+) -> _Artifact | None:
+    """The newest usable artifact of `kind`: HTTP 200 with a body, ordered by
+    `(last_checked_at, id)` descending. One expression for every kind."""
+    usable = [
+        a
+        for a in artifacts
+        if a.kind == kind
+        and a.body_path
+        and a.http_status == 200
+        and not (exclude and exclude(a))
+    ]
+    return max(usable, key=lambda a: a.recency) if usable else None
+
+
 def run(
     conn: sqlite3.Connection,
     company_rows: list[tuple[int, str]],
@@ -765,9 +792,16 @@ def run(
     run_id = int(cursor.lastrowid)
     stage = ExtractStage(conn, ArtifactStore(artifacts_root), run_id, today=today)
 
-    results = [
-        stage.run_company(company_id, domain) for company_id, domain in company_rows
-    ]
+    try:
+        results = [
+            stage.run_company(company_id, domain) for company_id, domain in company_rows
+        ]
+    except BaseException as exc:
+        conn.execute(
+            "UPDATE run SET aborted_reason = ? WHERE id = ?",
+            (f"{type(exc).__name__}: {exc}"[:500], run_id),
+        )
+        raise
 
     conn.execute(
         "UPDATE run SET finished_at = ?, companies_seen = ? WHERE id = ?",
