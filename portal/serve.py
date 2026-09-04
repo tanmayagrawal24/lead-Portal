@@ -38,7 +38,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from portal import config, db, migrate
+from portal import brief, config, db, lifecycle, migrate
 from portal.artifacts import ArtifactStore
 from portal.leadlist import Filters, LeadList, assert_evidence_reachable
 
@@ -254,6 +254,83 @@ def create_app(
         if lead is None:  # pragma: no cover — the flag's own company
             return HTMLResponse("", status_code=404)
         return render("_detail.html", request, lead=lead, oob=True)
+
+    def _domain_of(lead_list: LeadList, company_id: int) -> str | None:
+        row = lead_list.conn.execute(
+            "SELECT domain FROM company WHERE id = ?", (company_id,)
+        ).fetchone()
+        return None if row is None else str(row["domain"])
+
+    @app.post("/company/{company_id}/exclude", response_class=HTMLResponse)
+    async def exclude(request: Request, company_id: int) -> HTMLResponse:
+        """§9's *mark excluded (with reason)* — and its reverse. The reason is
+        required on the way in (§4: never exclude silently) and the badge swaps
+        out of band so the row says so at once (M7)."""
+        if cross_site(request):
+            return HTMLResponse("cross-site request refused", status_code=403)
+        body = parse_qs((await request.body()).decode("utf-8"))
+        lead_list = read()
+        domain = _domain_of(lead_list, company_id)
+        if domain is None:
+            return HTMLResponse("no such company", status_code=404)
+        try:
+            if body.get("lift", [""])[0]:
+                lifecycle.lift_exclusion(lead_list.conn, domain)
+            else:
+                lifecycle.exclude(lead_list.conn, domain, body.get("reason", [""])[0])
+        except ValueError as exc:
+            return HTMLResponse(str(exc), status_code=400)
+        lead = lead_list.lead(company_id)
+        return render("_detail.html", request, lead=lead, oob=True)
+
+    @app.post("/company/{company_id}/outreach", response_class=HTMLResponse)
+    async def outreach(request: Request, company_id: int) -> HTMLResponse:
+        """§9's *log an outreach attempt*. Migration 008's trigger is the
+        gate; a refusal renders as the reason, with 409, rather than as a
+        stack trace (M7)."""
+        if cross_site(request):
+            return HTMLResponse("cross-site request refused", status_code=403)
+        body = parse_qs((await request.body()).decode("utf-8"))
+        lead_list = read()
+        domain = _domain_of(lead_list, company_id)
+        if domain is None:
+            return HTMLResponse("no such company", status_code=404)
+        try:
+            lifecycle.log_outreach(
+                lead_list.conn,
+                domain,
+                channel=body.get("channel", [""])[0],
+                notes=body.get("notes", [""])[0],
+                outcome=body.get("outcome", [""])[0] or None,
+            )
+        except lifecycle.OutreachBlocked as exc:
+            return HTMLResponse(f'<p class="blockbox">⛔ {exc}</p>', status_code=409)
+        except ValueError as exc:
+            return HTMLResponse(str(exc), status_code=400)
+        lead = lead_list.lead(company_id)
+        return render("_detail.html", request, lead=lead, oob=True)
+
+    @app.get("/company/{company_id}/brief.md", response_class=PlainTextResponse)
+    def brief_export(company_id: int) -> Response:
+        """§9's *export the research brief*. Refuses with the §8 reason as
+        text: a brief that cannot state its basis is not served hollow (M7)."""
+        lead_list = read()
+        try:
+            text = brief.render(lead_list.conn, company_id)
+        except LookupError:
+            return PlainTextResponse("no such company", status_code=404)
+        except brief.NotScored as exc:
+            return PlainTextResponse(str(exc), status_code=409)
+        except (brief.MissingBasis, brief.ContactBlocked) as exc:
+            return PlainTextResponse(f"⛔ {exc}", status_code=409)
+        domain = _domain_of(lead_list, company_id) or str(company_id)
+        return Response(
+            text,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="brief-{domain}.md"'
+            },
+        )
 
     @app.get("/artifact/{artifact_id}", response_class=PlainTextResponse)
     def artifact(artifact_id: int) -> PlainTextResponse:

@@ -29,6 +29,7 @@ company.
 
 from __future__ import annotations
 
+import itertools
 import os
 from collections.abc import Sequence
 from typing import Any
@@ -203,6 +204,115 @@ class AnthropicProvider:
             raise
         return str(batch.id)
 
+    @llm.requires_ledger_clearance
+    def ask_with_search(
+        self,
+        *,
+        system: str,
+        user_text: str,
+        max_tokens: int,
+        max_searches: int,
+        clearance: llm.LedgerClearance,
+    ) -> llm.SearchAnswer:
+        """§5.5c's one paid call: a **live** message with the web-search tool.
+
+        Live rather than batched, because §7.1 prices this sub-stage *"on Haiku
+        4.5, live"* and the Batch API does not discount the per-search fee
+        anyway (control 8) — so batching would save the token half and cost
+        the 24-hour wait on the half that is not saved. Money is committed the
+        moment `messages.create` returns, which is why this carries §7 control
+        2's gate itself and not only through its caller (M1.71).
+
+        `max_searches` is passed to the tool as `max_uses`: the reservation
+        priced exactly that many searches, and a bound that is not sent to the
+        provider is a bound written where it cannot bind (M1.103's shape).
+        The tool variant comes from `LIMITS`, not from a literal here — on
+        Haiku 4.5 it is the basic `web_search_20250305`, and the consequence
+        M1.54 records (raw results land in context in full) is priced in
+        `ai_visibility.SEARCH_CONTEXT_TOKENS`.
+
+        A `billing_error` here is M1.53's *other* seam: the balance can run
+        dry between one company's call and the next, after real spend. It is
+        raised as `BalanceExhausted` so the caller can stop and say so.
+        """
+        tool = self._limits.web_search_tool
+        if tool is None:
+            raise llm.LLMConfigError(
+                f"{self.model} declares no web-search tool (M1.54); §5.5c cannot run on it"
+            )
+        if max_tokens > self._limits.max_output_tokens:
+            raise llm.LLMConfigError(
+                f"{max_tokens} output tokens exceeds {self.model}'s "
+                f"{self._limits.max_output_tokens} cap (M1.50b)"
+            )
+        client = _client(self._client)
+        try:
+            message = client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user_text}],
+                tools=[{"type": tool, "name": "web_search", "max_uses": max_searches}],
+            )
+        except Exception as exc:
+            outcome = llm.classify_api_error(*_error_fields(exc))
+            if outcome is llm.RequestOutcome.BALANCE_EXHAUSTED:
+                raise BalanceExhausted(
+                    "the API key's prepaid balance is exhausted mid-run; calls "
+                    "already answered were paid for and their signals stand"
+                ) from exc
+            raise
+        text = "".join(
+            str(getattr(block, "text", "") or "")
+            for block in getattr(message, "content", ())
+            if getattr(block, "type", None) == "text"
+        )
+        return llm.SearchAnswer(
+            text=text,
+            usage=_usage(message),
+            stop_reason=str(getattr(message, "stop_reason", "") or ""),
+            model=str(getattr(message, "model", self.model) or self.model),
+        )
+
+    def list_batches(self, *, limit: int = 20) -> tuple[llm.BatchListing, ...]:
+        """§10.7b's closing instrument: every batch the account has, newest first.
+
+        **Free, read-only, and the only way this project asks the account what
+        it has spent.** M1.100 ruled *whether a batch was ever submitted* OPEN
+        rather than zero, because every local record of `llm_batch` went with
+        the corpus and *"no key on this machine"* is a statement about a
+        machine. The closing procedure it wrote was a pasted Python one-liner;
+        this is the same call as a command, so that closing the question is a
+        thing one runs rather than a thing one types (M1.73's lesson: a state
+        that is a command cannot be reported on without being measured).
+
+        It needs a key and it makes no paid call — `messages.batches.list` is a
+        read. Without a key it raises `MissingKeyError` before any network
+        attempt, and does NOT look for another credential (§7 control 9).
+        """
+        client = _client(self._client)
+        listed: list[llm.BatchListing] = []
+        # `limit` is the SDK's PAGE size and its page object auto-fetches the
+        # next page on iteration — so without the slice this walks the whole
+        # account and the printed "limit N" is a claim the code does not keep
+        # (Unit 10 audit, M1.108). Bounded here, newest first.
+        for batch in itertools.islice(client.messages.batches.list(limit=limit), limit):
+            counts = getattr(batch, "request_counts", None)
+            listed.append(
+                llm.BatchListing(
+                    provider_batch_id=str(getattr(batch, "id", "")),
+                    processing_status=str(getattr(batch, "processing_status", "")),
+                    created_at=str(getattr(batch, "created_at", "")),
+                    expires_at=str(getattr(batch, "expires_at", "") or ""),
+                    succeeded=int(getattr(counts, "succeeded", 0) or 0),
+                    errored=int(getattr(counts, "errored", 0) or 0),
+                    expired=int(getattr(counts, "expired", 0) or 0),
+                    canceled=int(getattr(counts, "canceled", 0) or 0),
+                    processing=int(getattr(counts, "processing", 0) or 0),
+                )
+            )
+        return tuple(listed)
+
     def poll_batch(self, provider_batch_id: str) -> llm.BatchResult:
         """Poll, and read results by `custom_id` (M1.51).
 
@@ -366,14 +476,15 @@ def _usage(message: Any) -> llm.Usage:
 # so that adding a method here is a build failure until somebody has decided
 # whether it spends money.
 
-#: `submit_batch` is the only call that commits spend. `count_input_tokens` and
+#: `submit_batch` and `ask_with_search` are the two calls that commit spend. `count_input_tokens` and
 #: `token_counter` reach the network and are **free** — `count_tokens` is not a
 #: paid endpoint (M1.52) — and `poll_batch` reads a result already paid for.
-PAID_SURFACES: tuple[str, ...] = ("submit_batch",)
+PAID_SURFACES: tuple[str, ...] = ("ask_with_search", "submit_batch")
 FREE_SURFACES: tuple[str, ...] = (
     "build_params",
     "count_input_tokens",
     "limits",
+    "list_batches",
     "poll_batch",
     "price",
     "token_counter",

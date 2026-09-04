@@ -30,10 +30,25 @@ Localhost only. Single operator, no auth, no deployment.
   only under `--submit`**; `portal reconcile` collects, verifies against the
   sent text, and writes the ledger's one measured number.
 
+- **M6 built (Unit 10, M1.105)** — `portal ai-check` (§5.5c): two fixed German
+  category queries per admitted company, live web search, six `ai.*` keys
+  under its own stage. Dry by default; **spends only under `--submit`**.
+- **M7 complete (Unit 10, M1.106)** — `portal brief` (§9's Markdown export,
+  which fails without §8's basis), `portal outreach`, `portal exclude`,
+  `portal purge` and `portal forget`; the same three writes on the §9 page.
+- **M8 built (Unit 10, M1.107)** — `portal discover` (§5.1): Places Text
+  Search with the three-field mask asserted on the wire; `run.places_calls`
+  counts issued requests; dry unless `--submit`. `portal fetch` no longer
+  needs `--seed` — without it, every company row is fetched.
+- **§5.7** — `portal score --phase 2` warns loudly on every unreconciled
+  batch before writing (M1.104), and `portal llm-batches` is §10.7b's closing
+  procedure as a read-only command.
+
 **Nothing has been submitted yet, and that is deliberate.** `extract-p2` with no
 flag is a dry run that reserves nothing. Before the first real submission,
 §10.7b must be closed: run `messages.batches.list()` with a real key to
-establish whether any batch has ever been submitted on this account. A batch
+establish whether any batch has ever been submitted on this account —
+`portal llm-batches` does exactly that and nothing else. A batch
 that exists is committed spend whether or not its results were ever read, and
 resubmitting would double it.
 

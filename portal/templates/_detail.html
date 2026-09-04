@@ -156,6 +156,51 @@
   {% endif %}
 
   <section>
+    <h3>Aktionen</h3>
+    {#- §9's three per-row actions that write (M7). Each posts to its own
+        endpoint; the detail re-renders and the badges swap out of band. The
+        brief is a download, and a refusal (§8) comes back as the reason. -#}
+    <div class="flag">
+      <div class="head"><span class="name">Ausschluss</span>
+        {% if lead.excluded %}<code class="muted">{{ lead.excluded_reason }}</code>{% endif %}
+      </div>
+      <form hx-post="/company/{{ lead.company_id }}/exclude"
+            hx-target="#detail-{{ lead.company_id }}" hx-swap="innerHTML">
+        {% if lead.excluded %}
+          <input type="hidden" name="lift" value="1">
+          <button type="submit">Ausschluss aufheben</button>
+        {% else %}
+          <input type="text" name="reason" required placeholder="Grund — nie stillschweigend ausschließen (§4)">
+          <button type="submit">ausschließen</button>
+        {% endif %}
+      </form>
+    </div>
+    <div class="flag">
+      <div class="head"><span class="name">Kontaktversuch protokollieren</span>
+        <span class="muted">nur Post oder Telefon (§8, §7 UWG)</span></div>
+      <form hx-post="/company/{{ lead.company_id }}/outreach"
+            hx-target="#detail-{{ lead.company_id }}" hx-swap="innerHTML">
+        <select name="channel"><option value="post">Post</option><option value="phone">Telefon</option></select>
+        <select name="outcome">
+          <option value="">Ergebnis offen</option>
+          <option value="no_response">keine Reaktion</option>
+          <option value="interested">interessiert</option>
+          <option value="declined">abgelehnt</option>
+          <option value="meeting">Termin</option>
+          <option value="client">Kunde</option>
+        </select>
+        <input type="text" name="notes" placeholder="Notiz (optional)">
+        <button type="submit"{% if lead.contact_blocked %} disabled title="Kontakt gesperrt (A7)"{% endif %}>protokollieren</button>
+      </form>
+    </div>
+    <div class="flag">
+      <div class="head"><span class="name">Research-Brief</span></div>
+      <a href="/company/{{ lead.company_id }}/brief.md"
+         title="Markdown-Export; scheitert ohne §8-Basis statt leer zu rendern">Brief exportieren (.md)</a>
+    </div>
+  </section>
+
+  <section>
     <h3>Prüfmarker</h3>
     {% if not lead.flags %}
       <p class="notice">Keine offenen Prüfmarker.</p>

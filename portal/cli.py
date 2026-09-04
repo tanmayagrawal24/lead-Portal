@@ -7,7 +7,7 @@ Built so far: `init`, `fetch`, `extract-p1`, `score`, `serve`, `pagespeed`
 `extract-p2`'s **submitting** half is built (9b) and is reachable from here
 **only through `--submit`** (9c): without it the command is a dry run and
 spends nothing. `reconcile` is a subcommand as of 9b and collects whatever
-batches the database holds. `discover` arrives with M8.
+batches the database holds; `discover` (M8) fills `company` from Places.
 """
 
 from __future__ import annotations
@@ -20,15 +20,19 @@ from pathlib import Path
 
 from portal import (
     __version__,
+    ai_visibility,
     audit,
+    brief,
     config,
     db,
     diff,
+    discover,
     extract,
     extract_p2,
     fetch,
     impressum_audit,
     ledger,
+    lifecycle,
     llm,
     llm_anthropic,
     migrate,
@@ -76,8 +80,16 @@ def cmd_init(path: Path) -> int:
     return 0
 
 
-def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> int:
+def cmd_fetch(
+    path: Path, seed_path: Path | None, interval: float, max_hosts: int
+) -> int:
     """Fetch every seeded domain under the §5.2 politeness rules.
+
+    **`--seed` became optional with M8 (M1.107).** `discover` writes `company`
+    rows the seed file never names; without a seed the targets are every
+    company row, which is the same set `extract-p1` and `score` already read.
+    With one, the file is upserted first and only its domains are fetched —
+    the pre-M8 behaviour, unchanged.
 
     **Every seeded domain that is not excluded** (audit finding 10). §6.4's
     `excluded = 1` is a standing verdict — a `duplicate_site` row is the same
@@ -92,11 +104,13 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
     if not path.exists():
         print(f"no database at {path} — run `portal init` first", file=sys.stderr)
         return 2
-    try:
-        rows = seeds.load(seed_path)
-    except seeds.SeedError as exc:
-        print(f"seed error: {exc}", file=sys.stderr)
-        return 2
+    rows: list[seeds.Seed] = []
+    if seed_path is not None:
+        try:
+            rows = seeds.load(seed_path)
+        except seeds.SeedError as exc:
+            print(f"seed error: {exc}", file=sys.stderr)
+            return 2
 
     conn = db.connect(path)
     try:
@@ -114,7 +128,21 @@ def cmd_fetch(path: Path, seed_path: Path, interval: float, max_hosts: int) -> i
             )
             return 2
 
-        company_ids = seeds.upsert(conn, rows, query=str(seed_path))
+        if seed_path is not None:
+            company_ids = seeds.upsert(conn, rows, query=str(seed_path))
+        else:
+            # Every company the table holds — discovered, seeded or manual.
+            table = conn.execute(
+                "SELECT id, domain FROM company ORDER BY domain"
+            ).fetchall()
+            rows = [seeds.Seed(domain=str(r["domain"])) for r in table]
+            company_ids = [int(r["id"]) for r in table]
+            if not rows:
+                print(
+                    "no companies in the database — pass --seed or run `portal discover`",
+                    file=sys.stderr,
+                )
+                return 2
         # The same predicate `extract-p1` applies at cli.py's `cmd_extract_p1`
         # and `score` applies in `ScoreStage.profiles`: `excluded = 0`. Read
         # from `company` after the upsert, because the verdict lives there and
@@ -395,6 +423,143 @@ def _abort_run(conn: sqlite3.Connection, run_id: int, exc: BaseException) -> Non
     conn.commit()
 
 
+def cmd_ai_check(
+    path: Path,
+    *,
+    dry_run: bool,
+    submit: bool,
+    queries: int = ai_visibility.DEFAULT_QUERIES,
+    recheck: bool = False,
+    model: str = llm_anthropic.DEFAULT_MODEL,
+    provider: ai_visibility.SearchProvider | None = None,
+) -> int:
+    """§5.5c's AI-visibility check (M6) — dry by default, paid only on `--submit`.
+
+    M1.102's gate, in M1.102's shape: no flag is a dry run that prints who
+    would be checked with which literal queries, who is withheld and why, and
+    what the run would cost before the prompt is even measured. `--submit` is
+    the written authorisation. `--submit --dry-run` is refused as a
+    contradiction. Fewer than two queries is refused outright, because §6.2's
+    predicate needs two and one would silently disable a +15 rule (M1.23).
+
+    The order on `--submit` is §7's: control 2's clearance first, then control
+    3's reservation inside `ai_visibility.run`, then the calls. A dry key is
+    caught before any run row exists; a balance that runs dry mid-run finishes
+    the run with what was paid for (M1.105(c)).
+    """
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return 2
+    if submit and dry_run:
+        print(
+            "ai-check: --submit and --dry-run contradict each other. Pass one.",
+            file=sys.stderr,
+        )
+        return 2
+    if not ai_visibility.MIN_QUERIES <= queries <= ai_visibility.MAX_QUERIES:
+        print(
+            f"ai-check: --queries must be {ai_visibility.MIN_QUERIES}–"
+            f"{ai_visibility.MAX_QUERIES} (§5.5c). Below {ai_visibility.MIN_QUERIES} "
+            f"`opp.ai_invisible` can never fire (M1.23); above "
+            f"{ai_visibility.MAX_QUERIES} is the hard maximum.",
+            file=sys.stderr,
+        )
+        return 2
+    conn = db.connect(path)
+    try:
+        version = migrate.current_version(conn)
+        highest = migrate.discover()[-1][0]
+        if version < highest:
+            print(
+                f"database at {path} is at migration {version:03d} but the code "
+                f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+                file=sys.stderr,
+            )
+            return 2
+        plans, withheld = ai_visibility.prepare(conn, queries=queries, recheck=recheck)
+        label = "--submit" if submit else "--dry-run"
+        verb = "will be" if submit else "would be"
+        print(f"ai-check {label}: {len(plans)} companies {verb} checked\n")
+        for plan in plans:
+            print(f"  {plan.domain:28} term: {plan.term!r}")
+            for query in plan.queries:
+                print(f"      „{query}“")
+            print(f"      counts as named: {', '.join(plan.brand_terms)}")
+        for entry in withheld:
+            print(f"  {entry.domain:28} WITHHELD — {entry.reason}")
+
+        floor = ai_visibility.unmeasured_floor(
+            plans, provider=llm_anthropic.PROVIDER, model=model
+        )
+        searches = sum(len(p.queries) for p in plans) * ai_visibility.SEARCHES_PER_QUERY
+        if not submit:
+            print(
+                f"\n{searches} search(es) at ${llm.WEB_SEARCH_PER_SEARCH_USD:.2f} plus "
+                f"{ai_visibility.SEARCH_CONTEXT_TOKENS:,} allowance tokens per query "
+                f"(as-of {ai_visibility.SEARCH_CONTEXT_AS_OF}) price at ${floor:.4f} "
+                f"before the prompt is measured. Nothing was sent and nothing was "
+                f"reserved. To reserve and run — §7 control 3, real spend — run "
+                f"again with --submit."
+            )
+            return 0
+        if not plans:
+            print("\nnothing to check: every company was withheld", file=sys.stderr)
+            return 2
+
+        try:
+            clearance = ledger.check_ceiling(conn)
+        except ledger.CeilingExceeded as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        except sqlite3.Error as exc:
+            print(
+                f"refused: the §7 control 2 ledger is not readable ({exc}). Run "
+                f"`portal init` on {path} first.",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"\n§7 control 2: ${clearance.spend_usd:.2f} of "
+            f"${clearance.ceiling_usd:.2f} used over {clearance.window_days} "
+            f"rolling days; ${clearance.headroom_usd:.2f} headroom"
+        )
+        chosen = provider or llm_anthropic.AnthropicProvider(model=model)
+        try:
+            report = ai_visibility.run(conn, chosen, plans, clearance=clearance)
+        except llm_anthropic.MissingKeyError as exc:
+            # From `count_tokens`, before any run row exists: nothing is on
+            # the books and there is nothing to abort.
+            print(str(exc), file=sys.stderr)
+            return 2
+        except ai_visibility.RunCeilingExceeded as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+
+    print(
+        f"\nrun {report.run_id}: {len(report.checked)} of "
+        f"{len(report.checked) + len(report.not_reached)} companies checked, "
+        f"{report.web_searches} searches, {report.input_tokens:,} in / "
+        f"{report.output_tokens:,} out tokens"
+    )
+    print(
+        f"  reserved ${report.reserved_usd:.4f}, measured ${report.actual_usd:.4f}; "
+        f"run.est_cost_usd now carries the measured actual (§7 control 3)"
+    )
+    if report.stopped_by:
+        why = "the balance ran dry" if report.balance_exhausted else report.stopped_by
+        print(
+            f"  ⛔ {why}; not reached: {', '.join(report.not_reached) or 'nobody'}. "
+            f"The run is finished with what was paid for (M1.105(c)); run again "
+            f"{'once the key is topped up' if report.balance_exhausted else 'to reach the rest'}.",
+            file=sys.stderr,
+        )
+        return 2
+    print("  score with `portal score --phase 2`")
+    return 0
+
+
 def cmd_pagespeed(path: Path, dry_run: bool, max_calls: int) -> int:
     """§5.5a — PageSpeed Insights over the homepages §5.4 admitted.
 
@@ -563,6 +728,23 @@ def cmd_score(path: Path, phase: int) -> int:
                 file=sys.stderr,
             )
             return 2
+        # §5.7: the warning goes out BEFORE the score is written, because a
+        # provisional number that is printed and then explained is a number a
+        # reader has already copied. It does not refuse — the score is the
+        # best reading available and `reconcile` will supersede it under the
+        # submitting run's own id (B4) — but it says so, loudly, on stderr.
+        pending = score.unreconciled_batches(conn) if phase == 2 else []
+        for batch in pending:
+            who = ", ".join(batch.domains) if batch.domains else "no company rows"
+            print(
+                f"⚠ score --phase 2: batch {batch.batch_id} "
+                f"({batch.purpose}, {batch.status}, submitted "
+                f"{batch.submitted_at or 'never — reserved only'}, provider id "
+                f"{batch.provider_batch_id or 'none'}) is NOT reconciled — "
+                f"Phase-2 signals for {who} are still in flight. This score is "
+                f"provisional for them; run `portal reconcile` and score again.",
+                file=sys.stderr,
+            )
         run_id, results = score.run(conn, phase=phase)
     finally:
         conn.close()
@@ -570,6 +752,12 @@ def cmd_score(path: Path, phase: int) -> int:
     if not results:
         print("no companies to score — run `portal extract-p1` first", file=sys.stderr)
         return 2
+    if pending:
+        print(
+            f"\n⚠ {len(pending)} unreconciled batch(es) — see the warnings above; "
+            f"this Phase-2 score is provisional (§5.7).",
+            file=sys.stderr,
+        )
 
     print(f"\nrun {run_id}: score --phase {phase}, ruleset {ruleset.RULESET_VERSION}")
     ranked = sorted(results, key=lambda r: (-r.total, r.domain))
@@ -896,6 +1084,327 @@ def is_loopback_bind(host: str) -> bool:
         return False
 
 
+def cmd_llm_batches(
+    limit: int,
+    *,
+    model: str = llm_anthropic.DEFAULT_MODEL,
+    provider: llm_anthropic.AnthropicProvider | None = None,
+) -> int:
+    """§10.7b's closing procedure, as a command (M1.104).
+
+    Lists every message batch the account holds, newest first, and says in
+    words what a listed batch means: committed spend, results retrievable for
+    29 days from creation, resubmission doubles the cost. **Touches no
+    database and reserves nothing** — it is a read of what has already been
+    paid for, which is why it is classified free and needs no clearance.
+
+    Exit 0 with batches: the question is closed and the answer is *not zero*;
+    the ids are printed because with `llm_batch` gone they are the only route
+    back to any results. Exit 0 with none: the account has never submitted.
+    Exit 2 without a key: the question stays OPEN, and this command says so
+    rather than reporting zero — §7 control 9 forbids finding a credential.
+    """
+    active = provider or llm_anthropic.AnthropicProvider(model)
+    try:
+        listed = active.list_batches(limit=limit)
+    except llm_anthropic.MissingKeyError as exc:
+        print(
+            f"llm-batches: {exc}\n"
+            "§10.7b stays OPEN. This is not zero: no key on this machine is a "
+            "statement about this machine (M1.98, M1.100). Run it where the "
+            "billing account's key is set, or read the Console's usage view.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not listed:
+        print(
+            f"llm-batches: the account holds no message batches (limit {limit}).\n"
+            f"§10.7b is CLOSED with the answer ZERO, as of {utc_now()}: "
+            "no batch has ever been submitted on this key's account. Record the "
+            "date in the register — it is a measurement, not a fact about the code."
+        )
+        return 0
+
+    print(f"llm-batches: {len(listed)} batch(es) on this account (newest first)\n")
+    print(
+        f"  {'id':40} {'status':12} {'created':22} {'ok':>4} {'err':>4} {'exp':>4} {'can':>4} {'run':>4}"
+    )
+    for b in listed:
+        print(
+            f"  {b.provider_batch_id:40} {b.processing_status:12} {b.created_at:22} "
+            f"{b.succeeded:>4} {b.errored:>4} {b.expired:>4} {b.canceled:>4} {b.processing:>4}"
+        )
+    print(
+        "\n§10.7b is CLOSED and the answer is NOT zero. Every batch above is "
+        "committed spend whether or not its results were ever read (§5.6). "
+        "Results stay retrievable for 29 days from `created`; retrieving costs "
+        "nothing extra; RESUBMITTING WOULD DOUBLE THE COST. Write the ids down "
+        "before anything else — with `llm_batch` gone they are the only route "
+        "back to the results — and do not run `extract-p2 --submit` until each "
+        "one is accounted for."
+    )
+    return 0
+
+
+def cmd_discover(
+    path: Path,
+    query: str,
+    *,
+    region: str,
+    submit: bool,
+    dry_run: bool,
+    max_calls: int,
+    client: discover.PlacesClient | None = None,
+) -> int:
+    """§5.1's discovery (M8) — dry by default, keyed only on `--submit`.
+
+    The dry run prints the query, the field mask and the request cap, and
+    needs no key. `--submit` reads `GOOGLE_PLACES_API_KEY` and reminds the
+    operator of §7 control 1 in words, because the Console cap that keeps
+    this SKU free is not something a program can verify.
+    """
+    if submit and dry_run:
+        print(
+            "discover: --submit and --dry-run contradict each other. Pass one.",
+            file=sys.stderr,
+        )
+        return 2
+    if max_calls < 1 or max_calls > discover.MAX_CALLS_PER_RUN:
+        print(
+            f"discover: --max-calls must be 1–{discover.MAX_CALLS_PER_RUN}; a runaway "
+            f"guard, not a budget",
+            file=sys.stderr,
+        )
+        return 2
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        text = f"{query} {region}".strip()
+        label = "--submit" if submit else "--dry-run"
+        print(f"discover {label}: „{text}“")
+        print(f"  field mask: {discover.FIELD_MASK}")
+        print(
+            f"  up to {max_calls} request(s) of {discover.PAGE_SIZE} places, counted as issued"
+        )
+        if not submit:
+            print(
+                "\nNothing was requested. §7 control 1: confirm the Places SKU quota "
+                "cap in Cloud Console FIRST, then run again with --submit "
+                f"(needs {discover.API_KEY_ENV})."
+            )
+            return 0
+        try:
+            chosen = client or discover.client_from_env()
+        except discover.MissingKeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        try:
+            report = discover.run(
+                conn, chosen, query, region=region, max_calls=max_calls
+            )
+        except discover.PlacesError as exc:
+            print(f"discover: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    print(
+        f"\nrun {report.run_id}: {report.calls} request(s), {len(report.found)} places "
+        f"with a website, {report.inserted} new company row(s), "
+        f"{len(report.found) - report.inserted} already known, "
+        f"{report.no_website} without a website, {report.unusable} unusable"
+    )
+    for found in report.found:
+        print(
+            f"  {'+' if found.inserted else '='} {found.domain:28} {found.display_name}"
+        )
+    if report.capped:
+        print(
+            f"  stopped at the {max_calls}-request cap with more pages available",
+            file=sys.stderr,
+        )
+    print(
+        "  next: `portal fetch --seed` is not needed — `portal fetch` reads `company`"
+    )
+    return 0
+
+
+def _open_current(path: Path) -> sqlite3.Connection | None:
+    """The database, or None with the reason printed. Every M7 command needs
+    the same two checks and none of them should differ in how it says no."""
+    if not path.exists():
+        print(f"no database at {path} — run `portal init` first", file=sys.stderr)
+        return None
+    conn = db.connect(path)
+    version = migrate.current_version(conn)
+    highest = migrate.discover()[-1][0]
+    if version < highest:
+        conn.close()
+        print(
+            f"database at {path} is at migration {version:03d} but the code "
+            f"ships {highest:03d} — run `portal init` first (it is idempotent)",
+            file=sys.stderr,
+        )
+        return None
+    return conn
+
+
+def cmd_purge(path: Path, *, dry_run: bool) -> int:
+    """§8: delete `contact` rows past `purge_after`. Prints each one, because a
+    deletion of personal data is something an operator should be able to say
+    happened, and on which date."""
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        expired = lifecycle.expired_contacts(conn)
+        label = "would be deleted" if dry_run else "deleted"
+        print(f"purge: {len(expired)} expired contact(s) {label}")
+        for row in expired:
+            print(
+                f"  {row['domain']:28} {row['full_name'] or '—':30} "
+                f"{row['role'] or '':16} collected {row['collected_at'][:10]}, "
+                f"purge_after {row['purge_after'][:10]}"
+            )
+        if dry_run:
+            return 0
+        deleted = lifecycle.purge(conn)
+        if deleted != len(expired):
+            print(
+                f"purge: listed {len(expired)} but deleted {deleted} — a contact "
+                f"expired between the two reads; run again",
+                file=sys.stderr,
+            )
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_forget(path: Path, domain: str, *, yes: bool) -> int:
+    """§8's erasure. Refuses without `--yes`: it is irreversible and it is the
+    one command here whose dry run cannot show what it would do in full,
+    because the point is that nothing is left to show."""
+    if not yes:
+        print(
+            f"forget: this hard-deletes every row and every stored body for "
+            f"{domain}, and keeps only the §7 ledger (run rows name no company). "
+            f"It cannot be undone. Pass --yes.",
+            file=sys.stderr,
+        )
+        return 2
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        try:
+            report = lifecycle.forget(conn, config.artifacts_root(path), domain)
+        except lifecycle.UnknownCompany as exc:
+            print(f"forget: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    print(f"forget: {domain}")
+    for table, count in sorted(report.rows_deleted.items()):
+        print(f"  {table:24} {count:>6} row(s) deleted")
+    print(f"  stored bodies: {'removed' if report.bodies_removed else 'none on disk'}")
+    if not report.clean:
+        print(
+            f"forget: RESIDUE REMAINS — {report.residue}. Do not report this as done.",
+            file=sys.stderr,
+        )
+        return 1
+    print("  verified: zero rows anywhere name this company, and no directory remains")
+    return 0
+
+
+def cmd_exclude(path: Path, domain: str, *, reason: str, lift: bool) -> int:
+    """§9's *mark excluded (with reason)*. `--lift` is the operator's act
+    M1.103(10) keeps out of every stage."""
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        try:
+            if lift:
+                lifecycle.lift_exclusion(conn, domain)
+                print(f"exclude: {domain} is no longer excluded")
+            else:
+                lifecycle.exclude(conn, domain, reason)
+                print(f"exclude: {domain} excluded — {reason}")
+        except (lifecycle.UnknownCompany, ValueError) as exc:
+            print(f"exclude: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_outreach(
+    path: Path,
+    domain: str,
+    *,
+    channel: str,
+    occurred_at: str | None,
+    notes: str,
+    outcome: str | None,
+) -> int:
+    """§9's *log an outreach attempt*. The block is migration 008's trigger;
+    this command only puts its reason into words."""
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        try:
+            row_id = lifecycle.log_outreach(
+                conn,
+                domain,
+                channel=channel,
+                occurred_at=occurred_at,
+                notes=notes,
+                outcome=outcome,
+            )
+        except lifecycle.OutreachBlocked as exc:
+            print(f"⛔ {exc}", file=sys.stderr)
+            return 2
+        except (lifecycle.UnknownCompany, ValueError) as exc:
+            print(f"outreach: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    print(
+        f"outreach: row {row_id} — {domain} via {channel}"
+        + (f", {outcome}" if outcome else "")
+    )
+    return 0
+
+
+def cmd_brief(path: Path, domain: str, *, out: Path | None) -> int:
+    """§9's research brief. Stdout unless `--out`; fails loudly on §8."""
+    conn = _open_current(path)
+    if conn is None:
+        return 2
+    try:
+        try:
+            company_id = lifecycle.company_id_for(conn, domain)
+            text = brief.render(conn, company_id)
+        except (lifecycle.UnknownCompany, brief.NotScored) as exc:
+            print(f"brief: {exc}", file=sys.stderr)
+            return 2
+        except (brief.MissingBasis, brief.ContactBlocked) as exc:
+            print(f"⛔ brief refused: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+    if out is None:
+        print(text, end="")
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        print(f"brief: written to {out}")
+    return 0
+
+
 def cmd_serve(path: Path, host: str, port: int, allow_public_bind: bool = False) -> int:
     """§9's page. Refuses rather than starting against a database with no schema
     — an empty table is indistinguishable from a corpus nothing has scored.
@@ -975,7 +1484,10 @@ def build_parser() -> argparse.ArgumentParser:
         "fetch", help="fetch robots, homepage, sitemaps, Impressum and a product sample"
     )
     fetch_parser.add_argument(
-        "--seed", type=Path, required=True, help="seed CSV with a 'domain' column"
+        "--seed",
+        type=Path,
+        default=None,
+        help="seed CSV with a 'domain' column; without it every company row is fetched",
     )
     fetch_parser.add_argument(
         "--interval",
@@ -1096,6 +1608,40 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"the model to submit to (default {llm_anthropic.DEFAULT_MODEL})",
     )
 
+    ai_parser = sub.add_parser(
+        "ai-check",
+        help="§5.5c's AI-visibility check (M6). A dry run unless --submit is "
+        "given: prints the literal queries and sends nothing",
+    )
+    ai_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan and send nothing (the default)",
+    )
+    ai_parser.add_argument(
+        "--submit",
+        action="store_true",
+        help="reserve (§7 control 3) and run the live web-search calls. THIS "
+        "SPENDS MONEY: ~$0.05–0.06 per company. Needs ANTHROPIC_API_KEY.",
+    )
+    ai_parser.add_argument(
+        "--queries",
+        type=int,
+        default=ai_visibility.DEFAULT_QUERIES,
+        help=f"queries per company, {ai_visibility.MIN_QUERIES}–"
+        f"{ai_visibility.MAX_QUERIES} (default {ai_visibility.DEFAULT_QUERIES})",
+    )
+    ai_parser.add_argument(
+        "--recheck",
+        action="store_true",
+        help="include companies already checked; a re-check is new spend",
+    )
+    ai_parser.add_argument(
+        "--model",
+        default=llm_anthropic.DEFAULT_MODEL,
+        help=f"the model to ask (default {llm_anthropic.DEFAULT_MODEL})",
+    )
+
     pagespeed_parser = sub.add_parser(
         "pagespeed",
         help="§5.5a: PageSpeed Insights over admitted homepages; free tier, keyed "
@@ -1125,6 +1671,87 @@ def build_parser() -> argparse.ArgumentParser:
         default=llm_anthropic.DEFAULT_MODEL,
         help=f"the model whose batches to poll (default {llm_anthropic.DEFAULT_MODEL})",
     )
+
+    batches_parser = sub.add_parser(
+        "llm-batches",
+        help="§10.7b: list every message batch on the account — read-only, no "
+        "spend, needs ANTHROPIC_API_KEY. The closing procedure, as a command",
+    )
+    batches_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="how many batches to list, newest first (default 20)",
+    )
+    batches_parser.add_argument(
+        "--model",
+        default=llm_anthropic.DEFAULT_MODEL,
+        help=f"provider model (only used to build the client; default "
+        f"{llm_anthropic.DEFAULT_MODEL})",
+    )
+
+    discover_parser = sub.add_parser(
+        "discover",
+        help="§5.1: Places Text Search into company rows (M8). Dry unless --submit",
+    )
+    discover_parser.add_argument(
+        "--query", required=True, help='e.g. "Zahnpflege Onlineshop"'
+    )
+    discover_parser.add_argument("--region", default="", help='e.g. "NRW"')
+    discover_parser.add_argument("--dry-run", action="store_true")
+    discover_parser.add_argument(
+        "--submit",
+        action="store_true",
+        help=f"issue the requests; needs {discover.API_KEY_ENV} and a Console quota cap (§7 control 1)",
+    )
+    discover_parser.add_argument(
+        "--max-calls", type=int, default=discover.MAX_CALLS_PER_RUN
+    )
+
+    purge_parser = sub.add_parser(
+        "purge",
+        help="§8: delete contact rows past purge_after (collected_at + 12 months)",
+    )
+    purge_parser.add_argument(
+        "--dry-run", action="store_true", help="list, do not delete"
+    )
+
+    forget_parser = sub.add_parser(
+        "forget", help="§8: hard-delete every row and stored body for one company"
+    )
+    forget_parser.add_argument("--domain", required=True)
+    forget_parser.add_argument(
+        "--yes", action="store_true", help="confirm; irreversible"
+    )
+
+    exclude_parser = sub.add_parser(
+        "exclude", help="§9: mark a company excluded, with a reason"
+    )
+    exclude_parser.add_argument("--domain", required=True)
+    exclude_parser.add_argument(
+        "--reason", default="", help="why (required unless --lift)"
+    )
+    exclude_parser.add_argument(
+        "--lift", action="store_true", help="remove an exclusion"
+    )
+
+    outreach_parser = sub.add_parser(
+        "outreach", help="§9: log an outreach attempt (post or phone)"
+    )
+    outreach_parser.add_argument("--domain", required=True)
+    outreach_parser.add_argument("--channel", required=True, choices=lifecycle.CHANNELS)
+    outreach_parser.add_argument(
+        "--at", dest="occurred_at", default=None, help="ISO 8601; default now"
+    )
+    outreach_parser.add_argument("--notes", default="")
+    outreach_parser.add_argument("--outcome", default=None, choices=lifecycle.OUTCOMES)
+
+    brief_parser = sub.add_parser(
+        "brief",
+        help="§9: export the research brief (Markdown); fails without §8's basis",
+    )
+    brief_parser.add_argument("--domain", required=True)
+    brief_parser.add_argument("--out", type=Path, default=None, help="write to a file")
 
     prices_parser = sub.add_parser(
         "llm-prices",
@@ -1193,6 +1820,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "reconcile":
         return cmd_reconcile(path, args.model)
 
+    if args.command == "ai-check":
+        return cmd_ai_check(
+            path,
+            dry_run=args.dry_run,
+            submit=args.submit,
+            queries=args.queries,
+            recheck=args.recheck,
+            model=args.model,
+        )
     if args.command == "pagespeed":
         if args.max_calls < 1:
             print("--max-calls must be at least 1; refusing", file=sys.stderr)
@@ -1217,6 +1853,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "audit-impressum-candidates":
         return cmd_audit_impressum_candidates(path, args.show_values)
 
+    if args.command == "discover":
+        return cmd_discover(
+            path,
+            args.query,
+            region=args.region,
+            submit=args.submit,
+            dry_run=args.dry_run,
+            max_calls=args.max_calls,
+        )
+    if args.command == "purge":
+        return cmd_purge(path, dry_run=args.dry_run)
+    if args.command == "forget":
+        return cmd_forget(path, args.domain, yes=args.yes)
+    if args.command == "exclude":
+        return cmd_exclude(path, args.domain, reason=args.reason, lift=args.lift)
+    if args.command == "outreach":
+        return cmd_outreach(
+            path,
+            args.domain,
+            channel=args.channel,
+            occurred_at=args.occurred_at,
+            notes=args.notes,
+            outcome=args.outcome,
+        )
+    if args.command == "brief":
+        return cmd_brief(path, args.domain, out=args.out)
+    if args.command == "llm-batches":
+        return cmd_llm_batches(args.limit, model=args.model)
     if args.command == "llm-prices":
         return cmd_llm_prices(path, args.reserve)
 

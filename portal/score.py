@@ -396,6 +396,63 @@ class ScoreStage:
             )
 
 
+@dataclass(frozen=True)
+class UnreconciledBatch:
+    """One `llm_batch` row that still owes the ledger a measured number.
+
+    §5.7 says `score --phase 2` *"warns loudly if unreconciled batches exist for
+    the companies being scored"*. This is what the warning is built from: the
+    batch, its state, and the domains whose Phase-2 signals it is holding.
+    """
+
+    batch_id: int
+    provider_batch_id: str | None
+    purpose: str
+    status: str
+    submitted_at: str | None
+    domains: tuple[str, ...]
+
+
+#: `reconciled_at` and nothing else. §7 control 12(b) makes it the one column
+#: that says *the measured actual has been written*; a status is not that. A
+#: `reserved` batch that never got a provider id is unreconciled by this test
+#: — correctly, since its reservation still stands at full value (control 12c).
+_UNRECONCILED_SQL = """
+SELECT b.id, b.provider_batch_id, b.purpose, b.status, b.submitted_at,
+       GROUP_CONCAT(DISTINCT c.domain) AS domains
+FROM llm_batch b
+LEFT JOIN llm_batch_request r ON r.batch_id = b.id
+LEFT JOIN company c ON c.id = r.company_id AND c.excluded = 0
+WHERE b.reconciled_at IS NULL
+GROUP BY b.id
+ORDER BY b.id
+"""
+
+
+def unreconciled_batches(conn: sqlite3.Connection) -> list[UnreconciledBatch]:
+    """§5.7's precondition, read rather than assumed.
+
+    A `phase=2` score written while a batch is still open is a score over a
+    profile that is about to change: `reconcile` writes under the *submitting*
+    run's id (B4), and `company_profile` will serve those signals the moment
+    they land. The score is not wrong — it is the best reading available — but
+    a reader has to be told it is provisional, and `score` is the only stage
+    positioned to say so before the number is written.
+    """
+    rows = conn.execute(_UNRECONCILED_SQL).fetchall()
+    return [
+        UnreconciledBatch(
+            batch_id=int(row["id"]),
+            provider_batch_id=row["provider_batch_id"],
+            purpose=str(row["purpose"]),
+            status=str(row["status"]),
+            submitted_at=row["submitted_at"],
+            domains=tuple(sorted(d for d in (row["domains"] or "").split(",") if d)),
+        )
+        for row in rows
+    ]
+
+
 def run(
     conn: sqlite3.Connection,
     phase: int = 1,
@@ -439,7 +496,9 @@ __all__ = [
     "ReviewFlag",
     "ScoreResult",
     "ScoreStage",
+    "UnreconciledBatch",
     "band_of",
     "evaluate",
     "run",
+    "unreconciled_batches",
 ]
