@@ -967,3 +967,120 @@ class TestSignalProvenance(ExtractTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheManufacturerFlag(ExtractTestCase):
+    """M1.121(b). The false-positive class `--source websearch` produces.
+
+    Its first five runs put `bosch-professional.com`, `makita.de` and
+    `metabo.com` in band C on `opp.no_blog +25` — a rule for a small shop with
+    no content strategy, firing on manufacturers whose marketing does not live
+    on that domain.
+
+    **Three conditions, and every test here is about one of them not holding.**
+    A flag that fires on a real shop is worse than no flag: it sends a person
+    to look at something that was fine.
+    """
+
+    SHOP = (
+        "<html><body><a href='/warenkorb'>Warenkorb</a>"
+        "<h1>Unser Shop</h1></body></html>"
+    )
+    MANUFACTURER = (
+        "<html><body><h1>Wir fertigen seit 1923</h1>"
+        "<a href='/haendlersuche'>Händler finden</a></body></html>"
+    )
+
+    def websearch_company(self, domain: str = "muster.de") -> int:
+        cursor = self.conn.execute(
+            "INSERT INTO company (domain, discovery_source, discovery_query, "
+            "discovered_at) VALUES (?, 'llm_websearch', 'Werkzeug DE', "
+            "'2026-08-15T00:00:00Z')",
+            (domain,),
+        )
+        return int(cursor.lastrowid)
+
+    def flags(self, company_id: int) -> list[str]:
+        return [
+            r[0]
+            for r in self.conn.execute(
+                "SELECT reason FROM review_flag WHERE company_id = ?", (company_id,)
+            )
+        ]
+
+    def test_a_websearch_row_with_no_cart_and_no_products_is_flagged(self) -> None:
+        company_id = self.websearch_company()
+        self.artifact(company_id, "homepage", "https://muster.de/", self.MANUFACTURER)
+        result = self.extract(company_id)
+        self.assertIn("manufacturer_not_shop", self.flags(company_id))
+        self.assertIn("manufacturer_not_shop", result.review_flags)
+
+    def test_it_is_a_flag_and_never_an_exclusion(self) -> None:
+        """A flag is reversible in one click; an exclusion and a rubric change
+        are not, and both would act on one run's evidence."""
+        company_id = self.websearch_company()
+        self.artifact(company_id, "homepage", "https://muster.de/", self.MANUFACTURER)
+        self.extract(company_id)
+        excluded = self.conn.execute(
+            "SELECT excluded FROM company WHERE id = ?", (company_id,)
+        ).fetchone()[0]
+        self.assertEqual(excluded, 0)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT needs_review FROM company WHERE id = ?", (company_id,)
+            ).fetchone()[0],
+            1,
+            "it must reach the queue a human reads (M1.41)",
+        )
+
+    def test_it_does_not_block_contact(self) -> None:
+        """`manufacturer_not_shop` says *this may not be a shop*, not *the
+        score is too high* — which is what `contact_blocking_reason` means."""
+        company_id = self.websearch_company()
+        self.artifact(company_id, "homepage", "https://muster.de/", self.MANUFACTURER)
+        self.extract(company_id)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT contact_blocked FROM company WHERE id = ?", (company_id,)
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_a_cart_marker_anywhere_on_the_homepage_prevents_it(self) -> None:
+        company_id = self.websearch_company()
+        self.artifact(company_id, "homepage", "https://muster.de/", self.SHOP)
+        self.extract(company_id)
+        self.assertNotIn("manufacturer_not_shop", self.flags(company_id))
+
+    def test_a_seeded_company_is_never_flagged_however_quiet_its_homepage(
+        self,
+    ) -> None:
+        """The origin is part of the RULE. The claim is *this source returns
+        manufacturers*; firing on seed rows would be a different and
+        unmeasured claim about the corpus at large."""
+        company_id = self.company()
+        self.artifact(company_id, "homepage", "https://muster.de/", self.MANUFACTURER)
+        self.extract(company_id)
+        self.assertNotIn("manufacturer_not_shop", self.flags(company_id))
+
+    def test_products_in_the_catalogue_prevent_it_even_with_no_cart_marker(
+        self,
+    ) -> None:
+        company_id = self.websearch_company()
+        self.artifact(company_id, "homepage", "https://muster.de/", self.MANUFACTURER)
+        self.artifact(company_id, "sitemap", "https://muster.de/sitemap.xml", SITEMAP)
+        self.extract(company_id)
+        self.assertGreater(
+            self.signals(company_id)["catalog.product_url_count"]["value_num"], 0
+        )
+        self.assertNotIn("manufacturer_not_shop", self.flags(company_id))
+
+    def test_platform_absence_alone_is_never_the_reason(self) -> None:
+        """M1.11: `detect_platform` returns `None` for Shopware 5 and its own
+        docstring forbids reading that as *not a shop*. A homepage with no
+        platform signature but a visible cart must not be flagged."""
+        company_id = self.websearch_company()
+        self.artifact(company_id, "homepage", "https://muster.de/", self.SHOP)
+        self.extract(company_id)
+        self.assertNotIn("platform.detected", self.signals(company_id))
+        self.assertNotIn("manufacturer_not_shop", self.flags(company_id))

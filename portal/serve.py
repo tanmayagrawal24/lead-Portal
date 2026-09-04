@@ -39,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from portal import brief, config, db, lifecycle, migrate
+from portal import status as status_mod
 from portal.artifacts import ArtifactStore
 from portal.leadlist import Filters, LeadList, assert_evidence_reachable
 
@@ -187,6 +188,22 @@ def create_app(
             total=len(lead_list.leads()),
             filters=filters,
             facets=lead_list.facets(),
+            schema_version=version,
+        )
+
+    @app.get("/status", response_class=HTMLResponse)
+    def status_page(request: Request) -> HTMLResponse:
+        """§9's second page: what the database says about itself (M1.120).
+
+        **Read-only, and no provider call.** Every figure is SELECTed by
+        `status.read`; the "next step" list is sentences with commands in
+        `<code>`, never buttons, so that spending stays behind a typed
+        `--submit` (M1.102).
+        """
+        return render(
+            "status.html",
+            request,
+            status=status_mod.read(conn),
             schema_version=version,
         )
 

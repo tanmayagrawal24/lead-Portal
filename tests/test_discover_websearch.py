@@ -374,3 +374,62 @@ class TheCommandSurface(RunTestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM run").fetchone()[0], 0)
+
+
+class TheAnswersThatCostTwelveOfTwentyFiveCalls(unittest.TestCase):
+    """M1.121(a). Three answer shapes taken from the first real discovery run.
+
+    None of them is malformed JSON. Every one of them defeated the original
+    parser, which took the greedy first-`{`-to-last-`}` span and handed it
+    straight to `json.loads` — so a source list after the object, or a second
+    object anywhere in the text, made the whole call unparseable. **Half the
+    spend of the first five runs bought nothing for this reason alone.**
+
+    Retry-free on purpose: a retry would have hidden the defect behind a second
+    paid call, which is the expensive way to not fix something.
+    """
+
+    PREAMBLE = (
+        "Gerne! Ich habe im Web recherchiert und folgende Shops gefunden:\n\n"
+        '{"shops": [{"domain": "beispiel.de", "name": "Beispiel"}]}'
+    )
+    FENCED = '```json\n{"shops": [{"domain": "beispiel.de", "name": "Beispiel"}]}\n```'
+    TRAILING_SOURCES = (
+        '{"shops": [{"domain": "beispiel.de", "name": "Beispiel"}]}\n\n'
+        "Quellen:\n"
+        '[1] {"title": "Beste Shops 2026", "url": "https://example.com/a"}\n'
+        '[2] {"title": "Shop-Vergleich", "url": "https://example.com/b"}'
+    )
+
+    def test_all_three_now_parse_to_the_same_shop(self) -> None:
+        for label, text in (
+            ("preamble", self.PREAMBLE),
+            ("fenced code block", self.FENCED),
+            ("source list after the JSON", self.TRAILING_SOURCES),
+        ):
+            with self.subTest(shape=label):
+                self.assertEqual(
+                    discover_llm.parse_shops(text), [("beispiel.de", "Beispiel")]
+                )
+
+    def test_the_object_finder_is_shared_with_ai_visibility(self) -> None:
+        """One expression. The drift between two copies is what this cost."""
+        source = Path(discover_llm.__file__).read_text(encoding="utf-8")
+        self.assertIn("llm.parse_last_json_object", source)
+        self.assertNotIn("json.loads", source)
+
+    def test_prose_with_no_object_at_all_is_still_none(self) -> None:
+        """The lenient parser must not become a parser that invents a result:
+        a call that returned no JSON was paid for and yielded nothing, and that
+        stays distinguishable from an honest empty list (M1.59)."""
+        self.assertIsNone(discover_llm.parse_shops("Ich konnte nichts finden."))
+        self.assertEqual(discover_llm.parse_shops('{"shops": []}'), [])
+
+    def test_the_prompt_names_the_three_shapes_it_must_not_produce(self) -> None:
+        """The prompt is the cheaper half of the fix; the parser is the half
+        that has to hold. Both shipped, and this asserts the cheaper half is
+        actually about the measured failures."""
+        prompt = discover_llm.SYSTEM_PROMPT
+        self.assertIn("beginnt mit {", prompt)
+        self.assertIn("Code-Fences", prompt)
+        self.assertIn("Quellenangaben", prompt)

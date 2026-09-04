@@ -244,7 +244,63 @@ class ExtractStage:
         located = self._catalog_and_blog(result, site, artifacts, homepage)
         self._blog_signals(result, artifacts, located, homepage)
         self._product_schema(result, artifacts, homepage)
+        self._manufacturer_check(result, company_id, homepage, homepage_html)
         return result
+
+    def _manufacturer_check(
+        self,
+        result: ExtractResult,
+        company_id: int,
+        page: _Artifact,
+        html: str,
+    ) -> None:
+        """M1.121(b). The false-positive class `--source websearch` produces.
+
+        Its first five runs put `bosch-professional.com`, `makita.de` and
+        `metabo.com` in band C on `opp.no_blog +25` — a rule for a small shop
+        with no content strategy, firing on manufacturers whose marketing does
+        not live on that domain.
+
+        **Three conditions, and the origin is one of them.** The claim being
+        made is *"this source returns manufacturers"*, so the flag is raised
+        only for `discovery_source = 'llm_websearch'`; a seeded company with a
+        quiet homepage is a different, unmeasured claim. The other two are a
+        POSITIVE absence — no cart or checkout marker anywhere on the homepage,
+        and no product URL located in the catalogue — because
+        `detect_platform` returning `None` explicitly does not mean *not a
+        shop* (M1.11) and cannot carry this.
+
+        **A flag, never an exclusion and never a score.** A flag is reversible
+        in one click by a person who can disagree; a rubric change moves every
+        score in the corpus, including the ones already reviewed. Both would be
+        acting on one run's evidence from a source one day old.
+        """
+        row = self.conn.execute(
+            "SELECT discovery_source FROM company WHERE id = ?", (company_id,)
+        ).fetchone()
+        if row is None or row["discovery_source"] != "llm_websearch":
+            return
+        if parsers.cart_signal(html) is not None:
+            return
+        products = result.signals.get("catalog.product_url_count")
+        if isinstance(products, int) and products > 0:
+            return
+        self._write(
+            result,
+            "shop.cart_absent",
+            page,
+            num=1,
+            text=(
+                "no cart or checkout marker on the homepage and no product URL "
+                "in the catalogue; discovered by llm_websearch, which returns "
+                "manufacturers alongside shops (M1.121)"
+            ),
+        )
+        self._raise_review_flag(result, "manufacturer_not_shop")
+        result.notes.append(
+            "no cart/checkout marker and no product URL — possibly a "
+            "manufacturer rather than a shop (M1.121); flagged, not excluded"
+        )
 
     # ── homepage ────────────────────────────────────────────────────────
 

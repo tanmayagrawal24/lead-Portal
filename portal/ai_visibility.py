@@ -48,7 +48,6 @@ Its own `run.stage = 'ai_check'`, for M1.101(a)'s reason exactly.
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -233,31 +232,14 @@ def mentioned(text: str, terms: Sequence[str]) -> bool:
 def parse_brands(text: str) -> tuple[tuple[str, ...], bool]:
     """The `brands` list out of the answer, and whether it parsed at all.
 
-    Lenient on purpose: a model with a search tool sometimes narrates before
-    the JSON. The *last* object in the text is taken. Where nothing parses the
-    query still ran and is still paid for; the competitor list is simply empty
-    and `brands_parsed` says so."""
-    match = None
-    for match in _JSON_OBJECT.finditer(text):
-        pass
-    if match is None:
-        return (), False
-    candidate = match.group(0)
-    # Trim to the last balanced object if the greedy match overshot.
-    depth, end = 0, None
-    for index, char in enumerate(candidate):
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                end = index + 1
-                break
-    if end is not None:
-        candidate = candidate[:end]
-    try:
-        payload = json.loads(candidate)
-    except ValueError:
+    The object-finding half is `llm.parse_last_json_object` (M1.121) — it used
+    to live here, and `discover_llm` grew a weaker copy that cost 12 of 25
+    calls in the first real discovery run. One expression now.
+
+    Where nothing parses the query still ran and is still paid for; the
+    competitor list is simply empty and `brands_parsed` says so."""
+    payload = llm.parse_last_json_object(text)
+    if payload is None:
         return (), False
     brands = payload.get("brands") if isinstance(payload, dict) else None
     if not isinstance(brands, list):

@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lead Portal</title>
+<script src="/static/htmx.min.js"></script>
+<style>
+  :root {
+    --ink: #14181d; --muted: #6b7684; --line: #dfe4ea; --bg: #f7f8fa;
+    --card: #ffffff; --accent: #1b4d8f; --warn: #8a5300; --bad: #a11b1b;
+    --abstain: #6a4b9e; --good: #1d6b3f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  header { padding: 18px 24px 12px; border-bottom: 1px solid var(--line); background: var(--card); }
+  h1 { margin: 0 0 2px; font-size: 19px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; }
+  main { padding: 18px 24px 60px; }
+
+  form.filters {
+    display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end;
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px 14px; margin-bottom: 14px;
+  }
+  form.filters label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  form.filters select { font: inherit; padding: 4px 6px; border: 1px solid var(--line);
+    border-radius: 4px; background: #fff; min-width: 120px; }
+  form.filters .reset { margin-left: auto; font-size: 13px; color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--card);
+    border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); font-weight: 600; padding: 9px 10px; border-bottom: 1px solid var(--line);
+    background: #fbfcfd; }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr.summary:hover td { background: #fbfcfd; }
+  tr.summary.excluded td { opacity: .55; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.detail-cell { padding: 0; border-bottom: 0; }
+  td.detail-cell:empty { display: none; }
+
+  .band { display: inline-block; min-width: 20px; text-align: center; font-weight: 700;
+    border-radius: 3px; padding: 1px 5px; font-size: 12px; }
+  .band-A { background: #dff3e6; color: var(--good); }
+  .band-B { background: #e3eefb; color: var(--accent); }
+  .band-C { background: #fdf0d9; color: var(--warn); }
+  .band-D { background: #eceff2; color: var(--muted); }
+  .band-none { background: repeating-linear-gradient(45deg,#eee,#eee 3px,#f7f7f7 3px,#f7f7f7 6px);
+    color: var(--muted); }
+
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+    border: 1px solid; margin-right: 4px; white-space: nowrap; }
+  .tag-review { color: var(--warn); border-color: #e6c68a; background: #fdf6e9; }
+  .tag-block  { color: var(--bad);  border-color: #e0a3a3; background: #fceaea; }
+  .tag-excl   { color: var(--muted);border-color: var(--line); background: #f2f4f6; }
+  .tag-stop   { color: var(--muted);border-color: var(--line); background: #f2f4f6; }
+  .tag-p2     { color: var(--good); border-color: #a8d5bb; background: #eaf6ef; }
+
+  button.toggle { font: inherit; background: none; border: 1px solid var(--line);
+    border-radius: 4px; color: var(--accent); cursor: pointer; padding: 1px 7px; }
+  button.toggle:hover { background: #eef3fa; }
+
+  .muted { color: var(--muted); }
+  .hook { color: var(--muted); font-size: 12.5px; }
+  code { font: 12px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  a { color: var(--accent); }
+
+  /* ── expanded detail ─────────────────────────────────────────── */
+  .detail { background: #fbfcfd; border-top: 2px solid var(--accent);
+    border-bottom: 1px solid var(--line); padding: 14px 16px 18px; }
+  .detail h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--muted); }
+  .detail section + section { margin-top: 18px; }
+  .detail .close { float: right; }
+
+  ul.components { list-style: none; margin: 0; padding: 0; }
+  ul.components > li { display: grid; grid-template-columns: 74px 1fr; gap: 10px;
+    padding: 8px 0; border-top: 1px solid var(--line); }
+  ul.components > li:first-child { border-top: 0; }
+  .pts { font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; }
+  .pts.plus { color: var(--good); }
+  .pts.minus { color: var(--bad); }
+  .pts.abstain { color: var(--abstain); font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .04em; }
+  li.abstained { background: #f8f5fc; margin: 0 -8px; padding-left: 8px; padding-right: 8px; }
+  li.abstained .reason { color: #3f2f5c; }
+  .rule { font-size: 11.5px; color: var(--muted); }
+  .reason { margin: 1px 0 4px; }
+
+  ul.evidence { list-style: none; margin: 3px 0 0; padding: 0; font-size: 12px; }
+  ul.evidence li { display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline;
+    padding: 1px 0; color: var(--muted); }
+  ul.evidence .k { font: 11.5px ui-monospace, Menlo, monospace; color: #4a5460; }
+  ul.evidence .v { color: var(--ink); }
+  ul.evidence .v.llm { border-bottom: 1px dotted var(--accent); cursor: help; }
+  ul.evidence .v.unverified { color: var(--bad); font-weight: 600;
+    border-bottom: 1px dotted var(--bad); }
+
+  .flag { border: 1px solid var(--line); border-radius: 5px; background: #fff;
+    padding: 10px 12px; margin-bottom: 8px; }
+  .flag.blocking { border-color: #e0a3a3; background: #fffafa; }
+  .flag .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .flag .name { font-weight: 600; }
+  .flag .note { margin: 5px 0 0; }
+  .flag .rationale { margin: 6px 0 0; color: var(--bad); font-size: 12.5px; }
+  .flag form { display: flex; gap: 6px; margin-top: 8px; }
+  .flag input[type=text] { flex: 1; font: inherit; padding: 4px 7px;
+    border: 1px solid var(--line); border-radius: 4px; }
+  .flag button { font: inherit; padding: 4px 12px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff; }
+
+  .blockbox { border: 1px solid #e0a3a3; background: #fceaea; border-radius: 5px;
+    padding: 10px 12px; margin-bottom: 12px; }
+  .blockbox strong { color: var(--bad); }
+  .notice { border: 1px solid var(--line); background: #fff; border-radius: 5px;
+    padding: 10px 12px; color: var(--muted); }
+</style>
+<style>
+  /* /status only. Same tokens as the lead list — this is the same tool. */
+  .status-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
+  section.card { background: var(--card); border: 1px solid var(--line);
+    border-radius: 6px; padding: 14px 16px; }
+  section.card > h2 { margin: 0 0 4px; font-size: 15px; letter-spacing: -0.01em; }
+  section.card > p.note { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; }
+  .gauge { font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .gauge .of { color: var(--muted); font-size: 14px; font-weight: 400; }
+  .bar { height: 6px; background: #eceff2; border-radius: 3px; overflow: hidden;
+    margin: 8px 0 4px; max-width: 380px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  table.status { font-size: 12.5px; }
+  table.status td, table.status th { padding: 6px 8px; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+    border: 1px solid; white-space: nowrap; }
+  .pill-ok   { color: var(--good); border-color: #a8d6bb; background: #eef8f2; }
+  .pill-open { color: var(--warn); border-color: #e6c68a; background: #fdf6e9; }
+  .pill-bad  { color: var(--bad);  border-color: #e0a3a3; background: #fceaea; }
+  .pill-rel  { color: var(--abstain); border-color: #c3b0dd; background: #f4f0fa; }
+  ul.steps { list-style: none; margin: 0; padding: 0; }
+  ul.steps li { padding: 9px 0; border-bottom: 1px solid var(--line); }
+  ul.steps li:last-child { border-bottom: 0; }
+  ul.steps code { display: inline-block; margin-top: 5px; font-size: 12.5px;
+    background: #f2f4f6; border: 1px solid var(--line); border-radius: 4px;
+    padding: 2px 7px; font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; }
+  .counts { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; padding: 0;
+    list-style: none; }
+  .counts li { font-size: 13px; }
+  .counts .n { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .backlink { font-size: 13px; color: var(--accent); }
+  .deadline { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Status</h1>
+  <div class="sub">
+    <a class="backlink" href="/">&larr; Zur Leadliste</a> ·
+    Schema {{ schema_version }} · nur gelesen, nichts wird ausgeführt
+  </div>
+</header>
+
+<main class="status-grid">
+
+  <section class="card">
+    <h2>Ausgaben — §7 Kontrolle 2</h2>
+    <p class="note">Summe über {{ status.window_days }} rollierende Tage. Jede Zahl ist gelesen, keine ist hier berechnet.</p>
+    <div class="gauge">
+      ${{ '%.4f'|format(status.spend_usd) }}
+      <span class="of">von ${{ '%.2f'|format(status.ceiling_usd) }}</span>
+    </div>
+    <div class="bar"><i style="width: {{ [status.spend_usd / status.ceiling_usd * 100, 100]|min }}%"></i></div>
+    <p class="note">
+      ${{ '%.4f'|format(status.headroom_usd) }} Spielraum ·
+      §7 Kontrolle 3 begrenzt einen einzelnen Lauf auf ${{ '%.2f'|format(status.run_ceiling_usd) }}
+    </p>
+
+    <table class="status">
+      <thead><tr>
+        <th>Lauf</th><th>Stufe</th><th>Start</th><th>Ende</th><th>Zustand</th>
+        <th class="num">Firmen</th><th class="num">Suchen</th><th class="num">Places</th>
+        <th class="num">PageSpeed</th><th class="num">est_cost_usd</th>
+      </tr></thead>
+      <tbody>
+      {% for run in status.runs %}
+        <tr>
+          <td>{{ run.id }}</td>
+          <td>{{ run.stage }}</td>
+          <td>{{ run.started_at }}</td>
+          <td>{{ run.finished_at or '—' }}</td>
+          <td>
+            {% if run.aborted_reason %}
+              <span class="pill pill-bad" title="{{ run.aborted_reason }}">abgebrochen</span>
+            {% elif run.finished_at %}
+              <span class="pill pill-ok">abgeschlossen</span>
+            {% else %}
+              <span class="pill pill-open">offen</span>
+            {% endif %}
+          </td>
+          <td class="num">{{ run.companies_seen if run.companies_seen is not none else '—' }}</td>
+          <td class="num">{{ run.web_searches or 0 }}</td>
+          <td class="num">{{ run.places_calls or 0 }}</td>
+          <td class="num">{{ run.pagespeed_calls or 0 }}</td>
+          <td class="num">{{ '%.6f'|format(run.est_cost_usd) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Batches</h2>
+    <p class="note">
+      Ein abgeschickter Batch ist bezahlt, ob seine Ergebnisse gelesen werden oder nicht (§5.6).
+    </p>
+    {% if not status.batches %}
+      <p class="note">Keine Batch-Zeilen.</p>
+    {% else %}
+    <table class="status">
+      <thead><tr>
+        <th>#</th><th>Provider-ID</th><th>Zweck</th><th>Status</th>
+        <th class="num">Anfragen</th><th class="num">reserviert</th><th class="num">gemessen</th>
+        <th>abgeschickt</th><th>eingesammelt</th><th>Frist / Freigabegrund</th>
+      </tr></thead>
+      <tbody>
+      {% for batch in status.batches %}
+        <tr>
+          <td>{{ batch.id }}</td>
+          <td>{{ batch.provider_batch_id or '—' }}</td>
+          <td>{{ batch.purpose }}</td>
+          <td>
+            {% if batch.status == 'reconciled' %}<span class="pill pill-ok">{{ batch.status }}</span>
+            {% elif batch.status == 'released' %}<span class="pill pill-rel">{{ batch.status }}</span>
+            {% elif batch.status in ('failed', 'expired', 'balance_exhausted') %}<span class="pill pill-bad">{{ batch.status }}</span>
+            {% else %}<span class="pill pill-open">{{ batch.status }}</span>{% endif %}
+          </td>
+          <td class="num">{{ batch.request_count }}</td>
+          <td class="num">{{ '%.6f'|format(batch.est_cost_usd) }}</td>
+          <td class="num">{{ '%.6f'|format(batch.actual_cost_usd) if batch.actual_cost_usd is not none else '—' }}</td>
+          <td>{{ batch.submitted_at or '—' }}</td>
+          <td>{{ batch.reconciled_at or '—' }}</td>
+          <td>
+            {% if batch.release_reason %}
+              {{ batch.release_reason }}
+            {% elif batch.needs_reconcile %}
+              {% if batch.retrieval_deadline %}
+                <span class="deadline">abrufbar bis {{ batch.retrieval_deadline }}</span><br>
+              {% endif %}
+              <code>portal reconcile</code>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Bestand</h2>
+    <p class="note">{{ status.companies }} Firmen, davon {{ status.excluded }} ausgeschlossen.</p>
+
+    <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:12px 0 6px">Nach Herkunft</h3>
+    <ul class="counts">
+      {% for row in status.by_source %}
+        <li><span class="n">{{ row.n }}</span> {{ row.label }}</li>
+      {% endfor %}
+    </ul>
+
+    <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:12px 0 6px">Nach Suchanfrage</h3>
+    <table class="status">
+      <thead><tr><th>Suchanfrage</th><th class="num">Firmen</th></tr></thead>
+      <tbody>
+      {% for row in status.by_query %}
+        <tr><td>{{ row.label }}</td><td class="num">{{ row.n }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:12px 0 6px">Abdeckung</h3>
+    <ul class="counts">
+      {% for row in status.coverage %}
+        <li><span class="n">{{ row.n }}</span> {{ row.label }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>Offene Prüfmarkierungen</h2>
+    <p class="note">
+      §5.4 darf nur deshalb sagen, dass nichts Verwertbares stillschweigend verworfen wird,
+      weil diese Liste gelesen wird (M1.41).
+    </p>
+    {% if not status.flags %}
+      <p class="note">Keine offenen Markierungen.</p>
+    {% else %}
+    <table class="status">
+      <thead><tr><th>Grund</th><th>Bezeichnung</th><th class="num">Anzahl</th></tr></thead>
+      <tbody>
+      {% for row in status.flags %}
+        <tr>
+          <td><a href="{{ row.href }}">{{ row.label }}</a></td>
+          <td>{{ flag_labels.get(row.label, row.label) }}</td>
+          <td class="num">{{ row.n }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Nächster Schritt</h2>
+    <p class="note">
+      Sätze mit Befehlen, keine Schaltflächen — und das ist eine Entscheidung, keine
+      Gestaltungsfrage (M1.102). Ausgaben bleiben hinter einem getippten
+      <code>--submit</code>; eine Schaltfläche wäre ein bezahlter Aufruf einen
+      Fehlklick entfernt.
+    </p>
+    <ul class="steps">
+      {% for step in status.next_steps %}
+        <li>{{ step.sentence }}<br><code>{{ step.command }}</code></li>
+      {% endfor %}
+    </ul>
+  </section>
+
+</main>
+</body>
+</html>
