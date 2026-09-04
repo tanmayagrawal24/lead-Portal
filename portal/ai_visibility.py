@@ -82,12 +82,6 @@ SEARCHES_PER_QUERY = 1
 #: enough that a runaway answer cannot cost more than a cent.
 MAX_OUTPUT_TOKENS = 800
 
-#: §7 control 3's per-run ceiling, default `$5.00`. Kept here rather than in
-#: `ledger.py`, whose docstring says why: the ledger holds the *runaway* bound
-#: (control 2) and this is the one *meant to bite occasionally*. At ~$0.06 a
-#: company it bites at ~80 companies, which is a run worth a second look.
-PER_RUN_CEILING_USD = 5.00
-
 #: Fixed templates. `{term}` is the only variable, so the literal query text
 #: recorded in `ai.query_text` is reproducible from the profile alone.
 QUERY_TEMPLATES: tuple[str, ...] = ("beste {term}", "{term} Test", "{term} kaufen")
@@ -116,14 +110,15 @@ _NON_WORD = re.compile(r"[^0-9a-zäöüß]+")
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 
-class RunCeilingExceeded(RuntimeError):
-    """§7 control 3: the run's own estimate is over `PER_RUN_CEILING_USD`.
-
-    Raised **before** the run row exists, so nothing is reserved. Distinct from
-    `ledger.CeilingExceeded` (the 30-day window) because they send an operator
-    to different questions: *is this run too big?* versus *what went wrong this
-    month?*
-    """
+#: §7 control 3's refusal, imported rather than redefined (M1.109). This module
+#: used to declare its own `RunCeilingExceeded` and its own `PER_RUN_CEILING_USD
+#: = 5.00` beside `ledger.MONTHLY_CEILING_USD`, which made one control two
+#: expressions — M1.42's shape, applied to a policy bound instead of to a
+#: corpus. The ceiling is now `ledger.RUN_CEILING_USD` and this name is the same
+#: class `charge_run` raises, so `except RunCeilingExceeded` catches control 3
+#: whether it fired here (against a whole run's estimate, before the `run` row
+#: exists and nothing is reserved) or at `extract_p2`'s reservation write.
+RunCeilingExceeded = ledger.RunCeilingExceeded
 
 
 @dataclass(frozen=True)
@@ -489,7 +484,7 @@ def run(
     if not plans:
         raise ValueError("nothing to check — every company was withheld")
     if per_run_ceiling_usd is None:
-        per_run_ceiling_usd = PER_RUN_CEILING_USD
+        per_run_ceiling_usd = ledger.RUN_CEILING_USD
 
     prompt_tokens = provider.token_counter()(
         system=SYSTEM_PROMPT, user_text=plans[0].queries[0]
@@ -601,7 +596,6 @@ __all__ = [
     "MAX_OUTPUT_TOKENS",
     "MAX_QUERIES",
     "MIN_QUERIES",
-    "PER_RUN_CEILING_USD",
     "QUERY_TEMPLATES",
     "SEARCHES_PER_QUERY",
     "SEARCH_CONTEXT_AS_OF",

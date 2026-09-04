@@ -344,7 +344,8 @@ class AiCheckCliTestCase(unittest.TestCase):
     def test_run_ceiling_refuses_before_any_row(self) -> None:
         self.company("zahn.de")
         provider = FakeProvider({})
-        with mock.patch.object(av, "PER_RUN_CEILING_USD", 0.0001):
+        # Unit 11 (M1.109): one ceiling constant, and it lives in `ledger`.
+        with mock.patch.object(ledger, "RUN_CEILING_USD", 0.0001):
             code, _, err = self.run_cli(submit=True, provider=provider)
         self.assertEqual(code, 2)
         self.assertIn("control 3", err)

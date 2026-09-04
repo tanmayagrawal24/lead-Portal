@@ -247,6 +247,54 @@ class ThePaidPath(ExtractP2CliTestCase):
         # No new run row either — the refusal happened before one was minted.
         self.assertEqual(len(self.p2_runs()), 1)
 
+    def test_control_3_refuses_at_the_cli_with_nothing_on_the_books(self) -> None:
+        """§7 control 3 wired into the command (M1.109), not just the write.
+
+        The ceiling is enforced inside `_charge_run`, which is what makes it
+        unbypassable — but before Unit 11 nothing caught the refusal here, so an
+        over-ceiling run left `cmd_extract_p2` as a traceback. The two things
+        this pins are the operator-facing half: the run is **aborted** rather
+        than left open (007/M1.39), and the exit is 2 with the reservation
+        named.
+        """
+        self.company("muster.de")
+        provider = FakeProvider()
+        # A ceiling below any real reservation. Control 2 is untouched and
+        # still clears — the two bound different things.
+        with mock.patch.object(ledger, "RUN_CEILING_USD", 0.0):
+            code, text = self.submit(provider)
+
+        self.assertEqual(code, 2, text)
+        self.assertIn("§7 control 3", text)
+        # Control 2 was consulted first and said yes, so the run was priced.
+        self.assertGreater(provider.counted, 0)
+        # Nothing submitted, nothing on the books: M1.72's transaction rolled
+        # the batch row back with the refusal.
+        self.assertEqual(provider.submitted, [])
+        self.assertEqual(self.batches(), [])
+        (run,) = self.p2_runs()
+        self.assertAlmostEqual(run["est_cost_usd"] or 0.0, 0.0)
+        # The run row exists (it is minted before the reservation) and must not
+        # be left open, or `company_profile` declines a stage that never spent.
+        self.assertIsNotNone(run["aborted_reason"])
+        self.assertIn("control 3", run["aborted_reason"])
+
+    def test_the_per_run_bound_is_announced_before_the_call(self) -> None:
+        """It cannot be checked before `reserve_and_submit` — the reservation is
+        priced from `count_tokens` inside it — so what the command owes the
+        operator is the bound, named before the spend."""
+        self.company("muster.de")
+        code, text = self.submit(FakeProvider())
+        self.assertEqual(code, 0, text)
+        self.assertIn("§7 control 2", text)
+        self.assertIn("§7 control 3", text)
+        self.assertIn(f"${ledger.RUN_CEILING_USD:.2f}", text)
+        self.assertLess(
+            text.index("§7 control 3"),
+            text.index("reserved $"),
+            "control 3's bound must be printed before the reservation it bounds",
+        )
+
     def test_a_stopped_company_is_not_sent(self) -> None:
         self.company("in.de")
         self.company("stopped.de", admitted=0)

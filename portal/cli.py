@@ -274,10 +274,14 @@ def cmd_extract_p2(
     why, no request, no key, no reservation. `--dry-run` says the same thing
     explicitly. **`--submit` is the written authorisation, expressed at the
     command line**, and it is the only way this command spends: it takes §7
-    control 2's clearance first, then makes control 4's reservation and the
-    submission in `reserve_and_submit`'s order (M1.72 — the two writes commit
-    together, before `create` is called). `--submit --dry-run` is refused as a
-    contradiction rather than resolved either way.
+    control 2's clearance first, prints the per-run bound control 3 will hold
+    it to, then makes control 4's reservation and the submission in
+    `reserve_and_submit`'s order (M1.72 — the two writes commit together,
+    before `create` is called). **Control 3 refuses inside that transaction
+    (M1.109)**, so an over-ceiling run leaves no batch row and no charge, and
+    this function turns the refusal into exit 2 with the reservation named
+    rather than a traceback. `--submit --dry-run` is refused as a contradiction
+    rather than resolved either way.
 
     `provider` is the injected seam (Unit 2's shape): `main` passes nothing and
     the Anthropic provider is built here, so a test can drive this exact path
@@ -359,6 +363,21 @@ def cmd_extract_p2(
             f"${clearance.ceiling_usd:.2f} used over {clearance.window_days} "
             f"rolling days; ${clearance.headroom_usd:.2f} headroom"
         )
+        # §7 control 3, announced before the call that enforces it (M1.109).
+        # The bound cannot be *checked* here: the reservation is priced from
+        # `count_tokens` inside `reserve_and_submit`, so the number this run
+        # would charge does not exist yet. What can be done here is the half
+        # that matters to an operator — say which ceiling this submission is
+        # about to be measured against, before it is measured — and catch the
+        # refusal below so control 3 firing is an exit code and a sentence
+        # rather than a traceback. Enforcement stays at the single write, in
+        # `_charge_run`, which is what makes it unbypassable.
+        print(
+            f"§7 control 3: this run is bounded at "
+            f"${ledger.RUN_CEILING_USD:.2f}; the reservation is measured and "
+            f"charged against it inside one transaction (M1.72), before "
+            f"anything is submitted"
+        )
 
         chosen = provider or llm_anthropic.AnthropicProvider(model=model)
         # The submitting run. `reconcile` writes this batch's signals under
@@ -379,6 +398,15 @@ def cmd_extract_p2(
                 purpose=purpose,
                 clearance=clearance,
             )
+        except ledger.RunCeilingExceeded as exc:
+            # Control 3 refused the reservation. `_commit_reservation` rolled
+            # its transaction back, so there is no batch row and no money
+            # counted — but the `run` row was inserted above and must not be
+            # left open, or `company_profile` would decline to serve a stage
+            # that never spent anything (007, M1.39).
+            _abort_run(conn, run_id, exc)
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
         except (llm_anthropic.MissingKeyError, llm_anthropic.BalanceExhausted) as exc:
             # `MissingKeyError` arrives from `count_tokens`, before the
             # reservation exists: nothing is on the books. `BalanceExhausted`
