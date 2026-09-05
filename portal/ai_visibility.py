@@ -255,11 +255,27 @@ def parse_brands(text: str) -> tuple[tuple[str, ...], bool]:
 # ── eligibility ──────────────────────────────────────────────────────────
 
 _PROFILE_SQL = """
-SELECT c.id AS company_id, c.domain, c.legal_name,
+SELECT c.id AS company_id, c.domain, c.legal_name, c.discovered_at,
+       c.contact_blocked,
        p.product_categories, p.one_line_offer, p.ai_checked_at, p.homepage_extracted
 FROM company c LEFT JOIN company_profile p ON p.company_id = c.id
 ORDER BY c.domain
 """
+
+#: The clock `--only-new` measures against: when this stage last ran at all.
+#: **The run's start, not any company's `ai_checked_at`** (M1.126) — a company
+#: checked in that run and a company merely present during it are the same
+#: thing for this purpose, and reading the per-company column instead would
+#: make "new" mean "never checked", which is what `--recheck` already governs.
+_LAST_AI_RUN_SQL = """
+SELECT MAX(started_at) FROM run WHERE stage = ? AND aborted_reason IS NULL
+"""
+
+
+def last_check_started_at(conn: sqlite3.Connection) -> str | None:
+    """When `ai-check` last started, or `None` if it never has."""
+    row = conn.execute(_LAST_AI_RUN_SQL, (STAGE,)).fetchone()
+    return None if row is None or row[0] is None else str(row[0])
 
 
 def prepare(
@@ -268,6 +284,8 @@ def prepare(
     queries: int = DEFAULT_QUERIES,
     recheck: bool = False,
     limit: int | None = None,
+    only_new: bool = False,
+    skip_blocked: bool = False,
 ) -> tuple[list[Plan], list[Withheld]]:
     """Who gets checked, and why everyone else does not — printed by the dry run.
 
@@ -281,7 +299,17 @@ def prepare(
     highest-scoring (M1.125). It is applied **after** everything above, so a
     company it defers is reported as eligible-but-out-of-budget rather than as
     ineligible — see `_apply_limit`.
+
+    `only_new` keeps companies discovered since this stage last ran — **all of
+    them when it has never run**, because on a corpus with no check at all
+    every company is new and the flag must not silently mean *none*. `skip_
+    blocked` drops companies whose contact is blocked: a §6.4 block says the
+    score is not safe to act on, and paying to learn more about a company
+    nobody may contact spends the budget on the one row it cannot be used for.
+    Both are budget filters like `limit`, and both say so in the reason
+    (M1.126).
     """
+    since = last_check_started_at(conn) if only_new else None
     admitted, withheld_gate = extract_p2.eligible_companies(conn)
     plans: list[Plan] = []
     withheld: list[Withheld] = []
@@ -293,6 +321,27 @@ def prepare(
             continue
         if company_id not in admitted:
             withheld.append(Withheld(company_id, domain, "not admitted by §5.4"))
+            continue
+        if skip_blocked and row["contact_blocked"]:
+            withheld.append(
+                Withheld(
+                    company_id,
+                    domain,
+                    "contact is blocked (§6.4) and --skip-blocked was passed — "
+                    "eligible, but the budget goes to companies that can be "
+                    "acted on",
+                )
+            )
+            continue
+        if since is not None and str(row["discovered_at"] or "") <= since:
+            withheld.append(
+                Withheld(
+                    company_id,
+                    domain,
+                    f"discovered {row['discovered_at']}, before the last "
+                    f"ai-check started ({since}), and --only-new was passed",
+                )
+            )
             continue
         if row["ai_checked_at"] and not recheck:
             withheld.append(

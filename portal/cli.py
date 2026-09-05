@@ -468,6 +468,8 @@ def cmd_ai_check(
     path: Path,
     *,
     limit: int | None = None,
+    only_new: bool = False,
+    skip_blocked: bool = False,
     dry_run: bool,
     submit: bool,
     queries: int = ai_visibility.DEFAULT_QUERIES,
@@ -526,7 +528,12 @@ def cmd_ai_check(
             )
             return 2
         plans, withheld = ai_visibility.prepare(
-            conn, queries=queries, recheck=recheck, limit=limit
+            conn,
+            queries=queries,
+            recheck=recheck,
+            limit=limit,
+            only_new=only_new,
+            skip_blocked=skip_blocked,
         )
         label = "--submit" if submit else "--dry-run"
         verb = "will be" if submit else "would be"
@@ -1921,6 +1928,18 @@ def build_parser() -> argparse.ArgumentParser:
         "listed as eligible-but-out-of-budget, not as ineligible",
     )
     ai_parser.add_argument(
+        "--only-new",
+        action="store_true",
+        help="only companies discovered since ai-check last ran; all of them "
+        "if it never has",
+    )
+    ai_parser.add_argument(
+        "--skip-blocked",
+        action="store_true",
+        help="drop companies whose contact is blocked (§6.4) — the budget goes "
+        "to companies that can be acted on",
+    )
+    ai_parser.add_argument(
         "--recheck",
         action="store_true",
         help="include companies already checked; a re-check is new spend",
@@ -2156,6 +2175,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ai_check(
             path,
             limit=args.limit,
+            only_new=args.only_new,
+            skip_blocked=args.skip_blocked,
             dry_run=args.dry_run,
             submit=args.submit,
             queries=args.queries,

@@ -156,5 +156,5 @@ was ~$0.06.
 concluded; the fix is unproven against the real API, so the next submit is
 still the first real one. The ledger is clean and nothing is double-counted.
 
-**Next free migration: `021`.** **Next free amendment: `M1.<126>`** (angle
+**Next free migration: `021`.** **Next free amendment: `M1.<127>`** (angle
 brackets per M1.94, so this line is not a citation).
