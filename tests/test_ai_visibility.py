@@ -184,6 +184,19 @@ class AiCheckCliTestCase(unittest.TestCase):
                 )
         return company_id
 
+    def score(self, company_id: int, total: int, phase: int) -> None:
+        run_id = self.conn.execute(
+            "INSERT INTO run (started_at, finished_at, stage) VALUES "
+            "('2026-09-05T00:00:00Z','2026-09-05T00:01:00Z','score-p2')"
+        ).lastrowid
+        self.conn.execute(
+            "INSERT INTO score (company_id, run_id, phase, total, band, "
+            "ruleset_version, computed_at) VALUES (?,?,?,?,'B','v3',"
+            "'2026-09-05T00:00:00Z')",
+            (company_id, run_id, phase, total),
+        )
+        self.conn.commit()
+
     def run_cli(self, **kwargs) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         kwargs.setdefault("dry_run", False)
@@ -393,19 +406,6 @@ class TheLimitFlag(AiCheckCliTestCase):
         self.score(company_id, total, phase)
         return company_id
 
-    def score(self, company_id: int, total: int, phase: int) -> None:
-        run_id = self.conn.execute(
-            "INSERT INTO run (started_at, finished_at, stage) VALUES "
-            "('2026-09-05T00:00:00Z','2026-09-05T00:01:00Z','score-p2')"
-        ).lastrowid
-        self.conn.execute(
-            "INSERT INTO score (company_id, run_id, phase, total, band, "
-            "ruleset_version, computed_at) VALUES (?,?,?,?,'B','v3',"
-            "'2026-09-05T00:00:00Z')",
-            (company_id, run_id, phase, total),
-        )
-        self.conn.commit()
-
     def test_it_keeps_the_highest_scoring(self) -> None:
         self.seed_scored("low.de", 10)
         self.seed_scored("high.de", 90)
@@ -480,3 +480,124 @@ class TheLimitFlag(AiCheckCliTestCase):
         code, _out, err = self.run_cli(dry_run=True, submit=False, limit=0)
         self.assertEqual(code, 2)
         self.assertIn("--limit must be 1 or more", err)
+
+
+class TheBudgetFilters(AiCheckCliTestCase):
+    """M1.126. `--only-new` and `--skip-blocked`.
+
+    Both are budget filters, like `--limit`: they say which companies this
+    run's money goes to, never which companies are checkable. So the tests
+    that matter are the ones about the reason text and about the two edges —
+    a corpus that has never been checked, and a block that is not a verdict on
+    eligibility.
+    """
+
+    def discovered(self, domain: str, when: str, *, blocked: bool = False) -> int:
+        company_id = self.company(domain)
+        self.conn.execute(
+            "UPDATE company SET discovered_at = ? WHERE id = ?", (when, company_id)
+        )
+        if blocked:
+            self.conn.execute(
+                "UPDATE company SET contact_blocked = 1 WHERE id = ?", (company_id,)
+            )
+        self.conn.commit()
+        return company_id
+
+    def ai_run(self, started_at: str) -> None:
+        self.conn.execute(
+            "INSERT INTO run (started_at, finished_at, stage) VALUES (?,?,?)",
+            (started_at, started_at, av.STAGE),
+        )
+        self.conn.commit()
+
+    # ── --only-new ──────────────────────────────────────────────────────
+
+    def test_with_no_previous_run_every_company_is_new(self) -> None:
+        """The edge that matters: on a corpus never checked, "new" must not
+        silently mean "none"."""
+        self.discovered("a.de", "2020-01-01T00:00:00Z")
+        self.discovered("b.de", "2026-09-01T00:00:00Z")
+        self.assertIsNone(av.last_check_started_at(self.conn))
+        plans, _ = av.prepare(self.conn, only_new=True)
+        self.assertEqual({p.domain for p in plans}, {"a.de", "b.de"})
+
+    def test_it_keeps_only_what_was_discovered_after_the_last_run(self) -> None:
+        self.discovered("old.de", "2026-08-01T00:00:00Z")
+        self.discovered("new.de", "2026-09-04T00:00:00Z")
+        self.ai_run("2026-09-01T00:00:00Z")
+        plans, withheld = av.prepare(self.conn, only_new=True)
+        self.assertEqual([p.domain for p in plans], ["new.de"])
+        self.assertTrue(
+            any(w.domain == "old.de" and "--only-new" in w.reason for w in withheld)
+        )
+
+    def test_a_company_discovered_during_the_last_run_is_not_new(self) -> None:
+        """Equal timestamps are not after. Off by one here re-checks a company
+        the previous run already paid for."""
+        self.discovered("same.de", "2026-09-01T00:00:00Z")
+        self.ai_run("2026-09-01T00:00:00Z")
+        plans, _ = av.prepare(self.conn, only_new=True)
+        self.assertEqual(plans, [])
+
+    def test_an_aborted_run_does_not_move_the_clock(self) -> None:
+        """An aborted run may have checked nothing; treating it as the
+        boundary would hide companies that were never actually reached."""
+        self.discovered("x.de", "2026-08-01T00:00:00Z")
+        self.conn.execute(
+            "INSERT INTO run (started_at, stage, aborted_reason) VALUES "
+            "('2026-09-01T00:00:00Z', ?, 'BalanceExhausted')",
+            (av.STAGE,),
+        )
+        self.conn.commit()
+        self.assertIsNone(av.last_check_started_at(self.conn))
+        plans, _ = av.prepare(self.conn, only_new=True)
+        self.assertEqual([p.domain for p in plans], ["x.de"])
+
+    def test_it_is_off_by_default(self) -> None:
+        self.discovered("old.de", "2026-08-01T00:00:00Z")
+        self.ai_run("2026-09-01T00:00:00Z")
+        plans, _ = av.prepare(self.conn)
+        self.assertEqual([p.domain for p in plans], ["old.de"])
+
+    # ── --skip-blocked ──────────────────────────────────────────────────
+
+    def test_a_blocked_company_is_dropped_when_asked(self) -> None:
+        self.discovered("ok.de", "2026-09-01T00:00:00Z")
+        self.discovered("blocked.de", "2026-09-01T00:00:00Z", blocked=True)
+        plans, withheld = av.prepare(self.conn, skip_blocked=True)
+        self.assertEqual([p.domain for p in plans], ["ok.de"])
+        reason = next(w.reason for w in withheld if w.domain == "blocked.de")
+        self.assertIn("--skip-blocked", reason)
+        self.assertIn("eligible", reason)
+
+    def test_a_block_is_not_a_verdict_on_eligibility(self) -> None:
+        """Without the flag a blocked company is still checked. §6.4 blocks
+        CONTACT; it does not say the company is unmeasurable."""
+        self.discovered("blocked.de", "2026-09-01T00:00:00Z", blocked=True)
+        plans, _ = av.prepare(self.conn)
+        self.assertEqual([p.domain for p in plans], ["blocked.de"])
+
+    def test_the_two_filters_compose_with_the_limit(self) -> None:
+        self.discovered("old.de", "2026-08-01T00:00:00Z")
+        self.discovered("blocked.de", "2026-09-04T00:00:00Z", blocked=True)
+        for i, dom in enumerate(("new1.de", "new2.de", "new3.de")):
+            company_id = self.discovered(dom, "2026-09-04T00:00:00Z")
+            self.score(company_id, 90 - i * 10, 2)
+        self.ai_run("2026-09-01T00:00:00Z")
+        plans, withheld = av.prepare(
+            self.conn, only_new=True, skip_blocked=True, limit=2
+        )
+        self.assertEqual({p.domain for p in plans}, {"new1.de", "new2.de"})
+        reasons = {w.domain: w.reason for w in withheld}
+        self.assertIn("--only-new", reasons["old.de"])
+        self.assertIn("--skip-blocked", reasons["blocked.de"])
+        self.assertIn("--limit", reasons["new3.de"])
+
+    def test_the_cli_accepts_both_flags(self) -> None:
+        self.discovered("ok.de", "2026-09-01T00:00:00Z")
+        code, out, err = self.run_cli(
+            dry_run=True, submit=False, only_new=True, skip_blocked=True
+        )
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("1 companies would be checked", out)
