@@ -376,3 +376,107 @@ class AiCheckCliTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheLimitFlag(AiCheckCliTestCase):
+    """M1.125. `--limit N` checks the top N eligible by score.
+
+    The property under test is not "N were sent" — it is **where the cap is
+    applied**. A company outside the budget must read as eligible-but-deferred,
+    never as ineligible: the first is a fact about this run's money, the second
+    is a claim about the company, and A7 spent four instances learning not to
+    confuse the two.
+    """
+
+    def seed_scored(self, domain: str, total: int, phase: int = 2) -> int:
+        company_id = self.company(domain)
+        self.score(company_id, total, phase)
+        return company_id
+
+    def score(self, company_id: int, total: int, phase: int) -> None:
+        run_id = self.conn.execute(
+            "INSERT INTO run (started_at, finished_at, stage) VALUES "
+            "('2026-09-05T00:00:00Z','2026-09-05T00:01:00Z','score-p2')"
+        ).lastrowid
+        self.conn.execute(
+            "INSERT INTO score (company_id, run_id, phase, total, band, "
+            "ruleset_version, computed_at) VALUES (?,?,?,?,'B','v3',"
+            "'2026-09-05T00:00:00Z')",
+            (company_id, run_id, phase, total),
+        )
+        self.conn.commit()
+
+    def test_it_keeps_the_highest_scoring(self) -> None:
+        self.seed_scored("low.de", 10)
+        self.seed_scored("high.de", 90)
+        self.seed_scored("mid.de", 50)
+        plans, _ = av.prepare(self.conn, limit=2)
+        self.assertEqual({p.domain for p in plans}, {"high.de", "mid.de"})
+
+    def test_the_deferred_are_withheld_as_budget_not_as_ineligible(self) -> None:
+        self.seed_scored("low.de", 10)
+        self.seed_scored("high.de", 90)
+        _, withheld = av.prepare(self.conn, limit=1)
+        deferred = [w for w in withheld if w.domain == "low.de"]
+        self.assertEqual(len(deferred), 1)
+        reason = deferred[0].reason
+        self.assertIn("--limit", reason)
+        self.assertIn("only about the budget", reason)
+        self.assertNotIn("not admitted", reason)
+
+    def test_phase_1_ranks_where_no_phase_2_exists(self) -> None:
+        self.seed_scored("p1only.de", 80, phase=1)
+        self.seed_scored("p2low.de", 20, phase=2)
+        plans, _ = av.prepare(self.conn, limit=1)
+        self.assertEqual([p.domain for p in plans], ["p1only.de"])
+
+    def test_phase_2_wins_over_phase_1_for_the_same_company(self) -> None:
+        company_id = self.seed_scored("both.de", 90, phase=1)
+        self.score(company_id, 5, 2)
+        self.seed_scored("other.de", 50, phase=2)
+        plans, _ = av.prepare(self.conn, limit=1)
+        self.assertEqual(
+            [p.domain for p in plans],
+            ["other.de"],
+            "the better-informed phase must rank, not the higher number",
+        )
+
+    def test_an_unscored_company_sorts_last_but_stays_eligible(self) -> None:
+        self.company("unscored.de")
+        self.seed_scored("scored.de", 1)
+        plans, withheld = av.prepare(self.conn, limit=1)
+        self.assertEqual([p.domain for p in plans], ["scored.de"])
+        self.assertTrue(
+            any(
+                w.domain == "unscored.de" and "no score to rank on" in w.reason
+                for w in withheld
+            )
+        )
+
+    def test_a_limit_at_or_above_the_eligible_count_changes_nothing(self) -> None:
+        self.seed_scored("a.de", 10)
+        self.seed_scored("b.de", 20)
+        unlimited, _ = av.prepare(self.conn)
+        limited, withheld = av.prepare(self.conn, limit=99)
+        self.assertEqual([p.domain for p in unlimited], [p.domain for p in limited])
+        self.assertFalse([w for w in withheld if "--limit" in w.reason])
+
+    def test_the_sent_list_keeps_corpus_order(self) -> None:
+        """Passing a limit must not silently reorder the report."""
+        self.seed_scored("zzz.de", 90)
+        self.seed_scored("aaa.de", 80)
+        plans, _ = av.prepare(self.conn, limit=2)
+        self.assertEqual([p.domain for p in plans], ["aaa.de", "zzz.de"])
+
+    def test_the_dry_run_prints_both_numbers(self) -> None:
+        self.seed_scored("a.de", 10)
+        self.seed_scored("b.de", 20)
+        code, out, err = self.run_cli(dry_run=True, submit=False, limit=1)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("1 companies would be checked", out)
+        self.assertIn("1 more are eligible but outside --limit 1", out)
+
+    def test_a_limit_below_one_is_refused(self) -> None:
+        code, _out, err = self.run_cli(dry_run=True, submit=False, limit=0)
+        self.assertEqual(code, 2)
+        self.assertIn("--limit must be 1 or more", err)
