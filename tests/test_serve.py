@@ -708,3 +708,135 @@ class TestTheWriteEndpointIsGuarded(ServeTestCase):
         with mock.patch.dict(os.environ, {"PORTAL_BASIC_AUTH": ""}):
             code = cli.cmd_serve(self.db_path, "0.0.0.0", 8000, allow_public_bind=True)
         self.assertEqual(code, 2)
+
+
+class TheRenderedBrief(ServeTestCase):
+    """M1.127. `/company/{id}/brief` — the brief the CLI writes, rendered.
+
+    Two sources, one builder: a file under `briefs/` when the operator has
+    exported one, otherwise `brief.render` in memory — the same function
+    `portal brief` calls, so the page and the file cannot become two briefs for
+    one company. **The route never writes.**
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.briefs = self.root / "briefs"
+        self.briefs.mkdir()
+
+    def client(self) -> TestClient:
+        return TestClient(
+            serve.create_app(self.db_path, self.artifacts, briefs_root=self.briefs)
+        )
+
+    def scored(self, domain: str = "muster.de") -> int:
+        """Scored and NOT contact-blocked. `full_company` carries a blocking
+        abstention by design, which `brief.render` refuses — correct, but it
+        is the refusal path, not this one."""
+        company_id = self.company(domain, city="Köln", country="DE")
+        homepage = self.artifact(
+            company_id, "homepage", f"https://{domain}/", "<html>Startseite</html>"
+        )
+        self.signal(
+            company_id, "platform.detected", text="Shopify", artifact_id=homepage
+        )
+        self.signal(
+            company_id, "catalog.product_url_count", num=42, artifact_id=homepage
+        )
+        self.score_now()
+        return company_id
+
+    def test_a_file_brief_is_rendered_as_html(self) -> None:
+        company_id = self.scored()
+        (self.briefs / "muster.de.md").write_text(
+            "# Muster GmbH\n\n## Ausgangslage\n\nEin **Shopify**-Shop.\n\n"
+            "| Feld | Wert |\n|---|---|\n| Ort | Köln |\n",
+            encoding="utf-8",
+        )
+        response = self.client().get(f"/company/{company_id}/brief")
+        self.assertEqual(response.status_code, 200, response.text)
+        page = HTMLParser(response.text)
+        self.assertEqual(page.css_first("article.brief h1").text(), "Muster GmbH")
+        self.assertIn("Ausgangslage", [h.text() for h in page.css("article.brief h2")])
+        self.assertTrue(page.css("article.brief table"))
+        self.assertIn("Köln", response.text)
+        self.assertIn("briefs/muster.de.md", response.text)
+
+    def test_a_company_with_no_file_is_built_in_memory(self) -> None:
+        company_id = self.scored()
+        self.assertFalse((self.briefs / "muster.de.md").exists())
+        response = self.client().get(f"/company/{company_id}/brief")
+        self.assertEqual(response.status_code, 200, response.text)
+        page = HTMLParser(response.text)
+        self.assertTrue(
+            page.css("article.brief h1") or page.css("article.brief h2"),
+            "an in-memory brief must render headings, not an empty document",
+        )
+        self.assertIn("im Speicher erzeugt", response.text)
+
+    def test_the_route_never_writes_to_briefs(self) -> None:
+        """A GET that creates a file turns opening a page into an act with a
+        side effect, and `briefs/` would then hold documents nobody chose."""
+        company_id = self.scored()
+        before = sorted(p.name for p in self.briefs.iterdir())
+        self.client().get(f"/company/{company_id}/brief")
+        self.assertEqual(sorted(p.name for p in self.briefs.iterdir()), before)
+        self.assertEqual(before, [])
+
+    def test_raw_html_in_the_brief_is_escaped(self) -> None:
+        """Brief text carries Impressum values a model read off third-party
+        pages. It is untrusted input and must not become markup."""
+        company_id = self.scored()
+        (self.briefs / "muster.de.md").write_text(
+            "# T\n\n<script>alert(1)</script>\n\n"
+            '<img src=x onerror="alert(2)">\n\nEnde.\n',
+            encoding="utf-8",
+        )
+        response = self.client().get(f"/company/{company_id}/brief")
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        self.assertNotIn("<script>alert(1)</script>", body)
+        self.assertNotIn("<img src=x", body)
+        self.assertIn("&lt;script&gt;", body)
+        self.assertIn("Ende.", body)
+
+    def test_markdown_still_renders_after_escaping(self) -> None:
+        """Escaping the source must not cost the formatting — Markdown's own
+        syntax uses none of `& < >`."""
+        company_id = self.scored()
+        (self.briefs / "muster.de.md").write_text(
+            "# H1\n\n## H2\n\n- eins\n- zwei\n\n**fett** und `code`\n",
+            encoding="utf-8",
+        )
+        page = HTMLParser(self.client().get(f"/company/{company_id}/brief").text)
+        self.assertTrue(page.css("article.brief h1"))
+        self.assertTrue(page.css("article.brief h2"))
+        self.assertEqual(len(page.css("article.brief li")), 2)
+        self.assertTrue(page.css("article.brief strong"))
+        self.assertTrue(page.css("article.brief code"))
+
+    def test_an_unknown_company_is_404(self) -> None:
+        response = self.client().get("/company/98765/brief")
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_refusal_renders_the_reason_not_a_hollow_brief(self) -> None:
+        """M7: a brief that cannot state its basis is not served empty."""
+        company_id = self.company("keinscore.de")
+        response = self.client().get(f"/company/{company_id}/brief")
+        self.assertEqual(response.status_code, 200)
+        page = HTMLParser(response.text)
+        self.assertTrue(page.css_first("div.refusal"), response.text[:400])
+        self.assertFalse(page.css("article.brief"))
+
+    def test_it_carries_a_print_stylesheet(self) -> None:
+        company_id = self.scored()
+        body = self.client().get(f"/company/{company_id}/brief").text
+        self.assertIn("@media print", body)
+        self.assertIn("size: A4", body)
+
+    def test_the_lead_list_and_detail_link_to_it(self) -> None:
+        company_id = self.scored()
+        client = self.client()
+        self.assertIn(f'/company/{company_id}/brief"', client.get("/").text)
+        detail = client.get(f"/company/{company_id}/detail").text
+        self.assertIn("Brief anzeigen", detail)

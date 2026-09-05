@@ -43,6 +43,7 @@
   </td>
   <td>{{ lead.ai_visibility }}</td>
   <td class="hook">{{ lead.hook or '—' }}</td>
+  <td><a href="/company/{{ lead.company_id }}/brief" title="Research-Brief ansehen">Brief</a></td>
   <td>
     <span id="state-{{ lead.company_id }}">{% include "_state.html" %}</span>
   </td>

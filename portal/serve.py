@@ -30,9 +30,11 @@ import base64
 import os
 import secrets
 import sqlite3
+from html import escape
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import markdown
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +46,9 @@ from portal.artifacts import ArtifactStore
 from portal.leadlist import Filters, LeadList, assert_evidence_reachable
 
 HERE = Path(__file__).parent
+#: `portal brief --out briefs/<domain>.md` is the convention every session has
+#: used; the rendered view reads from here and writes nothing.
+BRIEFS_ROOT = Path("briefs")
 TEMPLATES = HERE / "templates"
 STATIC = HERE / "static"
 
@@ -118,7 +123,9 @@ def cross_site(request: Request) -> bool:
 
 
 def create_app(
-    db_path: Path | None = None, artifacts_root: Path | None = None
+    db_path: Path | None = None,
+    artifacts_root: Path | None = None,
+    briefs_root: Path | None = None,
 ) -> FastAPI:
     """Build the app against one database.
 
@@ -139,6 +146,9 @@ def create_app(
     assert_evidence_reachable(conn)
 
     store = ArtifactStore(artifacts_root or config.artifacts_root(path))
+    #: Where `portal brief --out` puts reviewed briefs. **Read only.** The
+    #: route below never creates anything here (M1.127).
+    briefs_root = briefs_root or BRIEFS_ROOT
     app = FastAPI(title="Lead Portal", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -326,6 +336,76 @@ def create_app(
             return HTMLResponse(str(exc), status_code=400)
         lead = lead_list.lead(company_id)
         return render("_detail.html", request, lead=lead, oob=True)
+
+    @app.get("/company/{company_id}/brief", response_class=HTMLResponse)
+    def brief_view(request: Request, company_id: int) -> HTMLResponse:
+        """§9's research brief, rendered (M1.127).
+
+        **File first, memory second, and never a write.** `portal brief --out`
+        puts a reviewed brief in `briefs/`; if one is there it is what the
+        operator has already read and possibly edited, so it is what gets
+        shown. Where there is none the brief is built in memory through
+        `brief.render` — the same function the CLI calls, so the page and the
+        file cannot drift into two briefs for one company.
+
+        **The route never writes to `briefs/`.** A GET that creates a file
+        turns opening a page into an act with a side effect, and the directory
+        would then hold briefs nobody chose to keep, indistinguishable from the
+        ones somebody did. Exporting stays `portal brief --out`.
+
+        A refusal is served as a refusal (M7): a brief that cannot state its
+        basis, or whose contact is blocked, renders the reason rather than a
+        hollow document.
+        """
+        lead_list = read()
+        lead = lead_list.lead(company_id)
+        if lead is None:
+            return HTMLResponse(
+                "<p class='muted'>Unbekannte Firma.</p>", status_code=404
+            )
+        domain = _domain_of(lead_list, company_id) or str(company_id)
+        source, text, refusal = "Datei", None, None
+        stored = briefs_root / f"{domain}.md"
+        try:
+            if stored.is_file():
+                text = stored.read_text(encoding="utf-8")
+            else:
+                source = "im Speicher erzeugt"
+                text = brief.render(lead_list.conn, company_id)
+        except brief.NotScored as exc:
+            refusal = str(exc)
+        except (brief.MissingBasis, brief.ContactBlocked) as exc:
+            refusal = f"⛔ {exc}"
+        except OSError as exc:  # unreadable file — say so, do not fall through
+            refusal = f"Brief-Datei nicht lesbar: {exc}"
+
+        body = None
+        if text is not None:
+            # **Raw HTML is escaped before conversion, not stripped after.**
+            # Python-Markdown 3 has no `safe_mode`, and post-hoc sanitising is
+            # a filter that has to be right about every tag. Escaping the
+            # source first is right by construction: Markdown's own syntax uses
+            # none of `& < >`, so every construct still renders and any markup
+            # in the text arrives as literal characters. Brief text is assembled
+            # from Impressum values a model read off third-party pages, so it
+            # is untrusted input. Escaped rather than stripped, because a legal
+            # name containing `<` should be visible as itself and not silently
+            # vanish from the document an operator is about to act on.
+            body = markdown.markdown(
+                escape(text, quote=False),
+                extensions=["tables", "fenced_code"],
+                output_format="html",
+            )
+        return render(
+            "brief.html",
+            request,
+            lead=lead,
+            domain=domain,
+            source=source,
+            body=body,
+            refusal=refusal,
+            schema_version=version,
+        )
 
     @app.get("/company/{company_id}/brief.md", response_class=PlainTextResponse)
     def brief_export(company_id: int) -> Response:
