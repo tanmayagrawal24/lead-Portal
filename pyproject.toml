@@ -13,6 +13,10 @@ dependencies = [
     "anthropic",
     "pydantic",
     "jinja2",
+    # M1.127: the §9 brief view renders the same Markdown the CLI writes.
+    # Raw HTML is escaped before conversion rather than sanitised after —
+    # see `serve.brief_view`.
+    "markdown",
     # M1.6: approved for M4. The §9 page needs an ASGI server and this is
     # the one FastAPI documents; it is a dev-server dependency of a localhost
     # tool, not a deployment target.

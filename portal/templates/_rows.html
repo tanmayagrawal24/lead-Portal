@@ -5,9 +5,9 @@
 {% endif %}
 {% for lead in leads %}
   {% include "_row.html" %}
-  <tr><td class="detail-cell" colspan="11" id="detail-{{ lead.company_id }}"></td></tr>
+  <tr><td class="detail-cell" colspan="12" id="detail-{{ lead.company_id }}"></td></tr>
 {% else %}
-  <tr><td colspan="11" class="muted" style="padding:22px">
+  <tr><td colspan="12" class="muted" style="padding:22px">
     Keine Firma passt auf diese Filter.
     {% if filters.active %}<a href="/">Filter zurücksetzen</a>{% endif %}
   </td></tr>
