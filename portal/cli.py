@@ -386,9 +386,20 @@ def cmd_extract_p2(
         # THIS run id (B4) and `company_profile` serves a stage's signals only
         # from a finished, un-aborted run (007), so it is closed on success and
         # marked on failure — never left open.
+        # **The stage names the PURPOSE, and that is load-bearing (M1.124).**
+        # `company_profile` chooses one authoritative run per (company, stage)
+        # — deliberately, so a re-run that fails to write a key cannot leave an
+        # older run's value standing as current (A4). That rule assumes one
+        # stage writes one vocabulary. `--purpose homepage` and `--purpose
+        # impressum` write DISJOINT key sets under what used to be one stage
+        # name, so the later run masked the earlier: 36 of 38 companies lost
+        # every `offer.*` signal the homepage batch had just paid for, and
+        # `ai-check` could see 2 of them. Distinct stages give each purpose its
+        # own authoritative run and neither can hide the other.
+        stage = "extract-p2" if purpose == "impressum" else f"extract-p2-{purpose}"
         cursor = conn.execute(
-            "INSERT INTO run (started_at, stage) VALUES (?, 'extract-p2')",
-            (utc_now(),),
+            "INSERT INTO run (started_at, stage) VALUES (?, ?)",
+            (utc_now(), stage),
         )
         run_id = int(cursor.lastrowid or 0)
         try:

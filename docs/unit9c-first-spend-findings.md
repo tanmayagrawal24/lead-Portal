@@ -682,7 +682,7 @@ unapplied; `portal/pagespeed.py` is still unbuilt; `run.pagespeed_calls` still
 exists nowhere; `llm_batch.status = 'balance_exhausted'` is still ahead of its
 writer. **Next free migration: `016`** — unchanged, because 015 already carries
 everything steps 4 and 5 would write and a writerless migration is M1.45(c)
-(§14.5). **Next free amendment: `M1.<124>`** (angle brackets per M1.94, so this
+(§14.5). **Next free amendment: `M1.<125>`** (angle brackets per M1.94, so this
 line is not a citation).
 
 > **UNIT 11 NOTE (2026-09-04) — what has closed since this table was written.**
@@ -1137,7 +1137,7 @@ instrument would inflate the register for a measurement.
 > **UNIT 11 NOTE (2026-09-04).** The next free number this section left standing
 > was taken the same day, by **M1.114** — §10.7b closed at zero by `portal
 > llm-batches` against a real key. That row is the measurement these three
-> sessions were unable to take. **Next free amendment is now `M1.<124>`**
+> sessions were unable to take. **Next free amendment is now `M1.<125>`**
 > (angle brackets per M1.94).
 
 **Dollars spent by this unit, across all three sessions: $0.00.**

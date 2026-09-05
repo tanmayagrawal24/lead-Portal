@@ -345,5 +345,53 @@ class ThePaidPath(ExtractP2CliTestCase):
         self.assertTrue(provider.submitted[0].custom_id.startswith("homepage-"))
 
 
+class TheStageNamesThePurpose(ExtractP2CliTestCase):
+    """M1.124. Two purposes wrote one stage name, and `company_profile` serves
+    one authoritative run per `(company_id, stage)` — so the later purpose
+    masked the earlier one's signals for every company in both batches.
+
+    Invisible with one purpose; appears the instant a second one runs. That is
+    why nine units of tests missed it, and why these tests run BOTH.
+    """
+
+    def test_impressum_keeps_the_original_stage_name(self) -> None:
+        self.company("muster.de")
+        self.submit(FakeProvider(), purpose="impressum")
+        stages = [
+            r[0] for r in self.conn.execute("SELECT stage FROM run ORDER BY id DESC")
+        ]
+        self.assertEqual(stages[0], "extract-p2")
+
+    def test_homepage_gets_its_own_stage(self) -> None:
+        self.company("muster.de")
+        self.submit(FakeProvider(), purpose="homepage")
+        stages = [
+            r[0] for r in self.conn.execute("SELECT stage FROM run ORDER BY id DESC")
+        ]
+        self.assertEqual(stages[0], "extract-p2-homepage")
+
+    def test_the_two_purposes_never_share_a_stage(self) -> None:
+        """The property that matters: whatever the names are, they differ —
+        otherwise `MAX(run_id)` per stage picks one and hides the other."""
+        self.company("muster.de")
+
+        class SecondBatch(FakeProvider):
+            # `llm_batch.provider_batch_id` is UNIQUE; two real submissions
+            # never share an id and the fake must not either.
+            def submit_batch(self, requests, *, clearance):
+                super().submit_batch(requests, clearance=clearance)
+                return "msgbatch_fake_second"
+
+        self.submit(FakeProvider(), purpose="impressum")
+        self.submit(SecondBatch(), purpose="homepage")
+        stages = {
+            r[0]
+            for r in self.conn.execute(
+                "SELECT stage FROM run WHERE stage LIKE 'extract-p2%'"
+            )
+        }
+        self.assertEqual(len(stages), 2, f"both purposes wrote {stages}")
+
+
 if __name__ == "__main__":
     unittest.main()
