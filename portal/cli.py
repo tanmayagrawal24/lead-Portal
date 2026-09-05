@@ -24,6 +24,7 @@ from portal import (
     audit,
     brief,
     config,
+    countries,
     db,
     diff,
     discover,
@@ -1284,6 +1285,7 @@ def _discover_websearch(
     query: str,
     *,
     region: str,
+    country: str | None = None,
     submit: bool,
     dry_run: bool,
     max_calls: int,
@@ -1330,6 +1332,10 @@ def _discover_websearch(
         print(
             f"  rows land as discovery_source='{discover_llm.SOURCE}', city and postal_code NULL"
         )
+        print(
+            "  country: from the domain's TLD, else "
+            + (f"--country {country}" if country else "NULL (no --country given)")
+        )
         floor = discover_llm.unmeasured_floor(
             max_calls, provider="anthropic", model=model
         )
@@ -1371,6 +1377,7 @@ def _discover_websearch(
                 chosen,
                 query,
                 region=region,
+                country=country,
                 max_calls=max_calls,
                 clearance=clearance,
             )
@@ -1419,6 +1426,7 @@ def cmd_discover(
     query: str,
     *,
     region: str,
+    country: str | None = None,
     submit: bool,
     dry_run: bool,
     max_calls: int | None = None,
@@ -1445,6 +1453,7 @@ def cmd_discover(
             path,
             query,
             region=region,
+            country=country,
             submit=submit,
             dry_run=dry_run,
             max_calls=discover_llm.MAX_CALLS if max_calls is None else max_calls,
@@ -1490,7 +1499,12 @@ def cmd_discover(
             return 2
         try:
             report = discover.run(
-                conn, chosen, query, region=region, max_calls=max_calls
+                conn,
+                chosen,
+                query,
+                region=region,
+                country=country,
+                max_calls=max_calls,
             )
         except discover.PlacesError as exc:
             print(f"discover: {exc}", file=sys.stderr)
@@ -2033,6 +2047,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     discover_parser.add_argument("--region", default="", help='e.g. "NRW"')
     discover_parser.add_argument(
+        "--country",
+        default="",
+        choices=("", *countries.COUNTRIES),
+        help="ISO-2 country this run is aimed at, applied to the companies it "
+        "creates where the domain's TLD does not already say (M1.128). "
+        "Distinct from --region, which is free-text search wording",
+    )
+    discover_parser.add_argument(
         "--source",
         choices=("places", "websearch"),
         default="places",
@@ -2212,6 +2234,7 @@ def main(argv: list[str] | None = None) -> int:
             path,
             args.query,
             region=args.region,
+            country=args.country or None,
             submit=args.submit,
             dry_run=args.dry_run,
             max_calls=args.max_calls,

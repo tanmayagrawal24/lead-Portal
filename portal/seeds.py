@@ -17,10 +17,12 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from portal import countries
 from portal.artifacts import utc_now
+from portal.countries import COUNTRIES
 from portal.urls import normalise_domain
 
-COUNTRIES = ("DE", "AT", "CH")
+__all__ = ["COUNTRIES", "Seed", "load", "upsert"]
 
 
 @dataclass(frozen=True)
@@ -97,7 +99,10 @@ def upsert(
                 seed.legal_name,
                 seed.city,
                 seed.postal_code,
-                seed.country,
+                # The CSV's value first: a human asserted it, and a TLD is only
+                # a guess. `derive` fills the blank the 13 existing seed rows
+                # all left (M1.128).
+                seed.country or countries.derive(seed.domain),
                 "seed_csv",
                 query,
                 utc_now(),

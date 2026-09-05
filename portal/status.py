@@ -112,6 +112,7 @@ class Status:
     runs: list[RunRow] = field(default_factory=list)
     batches: list[BatchRow] = field(default_factory=list)
     by_source: list[Count] = field(default_factory=list)
+    by_country: list[Count] = field(default_factory=list)
     by_query: list[Count] = field(default_factory=list)
     coverage: list[Count] = field(default_factory=list)
     flags: list[Count] = field(default_factory=list)
@@ -191,6 +192,21 @@ def read(conn: sqlite3.Connection) -> Status:
         for r in conn.execute(
             "SELECT discovery_source, COUNT(*) FROM company "
             "GROUP BY 1 ORDER BY 2 DESC, 1"
+        )
+    ]
+    # Tri-state, and the third state is the point (M1.59). A NULL country is
+    # "not established" — the domain does not say and no run was tagged — not
+    # "this company is nowhere. It gets a named bucket and a link, because a
+    # bucket you can click is a bucket someone will empty.
+    status.by_country = [
+        Count(
+            str(r[0]) if r[0] else "nicht bestimmt",
+            int(r[1]),
+            href=f"/?country={r[0]}" if r[0] else "",
+        )
+        for r in conn.execute(
+            "SELECT country, COUNT(*) FROM company GROUP BY 1 "
+            "ORDER BY country IS NULL, 2 DESC, 1"
         )
     ]
     status.by_query = [

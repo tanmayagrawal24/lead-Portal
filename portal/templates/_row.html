@@ -31,7 +31,11 @@
       <span class="tag tag-stop" title="Score {{ lead.total }} + Restpotenzial {{ lead.remaining_upside }} bleibt unter der B-Schwelle">Stopp</span>
     {% endif %}
   </td>
-  <td>{{ lead.city or '–' }}</td>
+  {#- Country and city share one cell rather than taking a new column: the
+      lead list is already twelve wide, and `_state.html`'s cell must stay
+      last. They are one fact about where the company is, so one cell. -#}
+  <td>{% with country = lead.country %}{% include "_country.html" %}{% endwith %}
+      {{ lead.city or '–' }}</td>
   <td>{{ lead.platform or '–' }}</td>
   <td>
     {% if lead.blog_last_post %}
