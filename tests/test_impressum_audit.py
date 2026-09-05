@@ -19,7 +19,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from portal import cli, db, impressum_audit, migrate
+from portal import cli, db, impressum_audit, migrate, robots
+from portal.net import Response
 
 IMPRESSUM = """<html><body>
 <h1>Impressum</h1>
@@ -442,3 +443,88 @@ class ImpressumAuditTestCase(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TheStoredRobotsReading(ImpressumAuditTestCase):
+    """M1.122. `policy_for` selected on `http_status = 200`, so a 4xx robots row
+    was invisible to it and became `unavailable` — *nothing is allowed*.
+
+    `robots.for_response` reads the same 4xx as *"an answer: there is no file"*
+    and returns `unrestricted`. **The same 404 therefore allowed the fetch and
+    then forbade everything downstream of it.** Three companies in the corpus
+    sat behind that disagreement with a perfectly good 404 on file.
+    """
+
+    def policy(self, domain: str, *, status: int, body: str = "", url=None):
+        company_id = self.company(domain)
+        self.artifact(
+            company_id,
+            domain,
+            "robots",
+            body,
+            url=url or f"https://{domain}/robots.txt",
+            status=status,
+        )
+        return impressum_audit.policy_for(
+            self.conn, company_id, f"https://{domain}/", self.root
+        )
+
+    def test_a_404_robots_row_allows_everything(self) -> None:
+        """RFC 9309 §2.3.1.2, and the reading `for_response` already had."""
+        policy = self.policy("shop.de", status=404)
+        self.assertIsNone(policy.unavailable)
+        self.assertTrue(policy.allows("https://shop.de/impressum"))
+
+    def test_a_410_robots_row_allows_everything_too(self) -> None:
+        policy = self.policy("shop.de", status=410)
+        self.assertIsNone(policy.unavailable)
+
+    def test_a_503_row_still_allows_nothing(self) -> None:
+        """The tri-state's whole point: unreachable is not absent (M1.59)."""
+        policy = self.policy("shop.de", status=503)
+        self.assertIsNotNone(policy.unavailable)
+        self.assertFalse(policy.allows("https://shop.de/impressum"))
+
+    def test_a_429_row_still_allows_nothing(self) -> None:
+        policy = self.policy("shop.de", status=429)
+        self.assertIsNotNone(policy.unavailable)
+
+    def test_a_200_row_still_decides_by_its_rules(self) -> None:
+        policy = self.policy(
+            "shop.de", status=200, body="User-agent: *\nDisallow: /impressum\n"
+        )
+        self.assertFalse(policy.allows("https://shop.de/impressum"))
+        self.assertTrue(policy.allows("https://shop.de/"))
+
+    def test_a_sibling_origin_is_still_never_substituted(self) -> None:
+        """M1.61 and M1.75 stand: apex and www are separate origins and one
+        does not answer for the other. This fix reads the row's STATUS
+        differently; it does not loosen which row may be read."""
+        company_id = self.company("shop.de")
+        self.artifact(
+            company_id,
+            "shop.de",
+            "robots",
+            "",
+            url="https://shop.de/robots.txt",
+            status=404,
+        )
+        policy = impressum_audit.policy_for(
+            self.conn, company_id, "https://www.shop.de/", self.root
+        )
+        self.assertIsNotNone(policy.unavailable)
+        self.assertIn("www.shop.de", policy.unavailable or "")
+
+    def test_the_live_and_stored_readings_agree_on_every_status(self) -> None:
+        """One expression, both directions — the drift is what this cost."""
+        for status in (200, 301, 404, 410, 429, 500, 503):
+            with self.subTest(status=status):
+                stored = robots.for_stored(status, "" if status == 200 else None)
+                live = robots.for_response(
+                    Response(url="https://shop.de/robots.txt", status=status, body=b"")
+                )
+                self.assertEqual(
+                    stored.unavailable is None,
+                    live.unavailable is None,
+                    f"status {status} reads differently live vs stored",
+                )

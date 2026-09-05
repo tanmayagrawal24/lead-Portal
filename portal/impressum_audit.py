@@ -145,9 +145,8 @@ ORDER BY c.domain, a.id DESC
 # it (`urls.authority_of`, and `fetch.py` filters the same way); re-deriving it
 # in SQL would be a second expression for one fact, which is M1.42's shape.
 _ROBOTS_SQL = """
-SELECT url, body_path FROM artifact
-WHERE company_id = ? AND kind = 'robots' AND http_status = 200
-  AND body_path IS NOT NULL
+SELECT url, body_path, http_status FROM artifact
+WHERE company_id = ? AND kind = 'robots' AND http_status IS NOT NULL
 ORDER BY id DESC
 """
 
@@ -190,8 +189,9 @@ def policy_for(
 
     The two negative outcomes are different objects and must stay that way:
 
-    * `unrestricted` — a robots.txt for this origin was read and states no rules.
-      The shop declared nothing, and everything is allowed.
+    * `unrestricted` — a robots.txt for this origin was read and states no rules,
+      **or the origin answered 4xx**, which is the same statement made by
+      absence (M1.122, RFC 9309 §2.3.1.2). The shop declared nothing.
     * `unavailable` — **no robots.txt for this origin is on disk.** We cannot
       establish whose file this was. Nothing is allowed, and the reason names the
       authority so an operator knows which host to go and fetch.
@@ -204,9 +204,20 @@ def policy_for(
     for row in conn.execute(_ROBOTS_SQL, (company_id,)):
         if authority_of(str(row["url"])) != authority:
             continue
-        return robots_mod.parse(
-            (root / row["body_path"]).read_text(encoding="utf-8", errors="replace")
-        )
+        # M1.122: the status decides, exactly as it does live. A 4xx row is an
+        # ANSWER — this origin serves no robots.txt — and `robots.for_stored`
+        # is the same expression `for_response` uses, so the two cannot drift
+        # again. Only a 200 has a body worth reading.
+        status = int(row["http_status"])
+        body = None
+        if status == 200 and row["body_path"]:
+            body = (root / row["body_path"]).read_text(
+                encoding="utf-8", errors="replace"
+            )
+        elif status == 200:
+            # A 200 whose body never landed says nothing; keep looking.
+            continue
+        return robots_mod.for_stored(status, body)
     # M1.75. A content-hash collapse can absorb this origin's fetch into a
     # sibling's row, so "no row" does not mean "never fetched" — it means the
     # table cannot say, and only a re-fetch can. Over-reporting here costs a

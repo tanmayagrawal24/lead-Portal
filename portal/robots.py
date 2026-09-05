@@ -172,6 +172,26 @@ def _is_unreachable(status: int) -> bool:
     return status == 429 or 500 <= status < 600
 
 
+def for_stored(status: int, body: str | None) -> RobotsPolicy:
+    """The policy a **stored** robots.txt row establishes (M1.122).
+
+    The same rule as `for_response`, applied to a row on disk instead of a live
+    response, and it exists because the two had drifted: `for_response` reads a
+    4xx as *"an answer: there is no file"* and returns `unrestricted`, while
+    `impressum_audit.policy_for` selected on `http_status = 200` and therefore
+    could not see a 4xx row at all — so the same 404, read live, allowed the
+    fetch, and read back from the table, forbade it.
+
+    Three companies in the corpus sat behind that disagreement with a perfectly
+    good 404 on file. **One expression, both directions** (M1.42's shape).
+    """
+    if status == 200:
+        return parse(body)
+    if _is_unreachable(status):
+        return unavailable(f"HTTP {status}")
+    return unrestricted()
+
+
 def for_response(response: Response) -> RobotsPolicy:
     """The §5.2 policy a `robots.txt` fetch attempt establishes (M1.59).
 
