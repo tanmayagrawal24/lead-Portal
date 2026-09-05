@@ -53,6 +53,18 @@
   .band-none { background: repeating-linear-gradient(45deg,#eee,#eee 3px,#f7f7f7 3px,#f7f7f7 6px);
     color: var(--muted); }
 
+  {#- Country. One token per country rather than a generated hue: three values
+      that a person learns by sight beat three colours a person has to decode,
+      and `cc-none` must NOT look like a fourth country — it is "nicht
+      bestimmt", which is an absence, so it is drawn as one (M1.59). -#}
+  .cc { display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
+    padding: 1px 5px; border-radius: 3px; border: 1px solid; vertical-align: 1px; }
+  .cc-DE { color: #6b5400; border-color: #e0cf8a; background: #fdf6df; }
+  .cc-AT { color: #a03030; border-color: #e5aeae; background: #fdeeee; }
+  .cc-CH { color: #2f6b4f; border-color: #a8d5bb; background: #eaf6ef; }
+  .cc-none { color: var(--muted); border-color: var(--line); background: transparent;
+    font-weight: 400; }
+
   .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
     border: 1px solid; margin-right: 4px; white-space: nowrap; }
   .tag-review { color: var(--warn); border-color: #e6c68a; background: #fdf6e9; }
@@ -172,7 +184,7 @@
         <th style="width:56px">Band</th>
         <th class="num" style="width:56px">Score</th>
         <th style="width:64px">Gate</th>
-        <th style="width:110px">Ort</th>
+        <th style="width:132px">Land / Ort</th>
         <th style="width:100px">Plattform</th>
         <th style="width:104px">Letzter Beitrag</th>
         <th style="width:64px">KI</th>

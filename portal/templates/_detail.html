@@ -10,6 +10,14 @@
   <button class="toggle close" hx-get="/company/{{ lead.company_id }}/collapse"
           hx-target="#detail-{{ lead.company_id }}" hx-swap="innerHTML">schließen</button>
 
+  {#- Where this company is, at the top, because every other section here is
+      about what it sells or what it scored and none of them says this. -#}
+  <p class="muted" style="margin:0 0 10px;font-size:12.5px">
+    {% with country = lead.country %}{% include "_country.html" %}{% endwith %}
+    {{ lead.city or 'Ort nicht bestimmt' }}
+    {%- if lead.country %} · <a href="/?country={{ lead.country }}">alle in {{ lead.country }}</a>{% endif %}
+  </p>
+
   {% if lead.contact_blocked %}
     {#- Requirement, not decoration: a block a human cannot see is a block that
         gets worked around by hand, and the trigger would then refuse a call

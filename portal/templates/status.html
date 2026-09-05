@@ -271,6 +271,23 @@
       {% endfor %}
     </ul>
 
+    <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:12px 0 6px">Nach Land</h3>
+    <ul class="counts">
+      {% for row in status.by_country %}
+        <li>
+          <span class="n">{{ row.n }}</span>
+          {% if row.href %}<a href="{{ row.href }}">{{ row.label }}</a>
+          {%- else %}{{ row.label }}{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+    <p class="note">
+      Abgeleitet, nicht gemessen: zuerst die TLD, sonst das Länder-Tag des
+      Discovery-Laufs, sonst NULL. <code>.lu</code> und <code>.li</code> stehen
+      bewusst auf NULL — die Spalte lässt sie noch nicht zu (M1.128). Ein
+      gemessener Wert aus dem Impressum überschreibt die Ableitung.
+    </p>
+
     <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:12px 0 6px">Nach Suchanfrage</h3>
     <table class="status">
       <thead><tr><th>Suchanfrage</th><th class="num">Firmen</th></tr></thead>

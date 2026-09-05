@@ -1,0 +1,83 @@
+-- 021 — the country a company belongs to: a run tag on `run`, and a backfill
+--       of `company.country` from the one piece of evidence every row already
+--       carries.
+--
+-- **THIS MIGRATION SHIPS IN THE SAME COMMIT AS ITS WRITER** (M1.45(c)).
+-- `portal/countries.py` is the rule; `discover` (both sources) and `seeds`
+-- call it. See M1.128.
+--
+-- ─────────────────────────────────────────────────────────────────────────
+-- Measured before the change rather than argued.
+-- ─────────────────────────────────────────────────────────────────────────
+--
+-- `company.country` has existed since migration 001 and 248 of 248 rows hold
+-- NULL. It was never a missing column; it was a column with three writers and
+-- no writer that ran. `discover --source places` fills it from the Places
+-- address and has never been submitted (no Google key, M1.119). `seeds` fills
+-- it from the CSV, whose `country` field the 13 seed rows left blank.
+-- `reconcile` fills it from `impressum.country` and has only ever run against
+-- batches whose payloads carried none. Meanwhile §9's `?country=` filter and
+-- its "Land" dropdown have shipped since M1.41 against a column that is empty,
+-- so the control renders with no options and silently filters nothing.
+--
+-- By TLD the same 248 rows are 157 `.de`, 26 `.ch`, 26 `.at` — 209 answerable
+-- from the domain alone, for no call and no key — and 39 not (`.com` 31,
+-- `.shop` 4, `.eu` 2, `.berlin` 1, and one `.at` behind a subdomain).
+--
+-- ─────────────────────────────────────────────────────────────────────────
+-- Why the set is DE/AT/CH and not DE/AT/CH/LU/LI.
+-- ─────────────────────────────────────────────────────────────────────────
+--
+-- Because widening it is a different unit and a much larger one, and doing
+-- half of it would be worse than doing none. `company.country` carries an
+-- inline `CHECK (country IN ('DE','AT','CH'))` from migration 001, where it
+-- records §5.1's market. SQLite cannot relax an inline CHECK; the only way is
+-- to rebuild `company` — a table FIFTEEN others reference by foreign key —
+-- and `DROP TABLE` with `PRAGMA foreign_keys = ON` performs an implicit
+-- DELETE that fires every `ON DELETE CASCADE` hanging off it. Doing it safely
+-- needs the pragma OFF, which cannot be set inside a transaction, which is
+-- the one guarantee `migrate.apply_pending` is built to give.
+--
+-- So `countries.derive` returns NULL for `.lu` and `.li` — but names them in
+-- `OUT_OF_SCOPE_TLD` and refuses them by name in `countries.normalise`, so
+-- the NULL is a recorded decision rather than a gap. Returning 'LU' instead
+-- would hand a PAID `discover --submit` run a value this column refuses,
+-- failing partway through with rows already bought.
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- 1. The run tag.
+-- ─────────────────────────────────────────────────────────────────────────
+--
+-- `run.country` is the country a discovery run was AIMED at, and it is the
+-- second-choice evidence precisely because it says what the operator was
+-- looking for rather than what was found. It is deliberately NOT `run.region`:
+-- `discover --region` already exists, holds free text ("Deutschland Österreich
+-- Schweiz", "NRW"), and is concatenated into the prompt and stored as
+-- `company.discovery_query`. One flag cannot be both a search phrase and an
+-- ISO-2 tag without one of the two meanings being wrong on every past row.
+--
+-- The CHECK mirrors `company.country`'s exactly, including its silence on LU
+-- and LI, so a tag can never be stored that the companies it would be applied
+-- to could not hold.
+ALTER TABLE run ADD COLUMN country TEXT
+    CHECK (country IS NULL OR country IN ('DE','AT','CH'));
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- 2. The backfill.
+-- ─────────────────────────────────────────────────────────────────────────
+--
+-- `WHERE country IS NULL` is load-bearing, not defensive. A derived value is a
+-- placeholder for a measured one (M1.52's ordering), so this must never
+-- overwrite what `reconcile` read off an Impressum page or what a seed CSV
+-- asserted. Re-running it is then a no-op, which is what keeps `portal init`
+-- idempotent.
+--
+-- These three statements are `countries.from_tld` written in SQL, and two
+-- expressions of one rule is the defect shape this project has now recorded
+-- five times. It cannot be avoided here — the runner applies `.sql` and
+-- nothing else — so it is pinned instead: `test_country.py` asserts that this
+-- migration and `countries.from_tld` agree on every domain in a fixture that
+-- includes each TLD present in the real corpus, so the two cannot drift.
+UPDATE company SET country = 'DE' WHERE country IS NULL AND domain LIKE '%.de';
+UPDATE company SET country = 'AT' WHERE country IS NULL AND domain LIKE '%.at';
+UPDATE company SET country = 'CH' WHERE country IS NULL AND domain LIKE '%.ch';

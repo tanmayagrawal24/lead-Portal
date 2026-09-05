@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
-from portal import ai_visibility, ledger, llm
+from portal import ai_visibility, countries, ledger, llm
 from portal.artifacts import utc_now
 from portal.urls import normalise_domain
 
@@ -290,6 +290,7 @@ def run(
     query: str,
     *,
     region: str = "",
+    country: str | None = None,
     max_calls: int = MAX_CALLS,
     clearance: ledger.LedgerClearance,
     per_run_ceiling_usd: float | None = None,
@@ -329,8 +330,9 @@ def run(
         )
 
     cursor = conn.execute(
-        "INSERT INTO run (started_at, stage, est_cost_usd) VALUES (?, ?, ?)",
-        (utc_now(), STAGE, estimate.total_usd),
+        "INSERT INTO run (started_at, stage, est_cost_usd, country) "
+        "VALUES (?, ?, ?, ?)",
+        (utc_now(), STAGE, estimate.total_usd, country),
     )
     run_id = int(cursor.lastrowid or 0)
     conn.commit()
@@ -382,9 +384,19 @@ def run(
                 inserted = conn.execute(
                     "INSERT INTO company (domain, legal_name, city, postal_code, "
                     "country, discovery_source, discovery_query, discovered_at) "
-                    "VALUES (?,?,NULL,NULL,NULL,?,?,?) "
+                    "VALUES (?,?,NULL,NULL,?,?,?,?) "
                     "ON CONFLICT (domain) DO NOTHING",
-                    (domain, display or None, SOURCE, text, utc_now()),
+                    (
+                        domain,
+                        display or None,
+                        # This source returns a domain and a name and nothing
+                        # else — no address, so no measurement to prefer. The
+                        # TLD, then the run's tag (M1.128).
+                        countries.derive(domain, region=country),
+                        SOURCE,
+                        text,
+                        utc_now(),
+                    ),
                 )
                 report.found.append(Found(domain, display, inserted.rowcount == 1))
             conn.commit()

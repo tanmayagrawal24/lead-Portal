@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from portal import ai_visibility, cli, db, discover_llm, ledger, llm, migrate
+from portal import ai_visibility, cli, countries, db, discover_llm, ledger, llm, migrate
 
 
 def _usage(inp: int = 1000, out: int = 200, searches: int = 2) -> llm.Usage:
@@ -184,9 +184,15 @@ class TheRun(RunTestCase):
         row = self.conn.execute(
             "SELECT city, postal_code, country FROM company"
         ).fetchone()
-        self.assertEqual(
-            tuple(row), (None, None, None), "no address a model made up (M1.52)"
-        )
+        # This source returns a domain and a name and nothing else, so city and
+        # postal_code stay NULL: no address a model made up (M1.52).
+        self.assertEqual((row[0], row[1]), (None, None))
+        # `country` is NOT an exception to that rule — it is not read from the
+        # answer at all. `.de` is a fact about the domain the model named, and
+        # `countries.derive` reads it locally with no call and no trust
+        # (M1.128). A model that had claimed a country would still be ignored.
+        self.assertEqual(row[2], "DE")
+        self.assertEqual(row[2], countries.derive("beispiel.de"))
 
     def test_a_domain_named_by_two_calls_is_one_row_and_one_report_line(self) -> None:
         provider = FakeSearchProvider(

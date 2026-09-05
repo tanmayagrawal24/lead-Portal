@@ -46,6 +46,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from portal import countries
 from portal.artifacts import utc_now
 from portal.urls import normalise_domain
 
@@ -177,12 +178,18 @@ def run(
     query: str,
     *,
     region: str = "",
+    country: str | None = None,
     max_calls: int = MAX_CALLS_PER_RUN,
 ) -> Report:
+    """`region` is the free-text search area, concatenated into the query and
+    stored as provenance. `country` is the ISO-2 tag this run was AIMED at —
+    a different thing, kept in a different column, and used only where the
+    domain and the address both fail to say (M1.128)."""
     text = f"{query} {region}".strip()
     run_id = int(
         conn.execute(
-            "INSERT INTO run (started_at, stage) VALUES (?, ?)", (utc_now(), STAGE)
+            "INSERT INTO run (started_at, stage, country) VALUES (?, ?, ?)",
+            (utc_now(), STAGE, country),
         ).lastrowid
         or 0
     )
@@ -212,12 +219,17 @@ def run(
                 except ValueError:
                     report.unusable += 1
                     continue
-                postal, city, country = _postal_and_city(address)
+                postal, city, place_country = _postal_and_city(address)
+                # The address wins: Places READ it off the place record, and a
+                # measurement outranks a derivation (M1.52's ordering). Only
+                # where it says nothing does the TLD, then the run's tag, get
+                # a turn.
+                resolved = place_country or countries.derive(domain, region=country)
                 cursor = conn.execute(
                     "INSERT INTO company (domain, legal_name, city, postal_code, country, "
                     "discovery_source, discovery_query, discovered_at) "
                     "VALUES (?,?,?,?,?,'places',?,?) ON CONFLICT (domain) DO NOTHING",
-                    (domain, display or None, city, postal, country, text, utc_now()),
+                    (domain, display or None, city, postal, resolved, text, utc_now()),
                 )
                 report.found.append(
                     Found(domain, display, address, cursor.rowcount == 1)

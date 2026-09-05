@@ -1,0 +1,11 @@
+{#- One country badge. Included, not copied, so the lead list and the detail
+    panel cannot drift into two renderings of one value (M1.42).
+
+    An unset country is drawn as an absence and titled as one: `derive` returns
+    NULL both for a `.com` it cannot read and for a `.lu` it is not yet allowed
+    to store, and neither is a claim that the company has no country. -#}
+{%- if country -%}
+  <span class="cc cc-{{ country }}" title="Land: {{ country }}">{{ country }}</span>
+{%- else -%}
+  <span class="cc cc-none" title="Land nicht bestimmt — die Domain sagt es nicht und der Lauf war auf kein Land getaggt">–</span>
+{%- endif -%}
