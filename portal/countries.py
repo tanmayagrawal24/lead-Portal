@@ -19,17 +19,22 @@ page and `verify` confirmed against it — straight into this column, and that i
 correct: a derived value is a placeholder for a measured one, so nothing here
 may overwrite a non-NULL.
 
-WHY THE SET STOPS AT DACH
--------------------------
-`company.country` has carried `CHECK (country IN ('DE','AT','CH'))` since
-migration 001, where it records §5.1's market. `.lu` and `.li` are named in
-`OUT_OF_SCOPE_TLD` rather than silently dropped, because the difference between
-*"we do not handle Luxembourg"* and *"we forgot Luxembourg"* is exactly what
-this file exists to make visible. Returning `'LU'` from `derive` today would
-hand a `discover --submit` run a value the column refuses, turning a PAID run
-into an IntegrityError partway through — the widening has to come first, and it
-is not free: relaxing an inline CHECK means rebuilding `company`, which fifteen
-tables reference by foreign key, with `PRAGMA foreign_keys` off. See M1.128.
+WHERE THE SET STOPS, AND WHY THAT IS A BUSINESS QUESTION
+--------------------------------------------------------
+DACH plus Luxembourg. `.li` is still in `OUT_OF_SCOPE_TLD` — not because
+Liechtenstein is hard (migration 022 widened LU for four characters in one
+CHECK) but because nobody has said it is a market. A constraint widened on the
+chance that something might be in scope stops recording anything.
+
+`OUT_OF_SCOPE_TLD` exists so the difference between *"we do not handle
+Liechtenstein"* and *"we forgot Liechtenstein"* stays visible in the code. What
+it must NOT become is a place where an in-scope country waits: LU sat there
+from M1.128 to M1.129 because the schema could not hold it, and the cost of
+that was one paid discovery run's rows landing untagged. Returning a country
+`company.country` refuses would hand a PAID `discover --submit` run an
+IntegrityError partway through, with rows already bought — so `normalise`
+refuses at the argument and `derive` returns NULL, and the schema is widened
+first. See M1.128 and M1.129.
 """
 
 from __future__ import annotations
@@ -37,14 +42,14 @@ from __future__ import annotations
 # Exactly the column's CHECK, and the reason this is a constant rather than a
 # literal in five places: the schema and the code cannot drift into disagreeing
 # about which countries exist.
-COUNTRIES: tuple[str, ...] = ("DE", "AT", "CH")
+COUNTRIES: tuple[str, ...] = ("DE", "AT", "CH", "LU")
 
-TLD_COUNTRY: dict[str, str] = {"de": "DE", "at": "AT", "ch": "CH"}
+TLD_COUNTRY: dict[str, str] = {"de": "DE", "at": "AT", "ch": "CH", "lu": "LU"}
 
-# German-speaking TLDs the schema cannot store yet. Kept as data, not as a
-# comment, so `is_out_of_scope` is answerable and a test can assert that these
-# derive to NULL deliberately rather than by omission.
-OUT_OF_SCOPE_TLD: dict[str, str] = {"lu": "LU", "li": "LI"}
+# TLDs that name a country the schema deliberately does not store. Kept as
+# data, not as a comment, so `is_out_of_scope` is answerable and a test can
+# assert these derive to NULL by decision rather than by omission.
+OUT_OF_SCOPE_TLD: dict[str, str] = {"li": "LI"}
 
 
 def tld(domain: str) -> str:
@@ -55,8 +60,8 @@ def tld(domain: str) -> str:
 
 
 def from_tld(domain: str) -> str | None:
-    """Step 1. `None` for `.com`, `.shop`, `.eu`, `.berlin` — and for `.lu` and
-    `.li`, which are `OUT_OF_SCOPE_TLD` rather than unknown."""
+    """Step 1. `None` for `.com`, `.shop`, `.eu`, `.berlin` — and for `.li`,
+    which is `OUT_OF_SCOPE_TLD` rather than unknown."""
     return TLD_COUNTRY.get(tld(domain))
 
 
@@ -79,7 +84,7 @@ def normalise(value: str | None) -> str | None:
     if text not in COUNTRIES:
         extra = ""
         if text in OUT_OF_SCOPE_TLD.values():
-            extra = " — named in countries.OUT_OF_SCOPE_TLD, not yet storable (M1.128)"
+            extra = " — named in countries.OUT_OF_SCOPE_TLD, deliberately not a market (M1.129)"
         raise ValueError(
             f"country must be one of {', '.join(COUNTRIES)}; got {text!r}{extra}"
         )
@@ -89,11 +94,11 @@ def normalise(value: str | None) -> str | None:
 def derive(domain: str, *, region: str | None = None) -> str | None:
     """The whole rule: TLD, else the run's country tag, else `None`.
 
-    A TLD the schema cannot store STOPS the derivation rather than falling
-    through. `bank.lu` found by a run tagged DE is not a German company: the
-    TLD answered, and the answer is one this column cannot hold. Falling
+    A TLD the schema does not store STOPS the derivation rather than falling
+    through. `stiftung.li` found by a run tagged DE is not a German company:
+    the TLD answered, and the answer is one this column will not hold. Falling
     through would write a WRONG country where the honest outcome is a missing
-    one, and M1.128's whole argument is that these NULLs are decisions.
+    one, and the point of these NULLs is that they are decisions.
 
     `region` is trusted as already-validated (`normalise` is the gate the CLI
     runs it through); an unknown value here is ignored rather than raising,
