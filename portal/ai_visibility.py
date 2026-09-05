@@ -263,7 +263,11 @@ ORDER BY c.domain
 
 
 def prepare(
-    conn: sqlite3.Connection, *, queries: int = DEFAULT_QUERIES, recheck: bool = False
+    conn: sqlite3.Connection,
+    *,
+    queries: int = DEFAULT_QUERIES,
+    recheck: bool = False,
+    limit: int | None = None,
 ) -> tuple[list[Plan], list[Withheld]]:
     """Who gets checked, and why everyone else does not — printed by the dry run.
 
@@ -272,6 +276,11 @@ def prepare(
     second copy of it. On top of it: no category term means no query (a), and
     an already-checked company is withheld unless `recheck` is passed — a
     re-check is new spend and §7 treats a re-run as one.
+
+    `limit` caps how many of the eligible are actually planned, keeping the
+    highest-scoring (M1.125). It is applied **after** everything above, so a
+    company it defers is reported as eligible-but-out-of-budget rather than as
+    ineligible — see `_apply_limit`.
     """
     admitted, withheld_gate = extract_p2.eligible_companies(conn)
     plans: list[Plan] = []
@@ -315,7 +324,89 @@ def prepare(
                 brand_terms(domain, row["legal_name"]),
             )
         )
+    if limit is not None:
+        plans, deferred = _apply_limit(conn, plans, limit)
+        withheld.extend(deferred)
     return plans, withheld
+
+
+#: The score a company is ranked by when `--limit` has to choose: its latest
+#: Phase-2 total, or its latest Phase-1 total where no Phase-2 exists (M1.125).
+#: Phase 2 first because it is the better-informed number and the one the
+#: operator is looking at; Phase 1 as the fallback rather than exclusion,
+#: because a company with no Phase-2 score yet is exactly the kind this stage
+#: is meant to reach.
+_RANK_SQL = """
+SELECT company_id, MAX(phase) AS best_phase FROM score GROUP BY company_id
+"""
+
+
+def _score_for_ranking(conn: sqlite3.Connection) -> dict[int, float]:
+    """`{company_id: total}` at each company's best available phase."""
+    ranked: dict[int, float] = {}
+    for row in conn.execute(_RANK_SQL):
+        company_id, phase = int(row["company_id"]), int(row["best_phase"])
+        total = conn.execute(
+            "SELECT total FROM score WHERE company_id = ? AND phase = ? "
+            "ORDER BY run_id DESC LIMIT 1",
+            (company_id, phase),
+        ).fetchone()
+        if total is not None:
+            ranked[company_id] = float(total[0])
+    return ranked
+
+
+def _apply_limit(
+    conn: sqlite3.Connection, plans: list[Plan], limit: int
+) -> tuple[list[Plan], list[Withheld]]:
+    """Keep the top `limit` plans by score; return the rest as withheld.
+
+    **Applied AFTER the withheld list is computed, never inside the eligibility
+    loop** (M1.125). The two questions are different and must stay so: *is this
+    company eligible* is about the corpus and answers the same way every run,
+    while *is it in this run's budget* is about money and changes with the
+    ceiling. Folding the cap into eligibility would make a company that was
+    merely too far down the list read as one that could never be checked —
+    the dry run would say "not admitted by §5.4" about a perfectly admissible
+    shop, which is the class of lie A7 spent four instances learning not to
+    tell.
+
+    A plan with no score at all sorts last: it is admissible, but there is no
+    evidence to rank it on, and spending the last slot on an unranked company
+    ahead of a scored one is a choice nothing supports.
+    """
+    if limit >= len(plans):
+        return plans, []
+    ranked = _score_for_ranking(conn)
+    ordered = sorted(
+        plans,
+        key=lambda plan: (-ranked.get(plan.company_id, float("-inf")), plan.domain),
+    )
+    kept, dropped = ordered[:limit], ordered[limit:]
+    cutoff = ranked.get(kept[-1].company_id) if kept else None
+    deferred = [
+        Withheld(
+            plan.company_id,
+            plan.domain,
+            (
+                f"eligible, but outside this run's --limit {limit} "
+                f"(score {ranked.get(plan.company_id, float('nan')):.0f}"
+                + (f", cutoff {cutoff:.0f}" if cutoff is not None else "")
+                + ") — not a finding about the company, only about the budget"
+            )
+            if plan.company_id in ranked
+            else (
+                f"eligible, but outside this run's --limit {limit} "
+                f"(no score to rank on, so it sorts last) — not a finding "
+                f"about the company, only about the budget"
+            ),
+        )
+        for plan in dropped
+    ]
+    # Back to the corpus order the rest of the report uses, so the sent list
+    # does not silently reorder itself when a limit is passed.
+    kept_ids = {plan.company_id for plan in kept}
+    return [plan for plan in plans if plan.company_id in kept_ids], deferred
 
 
 # ── reservation arithmetic (offline) ─────────────────────────────────────

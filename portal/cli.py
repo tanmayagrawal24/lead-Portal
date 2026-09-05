@@ -467,6 +467,7 @@ def _abort_run(conn: sqlite3.Connection, run_id: int, exc: BaseException) -> Non
 def cmd_ai_check(
     path: Path,
     *,
+    limit: int | None = None,
     dry_run: bool,
     submit: bool,
     queries: int = ai_visibility.DEFAULT_QUERIES,
@@ -506,6 +507,13 @@ def cmd_ai_check(
             file=sys.stderr,
         )
         return 2
+    if limit is not None and limit < 1:
+        print(
+            "ai-check: --limit must be 1 or more. It caps how many eligible "
+            "companies this run checks; it is a budget, not a filter.",
+            file=sys.stderr,
+        )
+        return 2
     conn = db.connect(path)
     try:
         version = migrate.current_version(conn)
@@ -517,10 +525,19 @@ def cmd_ai_check(
                 file=sys.stderr,
             )
             return 2
-        plans, withheld = ai_visibility.prepare(conn, queries=queries, recheck=recheck)
+        plans, withheld = ai_visibility.prepare(
+            conn, queries=queries, recheck=recheck, limit=limit
+        )
         label = "--submit" if submit else "--dry-run"
         verb = "will be" if submit else "would be"
-        print(f"ai-check {label}: {len(plans)} companies {verb} checked\n")
+        deferred = sum(1 for w in withheld if "--limit" in w.reason)
+        headline = f"ai-check {label}: {len(plans)} companies {verb} checked"
+        if deferred:
+            # Both numbers, always: "sent (N)" alone reads as "that is all there
+            # was", and the difference between the two is the budget's doing,
+            # not the corpus's (M1.125).
+            headline += f" — {deferred} more are eligible but outside --limit {limit}"
+        print(headline + "\n")
         for plan in plans:
             print(f"  {plan.domain:28} term: {plan.term!r}")
             for query in plan.queries:
@@ -1896,6 +1913,14 @@ def build_parser() -> argparse.ArgumentParser:
         f"{ai_visibility.MAX_QUERIES} (default {ai_visibility.DEFAULT_QUERIES})",
     )
     ai_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="check at most N companies, the highest-scoring first (latest "
+        "Phase-2 total, or Phase-1 where no Phase-2 exists). The rest are "
+        "listed as eligible-but-out-of-budget, not as ineligible",
+    )
+    ai_parser.add_argument(
         "--recheck",
         action="store_true",
         help="include companies already checked; a re-check is new spend",
@@ -2130,6 +2155,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ai-check":
         return cmd_ai_check(
             path,
+            limit=args.limit,
             dry_run=args.dry_run,
             submit=args.submit,
             queries=args.queries,
